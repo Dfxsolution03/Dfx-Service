@@ -1,0 +1,62 @@
+# Role Name Constants
+ROLE_CUSTOMER = "Customer"
+ROLE_STAFF = "Staff"
+ROLE_ADMIN = "Admin"
+ROLE_SUPERADMIN = "SuperAdmin"
+
+# Permission Constants
+PERM_SCHEMES_READ = "schemes:read"
+PERM_SCHEMES_MANAGE = "schemes:manage"
+PERM_PAYMENTS_PAY = "payments:pay"
+PERM_PAYMENTS_MANUAL = "payments:manual"
+PERM_PASSBOOK_READ = "passbook:read"
+PERM_CATALOGUE_READ = "catalogue:read"
+PERM_CATALOGUE_MANAGE = "catalogue:manage"
+PERM_ORDERS_CREATE = "orders:create"
+PERM_ORDERS_READ = "orders:read"
+PERM_CUSTOMERS_MANAGE = "customers:manage"
+PERM_TENANTS_MANAGE = "tenants:manage"
+PERM_BRANDING_MANAGE = "branding:manage"
+
+# Permission Mappings by Role
+ROLE_PERMISSIONS_MAP = {
+    ROLE_CUSTOMER: [
+        PERM_SCHEMES_READ,
+        PERM_PAYMENTS_PAY,
+        PERM_PASSBOOK_READ,
+        PERM_CATALOGUE_READ,
+        PERM_ORDERS_CREATE,
+        PERM_ORDERS_READ,
+    ],
+    ROLE_STAFF: [
+        PERM_SCHEMES_READ,
+        PERM_PAYMENTS_MANUAL,
+        PERM_PASSBOOK_READ,
+        PERM_CATALOGUE_READ,
+        PERM_ORDERS_READ,
+    ],
+    ROLE_ADMIN: [
+        PERM_SCHEMES_READ,
+        PERM_SCHEMES_MANAGE,
+        PERM_PAYMENTS_MANUAL,
+        PERM_PASSBOOK_READ,
+        PERM_CATALOGUE_READ,
+        PERM_CATALOGUE_MANAGE,
+        PERM_ORDERS_READ,
+        PERM_CUSTOMERS_MANAGE,
+    ],
+    ROLE_SUPERADMIN: [
+        PERM_SCHEMES_READ,
+        PERM_SCHEMES_MANAGE,
+        PERM_PAYMENTS_PAY,
+        PERM_PAYMENTS_MANUAL,
+        PERM_PASSBOOK_READ,
+        PERM_CATALOGUE_READ,
+        PERM_CATALOGUE_MANAGE,
+        PERM_ORDERS_CREATE,
+        PERM_ORDERS_READ,
+        PERM_CUSTOMERS_MANAGE,
+        PERM_TENANTS_MANAGE,
+        PERM_BRANDING_MANAGE,
+    ],
+}

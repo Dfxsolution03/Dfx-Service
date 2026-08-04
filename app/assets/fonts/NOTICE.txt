@@ -1,0 +1,29 @@
+Jewellery Catalogue & Marketing Studio — bundled fonts
+=======================================================
+
+These font files are vendored locally so the Design Studio's typography
+renders identically offline, with no internet font loading at request time.
+All three families are open-license (SIL Open Font License 1.1) and sourced
+from the Google Fonts repository (github.com/google/fonts) at the paths
+below. Each family's own OFL.txt (copied alongside as OFL-<Family>.txt) is
+the authoritative license text — reproduced here per OFL's own distribution
+requirement to keep the license bundled with the font.
+
+Playfair Display (serif, luxury/editorial)
+  File:   PlayfairDisplay-Variable.ttf
+  Source: ofl/playfairdisplay/PlayfairDisplay[wght].ttf
+  Notes:  Variable font (weight axis 400-900). catalogue_render_service.py
+          sets the weight axis for FONT_WEIGHT=bold; falls back to the
+          font's default instance if variation isn't supported by the
+          FreeType build in a given deployment environment.
+
+Poppins (sans-serif, clean/modern)
+  Files:  Poppins-Regular.ttf, Poppins-Medium.ttf, Poppins-Bold.ttf
+  Source: ofl/poppins/Poppins-{Regular,Medium,Bold}.ttf
+  Notes:  Three real static weights — no variation-axis fallback needed.
+
+Great Vibes (script/display, festive/wedding)
+  File:   GreatVibes-Regular.ttf
+  Source: ofl/greatvibes/GreatVibes-Regular.ttf
+  Notes:  Single weight only. A FONT_WEIGHT=bold request against this
+          family renders at the same (only) weight — documented, not a bug.

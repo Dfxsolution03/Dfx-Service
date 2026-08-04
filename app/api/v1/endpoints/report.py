@@ -1,0 +1,221 @@
+from datetime import date
+from typing import Optional
+from fastapi import APIRouter, Depends, Query, status
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.database import get_async_db
+from app.models.auth import User
+from app.permissions.dependencies import require_admin_only
+from app.schemas.auth import StandardSuccessResponse
+from app.schemas.report import ReportPeriod
+from app.schemas.export import ExportFormat
+from app.services.report_service import ReportService
+
+router = APIRouter()
+
+
+# All endpoints are reusable, general-purpose report types (not one-per-chart) —
+# the Admin Reports and Admin Analytics pages each compose their view from
+# whichever of these responses they need. See SESSION_HANDOFF.md Module 12.
+
+@router.get(
+    "/reports/dashboard-summary",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Dashboard Summary (Admin)",
+    description="Composed revenue/enrollment/gold-accumulation summary. Reserved as a reusable foundation for a future Admin Dashboard module.",
+)
+async def get_dashboard_summary(
+    period: Optional[ReportPeriod] = Query(None, description="today | this_week | this_month | this_year"),
+    date_from: Optional[date] = Query(None, description="Custom range start (requires date_to)"),
+    date_to: Optional[date] = Query(None, description="Custom range end (requires date_from)"),
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_dashboard_summary(db, current_user, period, date_from, date_to)
+    return StandardSuccessResponse(
+        success=True,
+        message="Dashboard summary retrieved successfully",
+        data={"summary": data.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/reports/payment-summary",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Payment Summary (Admin)",
+    description="Revenue, outstanding dues, avg installment size, and a trend series. Feeds the Reports page KPIs/chart and the Analytics page's avg-installment KPI.",
+)
+async def get_payment_summary(
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_payment_summary(db, current_user, period, date_from, date_to)
+    return StandardSuccessResponse(
+        success=True,
+        message="Payment summary retrieved successfully",
+        data={"summary": data.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/reports/top-customers",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Top Customers by Investment (Admin)",
+    description="Ranks scheme enrollments by SUCCESS payment total within the range. Feeds the Reports page's Top Customers table.",
+)
+async def get_top_customers(
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    limit: int = Query(10, ge=1, le=50),
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_top_customers(db, current_user, period, date_from, date_to, limit)
+    return StandardSuccessResponse(
+        success=True,
+        message="Top customers retrieved successfully",
+        data={"report": data.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/reports/enrollment-summary",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Enrollment Summary (Admin)",
+    description="Enrollment status counts, retention rate, and a new-enrollments trend. Feeds the Reports page's Active Passbooks KPI and the Analytics page's retention KPI + weekly trend chart.",
+)
+async def get_enrollment_summary(
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_enrollment_summary(db, current_user, period, date_from, date_to)
+    return StandardSuccessResponse(
+        success=True,
+        message="Enrollment summary retrieved successfully",
+        data={"summary": data.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/reports/gold-rate-trend",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Gold Rate Trend (Admin)",
+    description="Daily 24K gold rate history for the range. Reusable foundation, not consumed by a chart in Module 12.",
+)
+async def get_gold_rate_trend(
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_gold_rate_trend(db, current_user, period, date_from, date_to)
+    return StandardSuccessResponse(
+        success=True,
+        message="Gold rate trend retrieved successfully",
+        data={"report": data.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/reports/scheme-summary",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Scheme Summary (Admin)",
+    description="Per-scheme active enrollment counts and collections within the range. Reusable foundation, not consumed by a chart in Module 12.",
+)
+async def get_scheme_summary(
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_scheme_summary(db, current_user, period, date_from, date_to)
+    return StandardSuccessResponse(
+        success=True,
+        message="Scheme summary retrieved successfully",
+        data={"report": data.model_dump(mode="json")},
+    )
+
+
+# ─── Export (Module 15) ───
+# Reusable export infrastructure — see app/services/export_service.py. Each
+# endpoint below fetches data through the exact same ReportService method its
+# sibling display endpoint above uses, then hands it to the shared
+# ExportService. No export-specific business logic lives here.
+
+@router.get(
+    "/reports/export/reports-summary",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Export Reports Summary (Admin)",
+    description="Downloadable Top Customers table (the same data behind /reports/top-customers) as CSV, Excel, or Markdown. Feeds the Admin Reports page's Export buttons.",
+)
+async def export_reports_summary(
+    format: ExportFormat = Query("excel"),
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    limit: int = Query(10, ge=1, le=50),
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    file = await ReportService.export_reports_summary(db, current_user, period, date_from, date_to, limit, format)
+    return StandardSuccessResponse(
+        success=True,
+        message="Export generated successfully",
+        data={"export": file.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/reports/export/analytics-summary",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Export Analytics Summary (Admin)",
+    description="Downloadable KPI table (Conversion Funnel, Retention, Avg Installment Size, Redemption Velocity) as CSV, Excel, or Markdown. Feeds the Admin Analytics page's Export button.",
+)
+async def export_analytics_summary(
+    format: ExportFormat = Query("excel"),
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    file = await ReportService.export_analytics_summary(db, current_user, format)
+    return StandardSuccessResponse(
+        success=True,
+        message="Export generated successfully",
+        data={"export": file.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/reports/export/dashboard-summary",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Export Dashboard Summary (Admin)",
+    description="Downloadable today-scoped KPI table as CSV, Excel, or Markdown. Feeds the Admin Dashboard's Export Report button.",
+)
+async def export_dashboard_summary(
+    format: ExportFormat = Query("excel"),
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    file = await ReportService.export_dashboard_summary(db, current_user, format)
+    return StandardSuccessResponse(
+        success=True,
+        message="Export generated successfully",
+        data={"export": file.model_dump(mode="json")},
+    )
