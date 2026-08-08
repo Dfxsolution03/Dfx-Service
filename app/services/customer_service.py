@@ -39,6 +39,9 @@ from app.schemas.customer import (
     AdminCustomerPaginationInfo,
     TenantProfileResponse,
     TenantProfileUpdateRequest,
+    BranchCreateRequest,
+    BranchUpdateRequest,
+    BranchStatusUpdateRequest,
 )
 
 
@@ -757,4 +760,131 @@ class CustomerService:
 
         await db.commit()
         await db.refresh(tenant)
+        return TenantProfileResponse.model_validate(tenant)
+
+    # ─── Phase 7 — Admin Branch Management ───
+
+    @staticmethod
+    async def get_branches_for_admin(
+        db: AsyncSession, current_user: User
+    ) -> List[BranchResponseItem]:
+        """Admin: every branch for their own tenant, including inactive
+        ones — distinct from get_branches, the active-only customer locator."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        branches = await CustomerRepository.get_all_tenant_branches(db, current_user.tenant_id)
+        return [BranchResponseItem.model_validate(b) for b in branches]
+
+    @staticmethod
+    async def create_branch_for_admin(
+        db: AsyncSession, current_user: User, req: BranchCreateRequest
+    ) -> BranchResponseItem:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        branch_id = f"brn_{uuid.uuid4().hex[:12]}"
+        branch = Branch(
+            id=branch_id,
+            tenant_id=current_user.tenant_id,
+            name=req.name,
+            address=req.address,
+            phone=req.phone,
+            latitude=req.latitude,
+            longitude=req.longitude,
+            is_active=True,
+        )
+        await CustomerRepository.create_branch(db, branch)
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="BRANCH_CREATE",
+            target_entity="branches",
+            target_id=branch_id,
+            before_state=None,
+            after_state={"name": req.name, "address": req.address},
+        )
+
+        await db.commit()
+        await db.refresh(branch)
+        return BranchResponseItem.model_validate(branch)
+
+    @staticmethod
+    async def update_branch_for_admin(
+        db: AsyncSession, current_user: User, branch_id: str, req: BranchUpdateRequest
+    ) -> BranchResponseItem:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        branch = await CustomerRepository.get_branch_by_id_for_tenant(db, current_user.tenant_id, branch_id)
+        if not branch:
+            raise ResourceNotFoundException(f"Branch ID '{branch_id}' not found")
+
+        before_state = {"name": branch.name, "address": branch.address, "phone": branch.phone}
+
+        if req.name is not None:
+            branch.name = req.name
+        if req.address is not None:
+            branch.address = req.address
+        if req.phone is not None:
+            branch.phone = req.phone
+        if req.latitude is not None:
+            branch.latitude = req.latitude
+        if req.longitude is not None:
+            branch.longitude = req.longitude
+
+        after_state = {"name": branch.name, "address": branch.address, "phone": branch.phone}
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="BRANCH_UPDATE",
+            target_entity="branches",
+            target_id=branch_id,
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+        await db.commit()
+        await db.refresh(branch)
+        return BranchResponseItem.model_validate(branch)
+
+    @staticmethod
+    async def set_branch_status_for_admin(
+        db: AsyncSession, current_user: User, branch_id: str, req: BranchStatusUpdateRequest
+    ) -> BranchResponseItem:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        branch = await CustomerRepository.get_branch_by_id_for_tenant(db, current_user.tenant_id, branch_id)
+        if not branch:
+            raise ResourceNotFoundException(f"Branch ID '{branch_id}' not found")
+
+        before_state = {"is_active": branch.is_active}
+        branch.is_active = req.is_active
+        after_state = {"is_active": branch.is_active}
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="BRANCH_ACTIVATE" if req.is_active else "BRANCH_DEACTIVATE",
+            target_entity="branches",
+            target_id=branch_id,
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+        await db.commit()
+        await db.refresh(branch)
+        return BranchResponseItem.model_validate(branch)
         return TenantProfileResponse.model_validate(tenant)

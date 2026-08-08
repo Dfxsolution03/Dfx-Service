@@ -15,6 +15,9 @@ from app.schemas.customer import (
     ChangePasswordRequest,
     KycDocumentSubmitRequest,
     TenantProfileUpdateRequest,
+    BranchCreateRequest,
+    BranchUpdateRequest,
+    BranchStatusUpdateRequest,
 )
 from app.services.customer_service import CustomerService
 
@@ -425,4 +428,86 @@ async def update_tenant_profile(
         success=True,
         message="Tenant profile updated successfully",
         data={"tenant": profile.model_dump()},
+    )
+
+
+# 8. Admin Branch Management (Phase 7)
+@router.get(
+    "/admin/branches",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List Branches (Admin)",
+    description="All branches for the admin's own tenant, including inactive ones.",
+)
+async def list_branches_admin(
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    branches = await CustomerService.get_branches_for_admin(db, current_user)
+    return StandardSuccessResponse(
+        success=True,
+        message="Branches retrieved successfully",
+        data={"branches": [b.model_dump() for b in branches]},
+    )
+
+
+@router.post(
+    "/admin/branches",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create Branch (Admin)",
+    description="Creates a new branch under the admin's own tenant.",
+)
+async def create_branch_admin(
+    req: BranchCreateRequest,
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    branch = await CustomerService.create_branch_for_admin(db, current_user, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Branch created successfully",
+        data={"branch": branch.model_dump()},
+    )
+
+
+@router.put(
+    "/admin/branches/{branch_id}",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update Branch (Admin)",
+    description="Updates a branch's details. Own-tenant only.",
+)
+async def update_branch_admin(
+    branch_id: str,
+    req: BranchUpdateRequest,
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    branch = await CustomerService.update_branch_for_admin(db, current_user, branch_id, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Branch updated successfully",
+        data={"branch": branch.model_dump()},
+    )
+
+
+@router.put(
+    "/admin/branches/{branch_id}/status",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Activate / Deactivate Branch (Admin)",
+    description="Sets a branch's active status. Own-tenant only.",
+)
+async def set_branch_status_admin(
+    branch_id: str,
+    req: BranchStatusUpdateRequest,
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    branch = await CustomerService.set_branch_status_for_admin(db, current_user, branch_id, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Branch status updated successfully",
+        data={"branch": branch.model_dump()},
     )

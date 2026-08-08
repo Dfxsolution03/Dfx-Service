@@ -134,6 +134,30 @@ class CustomerRepository:
         result = await db.execute(stmt)
         return list(result.scalars().all())
 
+    # ─── Phase 7 — Admin Branch Management ───
+
+    @staticmethod
+    async def get_all_tenant_branches(db: AsyncSession, tenant_id: str) -> List[Branch]:
+        """Admin: every branch for the tenant including inactive ones —
+        distinct from get_tenant_branches, which is the customer-facing
+        locator and deliberately only returns active branches."""
+        stmt = select(Branch).where(Branch.tenant_id == tenant_id).order_by(Branch.name)
+        result = await db.execute(stmt)
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def get_branch_by_id_for_tenant(
+        db: AsyncSession, tenant_id: str, branch_id: str
+    ) -> Optional[Branch]:
+        stmt = select(Branch).where(Branch.id == branch_id, Branch.tenant_id == tenant_id)
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def create_branch(db: AsyncSession, branch: Branch) -> Branch:
+        db.add(branch)
+        return branch
+
     # ─── Phase 6C / Module 33 — Admin Customer Management ───
 
     @staticmethod

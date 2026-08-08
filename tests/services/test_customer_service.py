@@ -24,6 +24,9 @@ from app.schemas.customer import (
     KYCRejectRequest,
     AddressCreateRequest,
     AddressUpdateRequest,
+    BranchCreateRequest,
+    BranchUpdateRequest,
+    BranchStatusUpdateRequest,
 )
 from app.services.customer_service import CustomerService
 from app.exceptions.base import ResourceNotFoundException, ConflictException
@@ -353,3 +356,62 @@ class TestBranchService:
             assert hasattr(branch, "id")
             assert hasattr(branch, "name")
             assert hasattr(branch, "is_active")
+
+
+class TestAdminBranchManagement:
+
+    async def test_create_then_appears_in_admin_list(
+        self, db_session: AsyncSession, admin_user: User
+    ):
+        created = await CustomerService.create_branch_for_admin(
+            db_session, admin_user,
+            BranchCreateRequest(name="Test Branch", address="123 MG Road", phone="9876543210", latitude=12.9, longitude=77.6),
+        )
+        assert created.is_active is True
+
+        all_branches = await CustomerService.get_branches_for_admin(db_session, admin_user)
+        assert any(b.id == created.id for b in all_branches)
+
+    async def test_update_branch(self, db_session: AsyncSession, admin_user: User):
+        created = await CustomerService.create_branch_for_admin(
+            db_session, admin_user,
+            BranchCreateRequest(name="Old Name", address="Old Address, City", phone="9876543210", latitude=12.9, longitude=77.6),
+        )
+        updated = await CustomerService.update_branch_for_admin(
+            db_session, admin_user, created.id, BranchUpdateRequest(name="New Name")
+        )
+        assert updated.name == "New Name"
+        assert updated.address == "Old Address, City"
+
+    async def test_update_nonexistent_branch_raises_not_found(
+        self, db_session: AsyncSession, admin_user: User
+    ):
+        with pytest.raises(ResourceNotFoundException):
+            await CustomerService.update_branch_for_admin(
+                db_session, admin_user, "brn_does_not_exist_xyz", BranchUpdateRequest(name="Nonexistent")
+            )
+
+    async def test_deactivate_then_reactivate_branch(
+        self, db_session: AsyncSession, admin_user: User
+    ):
+        created = await CustomerService.create_branch_for_admin(
+            db_session, admin_user,
+            BranchCreateRequest(name="Togglable", address="Some Address, City", phone="9876543210", latitude=12.9, longitude=77.6),
+        )
+        deactivated = await CustomerService.set_branch_status_for_admin(
+            db_session, admin_user, created.id, BranchStatusUpdateRequest(is_active=False)
+        )
+        assert deactivated.is_active is False
+
+        # Deactivated branches must not appear in the customer-facing (active-only) locator...
+        active_only = await CustomerService.get_branches(db_session, admin_user)
+        assert not any(b.id == created.id for b in active_only)
+
+        # ...but must still appear in the admin's full list.
+        all_branches = await CustomerService.get_branches_for_admin(db_session, admin_user)
+        assert any(b.id == created.id for b in all_branches)
+
+        reactivated = await CustomerService.set_branch_status_for_admin(
+            db_session, admin_user, created.id, BranchStatusUpdateRequest(is_active=True)
+        )
+        assert reactivated.is_active is True

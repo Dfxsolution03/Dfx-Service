@@ -201,6 +201,28 @@ class BranchResponseItem(BaseModel):
         from_attributes = True
 
 
+# ─── Phase 7 — Admin Branch Management ───
+
+class BranchCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=100)
+    address: str = Field(..., min_length=5, max_length=500)
+    phone: str = Field(..., min_length=10, max_length=20)
+    latitude: float = Field(..., ge=-90, le=90)
+    longitude: float = Field(..., ge=-180, le=180)
+
+
+class BranchUpdateRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=2, max_length=100)
+    address: Optional[str] = Field(None, min_length=5, max_length=500)
+    phone: Optional[str] = Field(None, min_length=10, max_length=20)
+    latitude: Optional[float] = Field(None, ge=-90, le=90)
+    longitude: Optional[float] = Field(None, ge=-180, le=180)
+
+
+class BranchStatusUpdateRequest(BaseModel):
+    is_active: bool
+
+
 # ─── Phase 6C / Module 33 — Admin Customer Management ───
 
 class AdminCustomerListItem(BaseModel):
