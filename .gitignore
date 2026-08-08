@@ -25,6 +25,7 @@ ENV/
 # ==========================
 .env
 .env.local
+.env.production
 .env.*.local
 
 # Keep example
@@ -68,3 +69,9 @@ dist/
 # Test Credentials
 # ==========================
 qa-test-credentials.txt
+
+# ==========================
+# Mobile app (separate Git repository, contains its own duplicate
+# development-only backend copy — never tracked from the main backend repo)
+# ==========================
+Jros-Mobile-App/

@@ -1,0 +1,59 @@
+# =============================================================================
+# docker-compose.override.yml — Development overrides
+#
+# Docker Compose automatically merges this file on top of docker-compose.yml
+# when you run:
+#   docker compose up          (or docker compose up -d)
+#
+# This file is intentionally NOT used in production. To run production-only:
+#   docker compose -f docker-compose.yml up -d
+#
+# What this file adds for local development:
+#   - Source code volume mount  → code changes reflected without rebuild
+#   - Hot-reload via --reload   → uvicorn watches app/ for changes
+#   - SKIP_MIGRATIONS=true      → run alembic manually; avoids migration
+#                                 noise on every `docker compose up`
+# =============================================================================
+
+services:
+  backend:
+    # Override the production ENTRYPOINT with a direct uvicorn command that
+    # enables hot-reload. The entrypoint.sh is bypassed here so migrations
+    # must be run manually in dev:
+    #
+    #   docker compose exec backend alembic upgrade head
+    #
+    command:
+      - uvicorn
+      - app.main:app
+      - --host
+      - "0.0.0.0"
+      - --port
+      - "8000"
+      - --reload
+      - --reload-dir
+      - app
+
+    environment:
+      # Signal to the entrypoint (when used) and application that this is dev.
+      - ENVIRONMENT=development
+      - DEBUG=True
+      # Prevent automatic migrations in the override entrypoint path if ever
+      # the command is removed and entrypoint.sh is restored.
+      - SKIP_MIGRATIONS=true
+
+    volumes:
+      # Mount source code into the container — edits are reflected immediately.
+      # The named volume for uploads is defined in docker-compose.yml and is
+      # inherited here; no need to re-declare it.
+      - .:/app
+      # Re-declare the uploads named volume so it isn't masked by the source
+      # mount above (source mount would shadow /app/uploads otherwise).
+      - uploads_data:/app/uploads
+
+    # Dev containers don't need log rotation — keep it simple.
+    logging:
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "2"

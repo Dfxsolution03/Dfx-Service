@@ -1,18 +1,24 @@
+import math
 import uuid
 from datetime import datetime, timezone
-from typing import List, Optional
-from sqlalchemy import select
+from typing import List, Optional, Tuple
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.auth import User, Tenant
-from app.models.customer import KYCRecord, UserAddress, Branch
+from app.core.security import hash_password, verify_password
+from app.models.auth import User, Tenant, RefreshToken
+from app.models.customer import KYCRecord, UserAddress, Branch, KycDocument
+from app.models.payment import STATUS_SUCCESS as PAYMENT_SUCCESS
 from app.repositories.customer_repository import CustomerRepository
 from app.repositories.audit_repository import AuditRepository
+from app.repositories.enrollment_repository import EnrollmentRepository
+from app.repositories.payment_repository import PaymentRepository
 from app.exceptions.base import (
     ResourceNotFoundException,
     ConflictException,
     ValidationException,
     ForbiddenException,
+    UnauthorizedException,
 )
 from app.schemas.customer import (
     ProfileUpdateRequest,
@@ -25,6 +31,14 @@ from app.schemas.customer import (
     AddressUpdateRequest,
     AddressResponse,
     BranchResponseItem,
+    ChangePasswordRequest,
+    KycDocumentSubmitRequest,
+    KycDocumentResponse,
+    AdminCustomerListItem,
+    AdminCustomerDetailResponse,
+    AdminCustomerPaginationInfo,
+    TenantProfileResponse,
+    TenantProfileUpdateRequest,
 )
 
 
@@ -515,3 +529,232 @@ class CustomerService:
 
         branches = await CustomerRepository.get_tenant_branches(db, current_user.tenant_id)
         return [BranchResponseItem.model_validate(b) for b in branches]
+
+    # ─── Phase 6A / Module 31: Change Password ───
+
+    @staticmethod
+    async def change_password(
+        db: AsyncSession, current_user: User, req: ChangePasswordRequest
+    ) -> None:
+        """Verifies the old password against the stored hash, hashes the new
+        password with the exact same core.security helpers auth_service.py
+        already uses, revokes every existing refresh token for this user
+        (reusing the same bulk-revoke pattern AuthService.reset_password
+        already established for "password change invalidates all sessions"),
+        and audit-logs the change. Does not touch auth_service.py or the
+        login/JWT code path itself — this is a customer-in-session
+        convenience action on top of the same primitives, not a new flow."""
+        if not verify_password(req.old_password, current_user.hashed_password):
+            raise UnauthorizedException("Current password is incorrect")
+
+        current_user.hashed_password = hash_password(req.new_password)
+
+        await db.execute(
+            update(RefreshToken)
+            .where(RefreshToken.user_id == current_user.id, RefreshToken.is_revoked == False)  # noqa: E712
+            .values(is_revoked=True)
+        )
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="PASSWORD_CHANGE",
+            target_entity="users",
+            target_id=current_user.id,
+            before_state=None,
+            after_state=None,
+        )
+
+        await db.commit()
+
+    # ─── Phase 6A / Module 31: KYC Document Submission (metadata only) ───
+
+    @staticmethod
+    async def submit_kyc_document(
+        db: AsyncSession, current_user: User, req: KycDocumentSubmitRequest
+    ) -> KycDocumentResponse:
+        """Persists document metadata only — document_url is caller-supplied,
+        no upload handling or storage provider call, per spec (explicitly
+        deferred, same pattern as Tenant.logo_url in Module 29)."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        doc_id = f"kdoc_{uuid.uuid4().hex[:12]}"
+        document = KycDocument(
+            id=doc_id,
+            tenant_id=current_user.tenant_id,
+            user_id=current_user.id,
+            document_type=req.document_type,
+            document_url=req.document_url,
+            verification_status="PENDING",
+        )
+        await CustomerRepository.create_kyc_document(db, document)
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="KYC_DOCUMENT_SUBMIT",
+            target_entity="kyc_documents",
+            target_id=doc_id,
+            before_state=None,
+            after_state={"document_type": req.document_type},
+        )
+
+        await db.commit()
+        await db.refresh(document)
+        return KycDocumentResponse.model_validate(document)
+
+    # ─── Phase 6C / Module 33: Admin Customer Management ───
+
+    @staticmethod
+    async def get_customers_for_admin(
+        db: AsyncSession, current_user: User, page: int, limit: int, search: Optional[str]
+    ) -> Tuple[List[AdminCustomerListItem], AdminCustomerPaginationInfo]:
+        """Admin: paginated, searchable list of the tenant's own customers.
+        Never accepts a tenant_id from the caller — always current_user's."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        customers, total = await CustomerRepository.get_customers_by_tenant(
+            db, current_user.tenant_id, page, limit, search
+        )
+        total_pages = math.ceil(total / limit) if limit else 0
+        pagination = AdminCustomerPaginationInfo(
+            page=page, page_size=limit, total_items=total, total_pages=total_pages
+        )
+        return [AdminCustomerListItem.model_validate(c) for c in customers], pagination
+
+    @staticmethod
+    async def get_customer_detail_for_admin(
+        db: AsyncSession, current_user: User, customer_id: str
+    ) -> AdminCustomerDetailResponse:
+        """Admin: single customer's profile + KYC status + enrollment/investment
+        summary, own-tenant only. Reuses EnrollmentRepository/PaymentRepository's
+        already-customer-scoped methods — same composition pattern as
+        DashboardService, no new aggregation queries needed."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        customer = await CustomerRepository.get_customer_by_id_for_tenant(
+            db, current_user.tenant_id, customer_id
+        )
+        if not customer:
+            raise ResourceNotFoundException(f"Customer ID '{customer_id}' not found")
+
+        enrollments = await EnrollmentRepository.get_enrollments_by_customer(
+            db, current_user.tenant_id, customer_id
+        )
+        payments = await PaymentRepository.get_payments_by_customer(
+            db, current_user.tenant_id, customer_id
+        )
+        total_invested = sum(p.amount for p in payments if p.payment_status == PAYMENT_SUCCESS)
+
+        return AdminCustomerDetailResponse(
+            id=customer.id,
+            name=customer.name,
+            email=customer.email,
+            phone=customer.phone,
+            kyc_status=customer.kyc_status,
+            member_since=customer.member_since,
+            avatar_url=customer.avatar_url,
+            is_active=customer.is_active,
+            enrollment_count=len(enrollments),
+            total_invested=total_invested,
+        )
+
+    # ─── Phase 6C / Module 33: Vendor/Tenant Self-Service Profile ───
+
+    @staticmethod
+    async def get_tenant_profile(
+        db: AsyncSession, current_user: User
+    ) -> TenantProfileResponse:
+        """Admin: read own tenant's profile/branding. Always
+        current_user.tenant_id — no tenant_id is ever accepted as input."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        tenant = await CustomerRepository.get_tenant_by_id(db, current_user.tenant_id)
+        if not tenant:
+            raise ResourceNotFoundException("Tenant not found")
+        return TenantProfileResponse.model_validate(tenant)
+
+    @staticmethod
+    async def update_tenant_profile(
+        db: AsyncSession, current_user: User, req: TenantProfileUpdateRequest
+    ) -> TenantProfileResponse:
+        """Admin: update own tenant's contact/branding fields only — never
+        name/slug/status, and never a different tenant (always
+        current_user.tenant_id). contact_email/contact_phone/gst_number are
+        DB-unique across tenants, so each is pre-checked for a conflict
+        against a *different* tenant before writing, mirroring the same
+        "read before write" uniqueness-check convention register_customer
+        and superadmin_service's provisioning checks already established."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        tenant = await CustomerRepository.get_tenant_by_id(db, current_user.tenant_id)
+        if not tenant:
+            raise ResourceNotFoundException("Tenant not found")
+
+        before_state = {
+            "contact_email": tenant.contact_email,
+            "contact_phone": tenant.contact_phone,
+            "gst_number": tenant.gst_number,
+            "brand_color": tenant.brand_color,
+            "logo_url": tenant.logo_url,
+        }
+
+        if req.contact_email is not None and req.contact_email != tenant.contact_email:
+            existing = await CustomerRepository.get_tenant_by_contact_email(db, req.contact_email)
+            if existing and existing.id != tenant.id:
+                raise ConflictException("This contact email is already in use by another store")
+            tenant.contact_email = req.contact_email
+
+        if req.contact_phone is not None and req.contact_phone != tenant.contact_phone:
+            existing = await CustomerRepository.get_tenant_by_contact_phone(db, req.contact_phone)
+            if existing and existing.id != tenant.id:
+                raise ConflictException("This contact phone is already in use by another store")
+            tenant.contact_phone = req.contact_phone
+
+        if req.gst_number is not None and req.gst_number != tenant.gst_number:
+            existing = await CustomerRepository.get_tenant_by_gst_number(db, req.gst_number)
+            if existing and existing.id != tenant.id:
+                raise ConflictException("This GST number is already in use by another store")
+            tenant.gst_number = req.gst_number
+
+        if req.brand_color is not None:
+            tenant.brand_color = req.brand_color
+
+        if req.logo_url is not None:
+            tenant.logo_url = req.logo_url
+
+        after_state = {
+            "contact_email": tenant.contact_email,
+            "contact_phone": tenant.contact_phone,
+            "gst_number": tenant.gst_number,
+            "brand_color": tenant.brand_color,
+            "logo_url": tenant.logo_url,
+        }
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="TENANT_PROFILE_UPDATE",
+            target_entity="tenants",
+            target_id=tenant.id,
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+        await db.commit()
+        await db.refresh(tenant)
+        return TenantProfileResponse.model_validate(tenant)

@@ -1,5 +1,9 @@
 from fastapi import APIRouter
-from app.api.v1.endpoints import health, auth, customer, goldrate, scheme, enrollment, passbook, payment, report, audit, superadmin, catalogue
+from app.api.v1.endpoints import (
+    health, auth, customer, goldrate, scheme, enrollment, passbook, payment,
+    report, audit, superadmin, catalogue, support, customer_catalogue, wishlist,
+    dashboard, staff, notification,
+)
 
 api_router = APIRouter()
 
@@ -38,3 +42,21 @@ api_router.include_router(superadmin.router, tags=["SuperAdmin Platform Module"]
 
 # Include catalogue studio endpoints (Module 20)
 api_router.include_router(catalogue.router, tags=["Catalogue Studio Module"])
+
+# Phase 6A / Module 31 — Customer Support System
+api_router.include_router(support.router, tags=["Support Module"])
+
+# Phase 6A / Module 31 — Customer-facing Catalogue (read-only)
+api_router.include_router(customer_catalogue.router, tags=["Customer Catalogue Module"])
+
+# Phase 6A / Module 31 — Wishlist
+api_router.include_router(wishlist.router, tags=["Wishlist Module"])
+
+# Notification Module
+api_router.include_router(notification.router, tags=["Notification Module"])
+
+# Phase 6B / Module 32 — Customer Dashboard
+api_router.include_router(dashboard.router, tags=["Dashboard Module"])
+
+# Phase 6C / Module 33 — Admin Staff Management
+api_router.include_router(staff.router, tags=["Staff Module"])

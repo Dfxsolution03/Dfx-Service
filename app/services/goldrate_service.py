@@ -9,6 +9,7 @@ from app.repositories.goldrate_repository import GoldRateRepository
 from app.repositories.audit_repository import AuditRepository
 from app.exceptions.base import ConflictException, ResourceNotFoundException, ForbiddenException
 from app.schemas.goldrate import GoldRateCreateRequest, GoldRateUpdateRequest, GoldRateResponse, CustomerGoldRateResponse
+from app.services.tenant_pricing_service import TenantPricingService
 
 # JROS is an India-only business (INR, Indian phone formats, IST-centric UX
 # throughout) — "today" for a daily gold rate must follow IST, not UTC, or
@@ -113,10 +114,32 @@ class GoldRateService:
     async def get_customer_today_rate(
         db: AsyncSession, current_user: User
     ) -> Optional[CustomerGoldRateResponse]:
-        """Fetch today's gold rate for display to the customer (any authenticated tenant user)."""
+        """
+        Fetch today's gold rate for display to the customer (any authenticated
+        tenant user). The tenant's own manually-entered rate for today (the
+        pre-Module-31 path) always takes precedence when present — a tenant
+        Admin who explicitly set today's rate must keep seeing exactly that
+        value. Only when no manual rate exists for today do we fall back to
+        Module 31's TenantPricingConfig-derived live rate; if that also
+        resolves to nothing (no config, no live rate yet), behavior is
+        byte-identical to before Phase 2 — None.
+        """
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
 
         today = _today_ist()
         rate = await GoldRateRepository.get_rate_for_date(db, current_user.tenant_id, today)
-        return CustomerGoldRateResponse.model_validate(rate) if rate else None
+        if rate:
+            return CustomerGoldRateResponse.model_validate(rate)
+
+        effective = await TenantPricingService.get_effective_rate(db, current_user.tenant_id)
+        if effective is None:
+            return None
+
+        return CustomerGoldRateResponse(
+            rate_24k=float(effective.gold_24k),
+            effective_date=today,
+            updated_at=effective.as_of,
+            source=effective.source,
+            silver_999=float(effective.silver_999) if effective.silver_999 is not None else None,
+        )

@@ -96,6 +96,23 @@ class Settings(BaseSettings):
     BACKEND_PUBLIC_URL: str = "http://localhost:8000"
     MAX_UPLOAD_SIZE_BYTES: int = 10 * 1024 * 1024  # 10 MB per image
 
+    # Module 31 / Phase 0 — Market Rate Infrastructure. Disabled by default:
+    # the existing tenant-admin daily gold-rate system
+    # (app/services/goldrate_service.py, backed by the untouched gold_rates
+    # table) remains the only active rate source until this flag is
+    # explicitly enabled in a later phase. See the Module 31 architecture
+    # doc for the full design; sync()/get_effective_rate() are unimplemented
+    # scaffolding until Phase 1/2 regardless of this flag's value.
+    ENABLE_MARKET_RATE_SYNC: bool = False
+    MARKET_RATE_PROVIDER: str = "METALPRICEAPI"
+    MARKET_RATE_SYNC_INTERVAL_MINUTES: int = 10
+    MARKET_RATE_FETCH_TIMEOUT_SECONDS: int = 10
+    MARKET_RATE_RETRY_COUNT: int = 3
+    MARKET_RATE_RETRY_DELAY_SECONDS: int = 2
+    METALPRICEAPI_KEY: str = ""
+    IBJA_API_KEY: str = ""
+    GOLDAPI_KEY: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

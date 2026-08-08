@@ -23,10 +23,21 @@ async def lifespan(app: FastAPI):
     db_status = await check_database_connection()
     logger.info(f"Startup Database Status: {db_status}")
 
+    # Module 31 / Phase 0 — market rate sync scheduler. Inert unless
+    # explicitly enabled; sync() itself is unimplemented scaffolding until
+    # Phase 1, so this flag has no effect on existing behavior either way.
+    if settings.ENABLE_MARKET_RATE_SYNC:
+        from app.scheduler.market_rate_scheduler import get_scheduler
+        get_scheduler().start()
+        logger.info("Market rate sync scheduler started.")
+
     yield
 
     # Shutdown tasks
     logger.info(f"Shutting down {settings.PROJECT_NAME}...")
+    if settings.ENABLE_MARKET_RATE_SYNC:
+        from app.scheduler.market_rate_scheduler import get_scheduler
+        get_scheduler().shutdown(wait=False)
     await close_database_connections()
 
 

@@ -22,6 +22,10 @@ opencv-python-headless>=4.9.0,<4.10.0
 # multi-product catalogue PDF assembly. Both pure-Python, no system deps.
 qrcode>=7.4.0,<8.0.0
 reportlab>=4.1.0,<4.3.0
+# Module 31 — in-process scheduler for the market rate sync job (see
+# app/scheduler/market_rate_scheduler.py). No broker/worker infra required —
+# runs inside the existing single uvicorn process.
+apscheduler>=3.10.4,<3.11.0
 
 # Testing dependencies
 pytest>=7.4.0

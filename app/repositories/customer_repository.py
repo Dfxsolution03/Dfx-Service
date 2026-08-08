@@ -1,10 +1,11 @@
-from typing import List, Optional
-from sqlalchemy import select, update, delete
+from typing import List, Optional, Tuple
+from sqlalchemy import select, update, delete, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from app.models.auth import Tenant, User
-from app.models.customer import KYCRecord, UserAddress, Branch
+from app.core.constants import ROLE_CUSTOMER, ROLE_STAFF
+from app.models.auth import Tenant, User, Role
+from app.models.customer import KYCRecord, UserAddress, Branch, KycDocument
 
 
 class CustomerRepository:
@@ -117,6 +118,11 @@ class CustomerRepository:
         await db.delete(address)
 
     @staticmethod
+    async def create_kyc_document(db: AsyncSession, document: KycDocument) -> KycDocument:
+        db.add(document)
+        return document
+
+    @staticmethod
     async def get_tenant_branches(
         db: AsyncSession, tenant_id: str
     ) -> List[Branch]:
@@ -127,3 +133,109 @@ class CustomerRepository:
         )
         result = await db.execute(stmt)
         return list(result.scalars().all())
+
+    # ─── Phase 6C / Module 33 — Admin Customer Management ───
+
+    @staticmethod
+    async def get_customers_by_tenant(
+        db: AsyncSession, tenant_id: str, page: int, limit: int, search: Optional[str]
+    ) -> Tuple[List[User], int]:
+        """Admin: paginated, searchable list of Customer-role users for the
+        tenant — the one "list all customers" query this codebase never had."""
+        conditions = [User.tenant_id == tenant_id, Role.name == ROLE_CUSTOMER]
+        if search:
+            like = f"%{search}%"
+            conditions.append(or_(User.name.ilike(like), User.email.ilike(like), User.phone.ilike(like)))
+
+        count_stmt = select(func.count(User.id)).join(Role, User.role_id == Role.id)
+        list_stmt = select(User).join(Role, User.role_id == Role.id).options(joinedload(User.role))
+        for cond in conditions:
+            count_stmt = count_stmt.where(cond)
+            list_stmt = list_stmt.where(cond)
+
+        total = int((await db.execute(count_stmt)).scalar_one())
+        list_stmt = list_stmt.order_by(User.created_at.desc()).offset((page - 1) * limit).limit(limit)
+        rows = (await db.execute(list_stmt)).unique().scalars().all()
+        return list(rows), total
+
+    @staticmethod
+    async def get_customer_by_id_for_tenant(
+        db: AsyncSession, tenant_id: str, customer_id: str
+    ) -> Optional[User]:
+        """Admin: fetch a single user, own-tenant only, AND only if they're
+        actually a Customer — so this endpoint can never be used to peek at
+        an Admin/Staff account under the same tenant."""
+        stmt = (
+            select(User)
+            .join(Role, User.role_id == Role.id)
+            .options(joinedload(User.role))
+            .where(User.id == customer_id, User.tenant_id == tenant_id, Role.name == ROLE_CUSTOMER)
+        )
+        result = await db.execute(stmt)
+        return result.unique().scalar_one_or_none()
+
+    # ─── Phase 6C / Module 33 — Admin Staff Management ───
+
+    @staticmethod
+    async def get_staff_by_tenant(db: AsyncSession, tenant_id: str) -> List[User]:
+        stmt = (
+            select(User)
+            .join(Role, User.role_id == Role.id)
+            .options(joinedload(User.role))
+            .where(User.tenant_id == tenant_id, Role.name == ROLE_STAFF)
+            .order_by(User.created_at.desc())
+        )
+        result = await db.execute(stmt)
+        return list(result.unique().scalars().all())
+
+    @staticmethod
+    async def get_staff_by_id_for_tenant(
+        db: AsyncSession, tenant_id: str, staff_id: str
+    ) -> Optional[User]:
+        stmt = (
+            select(User)
+            .join(Role, User.role_id == Role.id)
+            .options(joinedload(User.role))
+            .where(User.id == staff_id, User.tenant_id == tenant_id, Role.name == ROLE_STAFF)
+        )
+        result = await db.execute(stmt)
+        return result.unique().scalar_one_or_none()
+
+    @staticmethod
+    async def get_user_by_email(db: AsyncSession, email: str) -> Optional[User]:
+        """Global (not tenant-scoped) — email uniqueness is global in this
+        codebase, same check auth_service.register_customer already performs."""
+        stmt = select(User).where(User.email == email)
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def get_user_by_phone(db: AsyncSession, phone: str) -> Optional[User]:
+        stmt = select(User).where(User.phone == phone)
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def get_role_by_name(db: AsyncSession, name: str) -> Optional[Role]:
+        stmt = select(Role).where(Role.name == name)
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def create_staff_user(db: AsyncSession, user: User) -> User:
+        db.add(user)
+        return user
+
+    # ─── Phase 6C / Module 33 — Vendor/Tenant Self-Service Profile ───
+
+    @staticmethod
+    async def get_tenant_by_contact_email(db: AsyncSession, contact_email: str) -> Optional[Tenant]:
+        stmt = select(Tenant).where(Tenant.contact_email == contact_email)
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def get_tenant_by_contact_phone(db: AsyncSession, contact_phone: str) -> Optional[Tenant]:
+        stmt = select(Tenant).where(Tenant.contact_phone == contact_phone)
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def get_tenant_by_gst_number(db: AsyncSession, gst_number: str) -> Optional[Tenant]:
+        stmt = select(Tenant).where(Tenant.gst_number == gst_number)
+        return (await db.execute(stmt)).scalar_one_or_none()

@@ -1,0 +1,104 @@
+# =============================================================================
+# docker-compose.yml — DFX Solution Backend (Production baseline)
+#
+# This file defines the stable production configuration.
+# For local development, Docker Compose automatically merges
+# docker-compose.override.yml on top of this file.
+#
+# To run ONLY this file (production mode, no overrides):
+#   docker compose -f docker-compose.yml up -d
+#
+# To run with dev overrides (default when you just run "docker compose up"):
+#   docker compose up
+#
+# Environment precedence (later files win on duplicate keys):
+#   .env            — base defaults / local dev values (gitignored)
+#   .env.production — production overrides (gitignored, never in image)
+#
+# Both files are listed in env_file so production deployments only need to
+# supply .env.production — the .env fallback stays for local convenience.
+# Docker Compose silently ignores env_file entries that don't exist on disk.
+# =============================================================================
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+
+    container_name: dfx-backend
+
+    # Restart the container unless it was explicitly stopped.
+    restart: unless-stopped
+
+    # init: true injects a minimal init process (tini) as PID 1.
+    # Benefits:
+    #   - Correct SIGTERM / SIGINT forwarding to uvicorn (PID 1 in a
+    #     container does not have default signal handlers in Linux)
+    #   - Zombie process reaping (relevant if any subprocess is spawned,
+    #     e.g. by reportlab or opencv)
+    # The entrypoint already uses `exec uvicorn ...` so uvicorn receives
+    # signals directly, but init: true is defence-in-depth and costs nothing.
+    init: true
+
+    # Environment file loading.
+    # Docker Compose merges these in order — values in .env.production
+    # override identical keys in .env.
+    # Both files are gitignored; the image never contains either.
+    env_file:
+      - path: .env
+        required: false        # Allow production machines that use only .env.production
+      - path: .env.production
+        required: false        # Allow dev machines that only have .env
+
+    ports:
+      - "8000:8000"
+
+    volumes:
+      # Named volume for uploaded files.
+      # Persists catalogue images and tenant-specific media across
+      # container restarts and image rebuilds.
+      - uploads_data:/app/uploads
+
+    # Log rotation — prevents unbounded disk growth on long-running containers.
+    # json-file is the Docker default driver; these options cap log size.
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"   # Rotate after 10 MB per file
+        max-file: "5"     # Keep at most 5 rotated files (~50 MB total per container)
+
+    # Container-level healthcheck mirrors the Dockerfile HEALTHCHECK so that
+    # Docker Compose also reports healthy/unhealthy status in `docker compose ps`.
+    healthcheck:
+      test:
+        - "CMD"
+        - "python"
+        - "-c"
+        - "import urllib.request, sys; r = urllib.request.urlopen('http://localhost:8000/api/v1/health', timeout=8); sys.exit(0 if r.status == 200 else 1)"
+      interval: 30s
+      timeout: 10s
+      start_period: 20s
+      retries: 3
+
+# ---------------------------------------------------------------------------
+# Volumes
+# ---------------------------------------------------------------------------
+volumes:
+  uploads_data:
+    driver: local
+    # To use an NFS or cloud-managed volume in production, replace with:
+    #   driver: local
+    #   driver_opts:
+    #     type: nfs
+    #     o: addr=<nfs-host>,rw
+    #     device: ":/path/on/nfs"
+
+# ---------------------------------------------------------------------------
+# Networks
+# Placeholder for future Nginx reverse proxy, Redis, or Celery workers.
+# When added, each service joins this network for inter-container communication.
+# ---------------------------------------------------------------------------
+networks:
+  default:
+    name: dfx-network
