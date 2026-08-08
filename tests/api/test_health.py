@@ -5,6 +5,7 @@ Tests: GET /api/v1/health
 """
 
 import pytest
+from unittest.mock import patch
 from httpx import AsyncClient
 
 
@@ -38,6 +39,18 @@ class TestHealthEndpoint:
             f"Expected database=connected, got: {body}"
         )
 
+
+    async def test_health_returns_503_when_database_unhealthy(self, client: AsyncClient):
+        """Health endpoint must return HTTP 503 (not 200) when the DB ping fails,
+        so container/orchestrator health checks correctly detect an outage."""
+        with patch(
+            "app.api.v1.endpoints.health.check_database_connection",
+            return_value={"status": "unhealthy", "database": "connection_failed"},
+        ):
+            r = await client.get(f"{BASE}/health")
+        assert r.status_code == 503
+        body = r.json()
+        assert body["success"] is False
 
     async def test_root_redirect_returns_200(self, client: AsyncClient):
         """Root / endpoint should return project metadata."""
