@@ -24,6 +24,7 @@ from app.models.notification import Notification
 from app.models.market_rate import MarketRate
 from app.models.tenant_pricing import TenantPricingConfig
 from app.models.provider_health import ProviderHealth
+from app.models.promotion import Promotion
 
 __all__ = [
     "Base",
@@ -58,4 +59,5 @@ __all__ = [
     "MarketRate",
     "TenantPricingConfig",
     "ProviderHealth",
+    "Promotion",
 ]

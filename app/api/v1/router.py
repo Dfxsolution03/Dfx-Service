@@ -2,7 +2,7 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import (
     health, auth, customer, goldrate, scheme, enrollment, passbook, payment,
     report, audit, superadmin, catalogue, support, customer_catalogue, wishlist,
-    dashboard, staff, notification,
+    dashboard, staff, notification, promotion,
 )
 
 api_router = APIRouter()
@@ -60,3 +60,6 @@ api_router.include_router(dashboard.router, tags=["Dashboard Module"])
 
 # Phase 6C / Module 33 — Admin Staff Management
 api_router.include_router(staff.router, tags=["Staff Module"])
+
+# Promotion Banner Module — Home screen promotion banners
+api_router.include_router(promotion.router, tags=["Promotion Module"])
