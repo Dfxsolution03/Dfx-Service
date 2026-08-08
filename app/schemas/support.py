@@ -74,6 +74,10 @@ class AdminSupportTicketResponse(BaseModel):
         from_attributes = True
 
 
+class AdminSupportTicketDetailResponse(AdminSupportTicketResponse):
+    messages: List[SupportMessageResponse] = Field(default_factory=list)
+
+
 class FAQResponse(BaseModel):
     id: str
     question: str

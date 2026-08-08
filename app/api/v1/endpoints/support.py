@@ -154,3 +154,44 @@ async def update_ticket_admin(
         message="Support ticket updated successfully",
         data={"ticket": ticket.model_dump(mode="json")},
     )
+
+
+@router.get(
+    "/admin/support/tickets/{ticket_id}",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Support Ticket Detail (Admin)",
+    description="Returns a single ticket with its full message thread. Own-tenant only.",
+)
+async def get_ticket_detail_admin(
+    ticket_id: str,
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    ticket = await SupportService.get_ticket_detail_for_admin(db, current_user, ticket_id)
+    return StandardSuccessResponse(
+        success=True,
+        message="Support ticket retrieved successfully",
+        data={"ticket": ticket.model_dump(mode="json")},
+    )
+
+
+@router.post(
+    "/admin/support/tickets/{ticket_id}/messages",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Reply to Support Ticket (Admin)",
+    description="Adds an admin reply message to any ticket in the admin's own tenant.",
+)
+async def add_message_admin(
+    ticket_id: str,
+    req: SupportMessageCreateRequest,
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    message = await SupportService.add_message_for_admin(db, current_user, ticket_id, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Message added successfully",
+        data={"message": message.model_dump(mode="json")},
+    )

@@ -65,6 +65,24 @@ class SupportRepository:
         return result.scalar_one_or_none()
 
     @staticmethod
+    async def get_ticket_detail_by_id_for_tenant(
+        db: AsyncSession, ticket_id: str, tenant_id: str
+    ) -> Optional[SupportTicket]:
+        """Admin: same not-own-only lookup as above, but with the message
+        thread eager-loaded — mirrors get_ticket_by_id_for_user's loader
+        options for the customer-facing detail endpoint."""
+        stmt = (
+            select(SupportTicket)
+            .options(
+                joinedload(SupportTicket.user),
+                selectinload(SupportTicket.messages).joinedload(SupportMessage.sender),
+            )
+            .where(SupportTicket.id == ticket_id, SupportTicket.tenant_id == tenant_id)
+        )
+        result = await db.execute(stmt)
+        return result.unique().scalar_one_or_none()
+
+    @staticmethod
     async def create_ticket(db: AsyncSession, ticket: SupportTicket) -> SupportTicket:
         db.add(ticket)
         return ticket

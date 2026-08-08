@@ -16,6 +16,7 @@ from app.schemas.support import (
     SupportTicketDetailResponse,
     SupportMessageResponse,
     AdminSupportTicketResponse,
+    AdminSupportTicketDetailResponse,
     FAQResponse,
 )
 
@@ -232,3 +233,65 @@ class SupportService:
         await db.commit()
         await db.refresh(ticket)
         return _to_admin_response(ticket)
+
+    @staticmethod
+    async def get_ticket_detail_for_admin(
+        db: AsyncSession, current_user: User, ticket_id: str
+    ) -> AdminSupportTicketDetailResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        ticket = await SupportRepository.get_ticket_detail_by_id_for_tenant(
+            db, ticket_id, current_user.tenant_id
+        )
+        if not ticket:
+            raise ResourceNotFoundException(f"Support ticket ID '{ticket_id}' not found")
+
+        return AdminSupportTicketDetailResponse(
+            **_to_admin_response(ticket).model_dump(),
+            messages=[_to_message_response(m) for m in ticket.messages],
+        )
+
+    @staticmethod
+    async def add_message_for_admin(
+        db: AsyncSession, current_user: User, ticket_id: str, req: SupportMessageCreateRequest
+    ) -> SupportMessageResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        ticket = await SupportRepository.get_ticket_by_id_for_tenant(db, ticket_id, current_user.tenant_id)
+        if not ticket:
+            raise ResourceNotFoundException(f"Support ticket ID '{ticket_id}' not found")
+
+        message_id = f"tcm_{uuid.uuid4().hex[:12]}"
+        message = SupportMessage(
+            id=message_id,
+            ticket_id=ticket.id,
+            sender_id=current_user.id,
+            message=req.message,
+        )
+        await SupportRepository.create_message(db, message)
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="SUPPORT_MESSAGE_CREATE",
+            target_entity="support_messages",
+            target_id=message_id,
+            before_state=None,
+            after_state={"ticket_id": ticket.id},
+        )
+
+        await db.commit()
+        await db.refresh(message)
+        return SupportMessageResponse(
+            id=message.id,
+            ticket_id=message.ticket_id,
+            sender_id=message.sender_id,
+            sender_name=current_user.name,
+            message=message.message,
+            created_at=message.created_at,
+        )
