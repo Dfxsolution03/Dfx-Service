@@ -51,6 +51,7 @@ DEFAULT_BRAND_COLOR = "#2C6FBD"
 def _admin_contact_fields(admin: Optional[User]) -> dict:
     return {
         "admin_name": admin.name if admin else None,
+        "admin_is_active": admin.is_active if admin else None,
         "admin_email": admin.email if admin else None,
         "admin_phone": admin.phone if admin else None,
     }

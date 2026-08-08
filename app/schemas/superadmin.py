@@ -20,6 +20,7 @@ class TenantListItem(BaseModel):
     admin_name: Optional[str] = None
     admin_email: Optional[str] = None
     admin_phone: Optional[str] = None
+    admin_is_active: Optional[bool] = None
     created_at: datetime
 
     class Config:
@@ -34,6 +35,9 @@ class TenantDetailResponse(BaseModel):
     admin_name: Optional[str] = None
     admin_email: Optional[str] = None
     admin_phone: Optional[str] = None
+    # None when the tenant has no Admin user yet; otherwise the Admin
+    # account's own is_active flag (see SuperAdminService.set_tenant_admin_status).
+    admin_is_active: Optional[bool] = None
     # Module 29 — real columns now (previously Tenant had no branding fields
     # at all, see SESSION_HANDOFF.md §14/§17). None for every tenant
     # provisioned before this module, or provisioned without a custom color.
