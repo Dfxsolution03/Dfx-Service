@@ -12,6 +12,11 @@ from app.core.database import check_database_connection, close_database_connecti
 from app.api.v1.router import api_router
 from app.exceptions.base import JROSException
 
+# Fail fast, before the app is even constructed, if ENVIRONMENT=production
+# is still running with insecure repository-default secrets. No-op for any
+# other environment. See Settings.validate_production_safety for details.
+settings.validate_production_safety()
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):

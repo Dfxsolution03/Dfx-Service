@@ -27,7 +27,12 @@ from app.core.security import (
     decode_jwt_token,
     hash_token_sha256,
 )
-from app.core.config import settings
+from app.core.config import (
+    settings,
+    Settings,
+    INSECURE_SECRET_KEY_DEFAULT,
+    INSECURE_SUPERADMIN_PASSWORD_DEFAULT,
+)
 from app.core.constants import (
     ROLE_CUSTOMER,
     ROLE_ADMIN,
@@ -301,3 +306,71 @@ class TestRBACPermissions:
             assert role in ROLE_PERMISSIONS_MAP
             assert isinstance(ROLE_PERMISSIONS_MAP[role], list)
             assert len(ROLE_PERMISSIONS_MAP[role]) > 0
+
+
+class TestProductionSafetyGuard:
+    """validate_production_safety() must fail fast on insecure production
+    config, and must never affect non-production environments."""
+
+    def _production_settings(self, **overrides) -> Settings:
+        return Settings(ENVIRONMENT="production", **overrides)
+
+    def test_non_production_environment_is_always_a_noop(self):
+        s = Settings(
+            ENVIRONMENT="development",
+            DEBUG=True,
+            SECRET_KEY=INSECURE_SECRET_KEY_DEFAULT,
+            SUPERADMIN_PASSWORD=INSECURE_SUPERADMIN_PASSWORD_DEFAULT,
+        )
+        s.validate_production_safety()  # must not raise
+
+    def test_production_with_all_defaults_raises(self):
+        s = self._production_settings(
+            DEBUG=True,
+            SECRET_KEY=INSECURE_SECRET_KEY_DEFAULT,
+            SUPERADMIN_PASSWORD=INSECURE_SUPERADMIN_PASSWORD_DEFAULT,
+        )
+        with pytest.raises(RuntimeError) as exc_info:
+            s.validate_production_safety()
+        message = str(exc_info.value)
+        assert "DEBUG" in message
+        assert "SECRET_KEY" in message
+        assert "SUPERADMIN_PASSWORD" in message
+        # Must never leak the actual insecure secret values in the error.
+        assert INSECURE_SECRET_KEY_DEFAULT not in message
+        assert INSECURE_SUPERADMIN_PASSWORD_DEFAULT not in message
+
+    def test_production_with_debug_true_raises(self):
+        s = self._production_settings(
+            DEBUG=True,
+            SECRET_KEY="a-real-unique-production-secret",
+            SUPERADMIN_PASSWORD="Sup3r-Str0ng-Unique-Pw!",
+        )
+        with pytest.raises(RuntimeError, match="DEBUG"):
+            s.validate_production_safety()
+
+    def test_production_with_default_secret_key_raises(self):
+        s = self._production_settings(
+            DEBUG=False,
+            SECRET_KEY=INSECURE_SECRET_KEY_DEFAULT,
+            SUPERADMIN_PASSWORD="Sup3r-Str0ng-Unique-Pw!",
+        )
+        with pytest.raises(RuntimeError, match="SECRET_KEY"):
+            s.validate_production_safety()
+
+    def test_production_with_default_superadmin_password_raises(self):
+        s = self._production_settings(
+            DEBUG=False,
+            SECRET_KEY="a-real-unique-production-secret",
+            SUPERADMIN_PASSWORD=INSECURE_SUPERADMIN_PASSWORD_DEFAULT,
+        )
+        with pytest.raises(RuntimeError, match="SUPERADMIN_PASSWORD"):
+            s.validate_production_safety()
+
+    def test_production_with_all_secrets_overridden_is_safe(self):
+        s = self._production_settings(
+            DEBUG=False,
+            SECRET_KEY="a-real-unique-production-secret",
+            SUPERADMIN_PASSWORD="Sup3r-Str0ng-Unique-Pw!",
+        )
+        s.validate_production_safety()  # must not raise

@@ -3,6 +3,13 @@ from typing import List, Union, Optional
 from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+# Known-insecure repository defaults for SECRET_KEY/SUPERADMIN_PASSWORD.
+# Kept as module-level constants (not class attributes) so pydantic's
+# BaseSettings metaclass never treats them as a private model attribute —
+# see Settings.validate_production_safety, which compares against these.
+INSECURE_SECRET_KEY_DEFAULT = "jros-super-secret-enterprise-key-change-in-production"
+INSECURE_SUPERADMIN_PASSWORD_DEFAULT = "SuperAdmin@123"
+
 
 class Settings(BaseSettings):
     PROJECT_NAME: str = "DFX Solution Enterprise SaaS API"
@@ -40,14 +47,19 @@ class Settings(BaseSettings):
         return v
 
     # JWT Configuration
-    SECRET_KEY: str = "jros-super-secret-enterprise-key-change-in-production"
+    #
+    # SECRET_KEY/SUPERADMIN_PASSWORD default to known, repository-visible
+    # values so local dev works with zero setup. validate_production_safety()
+    # below refuses to start if these defaults (or DEBUG=True) are still in
+    # effect when ENVIRONMENT=production — see that method for details.
+    SECRET_KEY: str = INSECURE_SECRET_KEY_DEFAULT
     ALGORITHM: str = "HS256"
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
     # SuperAdmin Initial Seed Configuration
     SUPERADMIN_EMAIL: str = "superadmin@dfxsolution.com"
-    SUPERADMIN_PASSWORD: str = "SuperAdmin@123"
+    SUPERADMIN_PASSWORD: str = INSECURE_SUPERADMIN_PASSWORD_DEFAULT
 
     # Module 18 — Authentication Hardening: reset/verification token lifetimes.
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
@@ -119,6 +131,30 @@ class Settings(BaseSettings):
         case_sensitive=True,
         extra="ignore",
     )
+
+    def validate_production_safety(self) -> None:
+        """
+        Fail fast on startup if ENVIRONMENT=production but the app is still
+        running with insecure repository defaults. Never logs secret values —
+        only whether each check passed. No-op for any other ENVIRONMENT
+        (development/test/staging keep using their existing defaults).
+        """
+        if self.ENVIRONMENT.lower() != "production":
+            return
+
+        errors = []
+        if self.DEBUG:
+            errors.append("DEBUG must be False when ENVIRONMENT=production")
+        if self.SECRET_KEY == INSECURE_SECRET_KEY_DEFAULT:
+            errors.append("SECRET_KEY must be overridden from its insecure default when ENVIRONMENT=production")
+        if self.SUPERADMIN_PASSWORD == INSECURE_SUPERADMIN_PASSWORD_DEFAULT:
+            errors.append("SUPERADMIN_PASSWORD must be overridden from its insecure default when ENVIRONMENT=production")
+
+        if errors:
+            raise RuntimeError(
+                "Refusing to start with an insecure production configuration:\n  - "
+                + "\n  - ".join(errors)
+            )
 
 
 settings = Settings()
