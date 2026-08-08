@@ -180,3 +180,26 @@ class TenantProvisionResponse(BaseModel):
     activation_link: str
     activation_link_expires_at: datetime
     onboarding_email_sent: bool
+
+
+class TenantAdminSummary(BaseModel):
+    """The tenant's primary Admin account, with the account-level status a
+    SuperAdmin can actually act on — distinct from ProvisionedAdminSummary,
+    which is a one-time provisioning receipt with no status field."""
+    id: str
+    name: str
+    email: Optional[str]
+    phone: Optional[str]
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+
+class TenantAdminStatusUpdateRequest(BaseModel):
+    is_active: bool
+
+
+class TenantAdminPasswordResetResponse(BaseModel):
+    admin_email: str
+    reset_email_sent: bool

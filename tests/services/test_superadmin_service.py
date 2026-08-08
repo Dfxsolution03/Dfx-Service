@@ -116,3 +116,77 @@ class TestGetPlatformDashboard:
         assert isinstance(result.recent_tenants, list)
         assert isinstance(result.growth_trend, list)
         assert isinstance(result.status_breakdown, list)
+
+
+def _new_empty_tenant(suffix: str) -> "Tenant":
+    from app.models.auth import Tenant
+    uid = uuid.uuid4().hex[:8]
+    return Tenant(id=f"tnt_test_{uid}", name=f"Empty Tenant {suffix}", slug=f"empty-{suffix}-{uid}")
+
+
+class TestSetTenantAdminStatus:
+
+    async def test_deactivate_then_reactivate(self, db_session, test_tenant, superadmin_user):
+        admin = await _create_admin_for_tenant(db_session, test_tenant.id)
+
+        deactivated = await SuperAdminService.set_tenant_admin_status(
+            db_session, superadmin_user, test_tenant.id, is_active=False
+        )
+        assert deactivated.id == admin.id
+        assert deactivated.is_active is False
+
+        await db_session.refresh(admin)
+        # This is the field get_current_user checks on every authenticated
+        # request (raises ForbiddenException when False) — already covered
+        # by tests/security/test_security.py; here we only need to prove
+        # this service method actually flips it, not re-test the dependency.
+        assert admin.is_active is False
+
+        reactivated = await SuperAdminService.set_tenant_admin_status(
+            db_session, superadmin_user, test_tenant.id, is_active=True
+        )
+        assert reactivated.is_active is True
+
+    async def test_nonexistent_tenant_raises_not_found(self, db_session, superadmin_user):
+        with pytest.raises(ResourceNotFoundException):
+            await SuperAdminService.set_tenant_admin_status(
+                db_session, superadmin_user, "tnt_does_not_exist_xyz", is_active=False
+            )
+
+    async def test_tenant_with_no_admin_raises_not_found(self, db_session, superadmin_user):
+        empty_tenant = _new_empty_tenant("status")
+        db_session.add(empty_tenant)
+        await db_session.commit()
+
+        with pytest.raises(ResourceNotFoundException):
+            await SuperAdminService.set_tenant_admin_status(
+                db_session, superadmin_user, empty_tenant.id, is_active=False
+            )
+
+
+class TestResetTenantAdminPassword:
+
+    async def test_issues_token_and_returns_summary(self, db_session, test_tenant, superadmin_user):
+        admin = await _create_admin_for_tenant(db_session, test_tenant.id)
+
+        result = await SuperAdminService.reset_tenant_admin_password(db_session, superadmin_user, test_tenant.id)
+        assert result.admin_email == admin.email
+
+        from app.models.auth import PasswordResetToken
+        tokens = (
+            await db_session.execute(select(PasswordResetToken).where(PasswordResetToken.user_id == admin.id))
+        ).scalars().all()
+        assert len(tokens) == 1
+        assert tokens[0].used_at is None
+
+    async def test_nonexistent_tenant_raises_not_found(self, db_session, superadmin_user):
+        with pytest.raises(ResourceNotFoundException):
+            await SuperAdminService.reset_tenant_admin_password(db_session, superadmin_user, "tnt_does_not_exist_xyz")
+
+    async def test_tenant_with_no_admin_raises_not_found(self, db_session, superadmin_user):
+        empty_tenant = _new_empty_tenant("reset")
+        db_session.add(empty_tenant)
+        await db_session.commit()
+
+        with pytest.raises(ResourceNotFoundException):
+            await SuperAdminService.reset_tenant_admin_password(db_session, superadmin_user, empty_tenant.id)

@@ -8,7 +8,11 @@ from app.models.auth import User
 from app.permissions.dependencies import require_superadmin
 from app.schemas.auth import StandardSuccessResponse
 from app.schemas.report import ReportPeriod
-from app.schemas.superadmin import TenantStatusUpdateRequest, TenantProvisionRequest
+from app.schemas.superadmin import (
+    TenantStatusUpdateRequest,
+    TenantProvisionRequest,
+    TenantAdminStatusUpdateRequest,
+)
 from app.schemas.export import ExportFormat
 from app.services.superadmin_service import SuperAdminService
 
@@ -97,6 +101,53 @@ async def set_tenant_status(
         success=True,
         message=f"Tenant {'enabled' if req.status == 'Active' else 'disabled'} successfully",
         data={"tenant": tenant.model_dump(mode="json")},
+    )
+
+
+@router.put(
+    "/tenants/{tenant_id}/admin/status",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Activate/Deactivate Tenant's Admin Account (SuperAdmin)",
+    description=(
+        "Activates or deactivates the tenant's primary Admin account itself — unlike the tenant-level "
+        "status toggle, this immediately blocks the Admin from logging in or using existing sessions."
+    ),
+)
+async def set_tenant_admin_status(
+    tenant_id: str,
+    req: TenantAdminStatusUpdateRequest,
+    current_user: User = Depends(require_superadmin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    admin = await SuperAdminService.set_tenant_admin_status(db, current_user, tenant_id, req.is_active)
+    return StandardSuccessResponse(
+        success=True,
+        message=f"Admin account {'activated' if req.is_active else 'deactivated'} successfully",
+        data={"admin": admin.model_dump(mode="json")},
+    )
+
+
+@router.post(
+    "/tenants/{tenant_id}/admin/reset-password",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Force Password Reset for Tenant's Admin (SuperAdmin)",
+    description=(
+        "Issues a real password reset token for the tenant's primary Admin and emails a reset link, "
+        "using the same token/email flow as the public forgot-password endpoint."
+    ),
+)
+async def reset_tenant_admin_password(
+    tenant_id: str,
+    current_user: User = Depends(require_superadmin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await SuperAdminService.reset_tenant_admin_password(db, current_user, tenant_id)
+    return StandardSuccessResponse(
+        success=True,
+        message="Password reset link sent to the tenant's Admin",
+        data={"reset": result.model_dump(mode="json")},
     )
 
 

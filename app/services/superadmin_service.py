@@ -34,6 +34,8 @@ from app.schemas.superadmin import (
     BranchSummary,
     SubscriptionSummary,
     ProvisionedAdminSummary,
+    TenantAdminSummary,
+    TenantAdminPasswordResetResponse,
 )
 from app.schemas.export import ExportFileResponse, ExportFormat
 from app.services.export_service import ExportService, ExportColumn
@@ -145,6 +147,119 @@ class SuperAdminService:
             updated_at=tenant.updated_at,
             **_admin_contact_fields(admin),
         )
+
+    @staticmethod
+    async def set_tenant_admin_status(
+        db: AsyncSession, current_user: User, tenant_id: str, is_active: bool
+    ) -> TenantAdminSummary:
+        """Activate/deactivate the tenant's primary Admin account itself —
+        distinct from set_tenant_status, which only flags the Tenant row and
+        (by design) never blocks logins. This actually flips User.is_active,
+        which get_current_user already enforces on every authenticated
+        request, so a deactivated Admin is immediately locked out."""
+        tenant = await SuperAdminRepository.get_tenant_by_id(db, tenant_id)
+        if not tenant:
+            raise ResourceNotFoundException(f"Tenant ID '{tenant_id}' not found")
+
+        admin = await SuperAdminRepository.get_primary_admin_for_tenant(db, tenant_id)
+        if not admin:
+            raise ResourceNotFoundException(f"Tenant '{tenant_id}' has no Admin account")
+
+        before_state = {"is_active": admin.is_active}
+        admin.is_active = is_active
+        after_state = {"is_active": admin.is_active}
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=tenant.id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="ADMIN_ACTIVATE" if is_active else "ADMIN_DEACTIVATE",
+            target_entity="users",
+            target_id=admin.id,
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+        await db.commit()
+        await db.refresh(admin)
+        return TenantAdminSummary(
+            id=admin.id, name=admin.name, email=admin.email, phone=admin.phone, is_active=admin.is_active
+        )
+
+    @staticmethod
+    async def reset_tenant_admin_password(
+        db: AsyncSession, current_user: User, tenant_id: str
+    ) -> TenantAdminPasswordResetResponse:
+        """SuperAdmin-triggered forced password reset for a tenant's Admin —
+        issues a real PasswordResetToken and emails it via the exact same
+        flow as the public "forgot password" endpoint (AuthService.forgot_password),
+        just without that endpoint's enumeration-safe silent no-op: the
+        caller is an authenticated SuperAdmin naming an explicit tenant, so
+        there's no enumeration risk in reporting a missing Admin clearly."""
+        tenant = await SuperAdminRepository.get_tenant_by_id(db, tenant_id)
+        if not tenant:
+            raise ResourceNotFoundException(f"Tenant ID '{tenant_id}' not found")
+
+        admin = await SuperAdminRepository.get_primary_admin_for_tenant(db, tenant_id)
+        if not admin:
+            raise ResourceNotFoundException(f"Tenant '{tenant_id}' has no Admin account")
+        if not admin.email:
+            raise ValidationException(f"Tenant '{tenant_id}' Admin account has no email on file")
+
+        raw_token = TokenService.generate_raw_token()
+        reset_token = PasswordResetToken(
+            id=f"prt_{uuid.uuid4().hex[:16]}",
+            user_id=admin.id,
+            token_hash=TokenService.hash_token(raw_token),
+            expires_at=datetime.now(timezone.utc)
+            + timedelta(minutes=settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES),
+        )
+        db.add(reset_token)
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=tenant.id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="ADMIN_PASSWORD_RESET_TRIGGERED",
+            target_entity="users",
+            target_id=admin.id,
+        )
+        await db.commit()
+
+        reset_link = f"{settings.FRONTEND_URL}/auth/reset-password?token={raw_token}"
+        email_sent = True
+        try:
+            await get_email_provider().send_email(
+                to=admin.email,
+                subject="Your DFX Solution password has been reset by an administrator",
+                body_text=(
+                    f"Hi {admin.name},\n\n"
+                    f"A platform administrator has triggered a password reset for your DFX Solution "
+                    f"account. This link expires in {settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES} "
+                    f"minutes and can only be used once:\n\n"
+                    f"{reset_link}\n\n"
+                    f"If you weren't expecting this, contact your platform administrator."
+                ),
+                body_html=(
+                    f"<p>Hi {admin.name},</p>"
+                    f"<p>A platform administrator has triggered a password reset for your DFX Solution "
+                    f"account. This link expires in {settings.PASSWORD_RESET_TOKEN_EXPIRE_MINUTES} "
+                    f"minutes and can only be used once:</p>"
+                    f'<p><a href="{reset_link}">{reset_link}</a></p>'
+                    f"<p>If you weren't expecting this, contact your platform administrator.</p>"
+                ),
+            )
+        except Exception as e:
+            # Never surface as an API error — the reset token is already
+            # issued and valid; only the notification email failed.
+            logger.warning(f"Could not send admin-reset email to user '{admin.id}': {e}")
+            email_sent = False
+
+        return TenantAdminPasswordResetResponse(admin_email=admin.email, reset_email_sent=email_sent)
 
     @staticmethod
     async def provision_tenant(
