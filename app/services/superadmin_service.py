@@ -36,6 +36,7 @@ from app.schemas.superadmin import (
     ProvisionedAdminSummary,
     TenantAdminSummary,
     TenantAdminPasswordResetResponse,
+    TenantSubscriptionUpdateRequest,
 )
 from app.schemas.export import ExportFileResponse, ExportFormat
 from app.services.export_service import ExportService, ExportColumn
@@ -88,6 +89,7 @@ class SuperAdminService:
         if not tenant:
             raise ResourceNotFoundException(f"Tenant ID '{tenant_id}' not found")
         admin = await SuperAdminRepository.get_primary_admin_for_tenant(db, tenant_id)
+        subscription = await SuperAdminRepository.get_subscription_for_tenant(db, tenant_id)
         return TenantDetailResponse(
             id=tenant.id,
             name=tenant.name,
@@ -97,8 +99,59 @@ class SuperAdminService:
             logo_url=tenant.logo_url,
             created_at=tenant.created_at,
             updated_at=tenant.updated_at,
+            subscription=SubscriptionSummary.model_validate(subscription) if subscription else None,
             **_admin_contact_fields(admin),
         )
+
+    @staticmethod
+    async def update_tenant_subscription(
+        db: AsyncSession, current_user: User, tenant_id: str, req: TenantSubscriptionUpdateRequest
+    ) -> TenantDetailResponse:
+        """Change plan and/or access mode for an existing tenant — the
+        'extend trial' / 'switch to indefinite' action. Does not touch
+        tenant.status directly except to re-activate a tenant whose only
+        reason for being Inactive was an expired trial (an explicitly
+        Suspended tenant, i.e. SuperAdmin-disabled, stays Inactive until the
+        separate set_tenant_status action re-enables it)."""
+        tenant = await SuperAdminRepository.get_tenant_by_id(db, tenant_id)
+        if not tenant:
+            raise ResourceNotFoundException(f"Tenant ID '{tenant_id}' not found")
+
+        subscription = await SuperAdminRepository.get_subscription_for_tenant(db, tenant_id)
+        if not subscription:
+            subscription = Subscription(id=f"sub_{uuid.uuid4().hex[:12]}", tenant_id=tenant_id, plan=req.plan or "Professional", status="Active")
+            db.add(subscription)
+
+        before_state = {"plan": subscription.plan, "status": subscription.status, "trial_ends_at": str(subscription.trial_ends_at)}
+        was_expired = subscription.status == "Expired"
+
+        if req.plan:
+            subscription.plan = req.plan
+        if req.access_mode == "INDEFINITE":
+            subscription.trial_ends_at = None
+            subscription.status = "Active"
+        else:
+            subscription.trial_ends_at = datetime.now(timezone.utc) + timedelta(days=req.trial_days)
+            subscription.status = "Trial"
+
+        # Only auto-reactivate the tenant if it was Inactive purely because
+        # of the expired trial we just fixed — an explicit SuperAdmin
+        # suspension is a separate, deliberate action this must not undo.
+        if was_expired and tenant.status == "Inactive":
+            tenant.status = "Active"
+
+        await AuditRepository.create_log(
+            db, tenant_id=tenant.id, actor_user_id=current_user.id, actor_name=current_user.name,
+            actor_role=current_user.role.name, action="SUBSCRIPTION_UPDATE",
+            target_entity="subscriptions", target_id=subscription.id,
+            before_state=before_state,
+            after_state={"plan": subscription.plan, "status": subscription.status, "trial_ends_at": str(subscription.trial_ends_at)},
+        )
+
+        await db.commit()
+        await db.refresh(tenant)
+        await db.refresh(subscription)
+        return await SuperAdminService.get_tenant_detail(db, current_user, tenant_id)
 
     @staticmethod
     async def set_tenant_status(

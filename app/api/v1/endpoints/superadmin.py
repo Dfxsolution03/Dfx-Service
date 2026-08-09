@@ -12,6 +12,7 @@ from app.schemas.superadmin import (
     TenantStatusUpdateRequest,
     TenantProvisionRequest,
     TenantAdminStatusUpdateRequest,
+    TenantSubscriptionUpdateRequest,
 )
 from app.schemas.export import ExportFormat
 from app.services.superadmin_service import SuperAdminService
@@ -88,7 +89,7 @@ async def get_tenant_detail(
     response_model=StandardSuccessResponse,
     status_code=status.HTTP_200_OK,
     summary="Enable/Disable Tenant (SuperAdmin)",
-    description="Sets a tenant's status to Active or Inactive. A pure status-flag toggle — does not cascade to blocking existing user logins.",
+    description="Sets a tenant's status to Active or Inactive. Enforced at login/refresh — a disabled tenant's users cannot authenticate or refresh their session.",
 )
 async def set_tenant_status(
     tenant_id: str,
@@ -100,6 +101,27 @@ async def set_tenant_status(
     return StandardSuccessResponse(
         success=True,
         message=f"Tenant {'enabled' if req.status == 'Active' else 'disabled'} successfully",
+        data={"tenant": tenant.model_dump(mode="json")},
+    )
+
+
+@router.put(
+    "/tenants/{tenant_id}/subscription",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update Tenant Subscription/Access (SuperAdmin)",
+    description="Change plan and/or switch between Trial (with a duration) and Indefinite access. Trial expiry is enforced at login/refresh, not just displayed.",
+)
+async def update_tenant_subscription(
+    tenant_id: str,
+    req: TenantSubscriptionUpdateRequest,
+    current_user: User = Depends(require_superadmin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    tenant = await SuperAdminService.update_tenant_subscription(db, current_user, tenant_id, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Tenant subscription updated successfully",
         data={"tenant": tenant.model_dump(mode="json")},
     )
 

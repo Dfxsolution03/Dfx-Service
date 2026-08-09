@@ -3,7 +3,7 @@ from typing import Dict, List, Optional
 from sqlalchemy import select, func, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.auth import Tenant, User, Role
+from app.models.auth import Tenant, Subscription, User, Role
 from app.models.scheme import Scheme
 from app.models.enrollment import SchemeEnrollment
 from app.models.payment import Payment, STATUS_SUCCESS
@@ -33,6 +33,12 @@ class SuperAdminRepository:
     @staticmethod
     async def get_tenant_by_id(db: AsyncSession, tenant_id: str) -> Optional[Tenant]:
         stmt = select(Tenant).where(Tenant.id == tenant_id)
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    @staticmethod
+    async def get_subscription_for_tenant(db: AsyncSession, tenant_id: str) -> Optional[Subscription]:
+        stmt = select(Subscription).where(Subscription.tenant_id == tenant_id)
         result = await db.execute(stmt)
         return result.scalar_one_or_none()
 

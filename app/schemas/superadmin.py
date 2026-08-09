@@ -1,12 +1,22 @@
 from datetime import datetime
 from typing import List, Literal, Optional
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
 
 # Reused directly — identical shape needed here as in the Reports module.
 from app.schemas.report import DateRangeInfo
 
 TenantStatus = Literal["Active", "Inactive"]
 SubscriptionPlan = Literal["Starter", "Professional", "Business", "Enterprise"]
+
+
+class SubscriptionSummary(BaseModel):
+    id: str
+    plan: str
+    status: str
+    trial_ends_at: Optional[datetime]
+
+    class Config:
+        from_attributes = True
 
 
 class TenantListItem(BaseModel):
@@ -45,9 +55,31 @@ class TenantDetailResponse(BaseModel):
     logo_url: Optional[str] = None
     created_at: datetime
     updated_at: datetime
+    # None only for tenants provisioned before subscriptions existed / seed
+    # data with no Subscription row — see auth_service._enforce_tenant_access.
+    subscription: Optional[SubscriptionSummary] = None
 
     class Config:
         from_attributes = True
+
+
+class TenantSubscriptionUpdateRequest(BaseModel):
+    """SuperAdmin: change plan and/or access mode for an existing tenant.
+    access_mode='INDEFINITE' clears trial_ends_at entirely (no automatic
+    expiry — the tenant only ever changes via SuperAdmin's own status
+    toggle). access_mode='TRIAL' requires trial_days and (re)computes
+    trial_ends_at from now, which also re-activates a previously-expired
+    trial — this is the "extend access" action."""
+    plan: Optional[str] = Field(None, min_length=2, max_length=50)
+    access_mode: Literal["TRIAL", "INDEFINITE"]
+    trial_days: Optional[int] = Field(None, ge=1, le=3650)
+
+    @field_validator("trial_days")
+    @classmethod
+    def validate_trial_days(cls, v: Optional[int], info) -> Optional[int]:
+        if info.data.get("access_mode") == "TRIAL" and not v:
+            raise ValueError("trial_days is required when access_mode is TRIAL")
+        return v
 
 
 class TenantStatusUpdateRequest(BaseModel):
@@ -147,16 +179,6 @@ class BranchSummary(BaseModel):
     name: str
     address: str
     phone: str
-
-    class Config:
-        from_attributes = True
-
-
-class SubscriptionSummary(BaseModel):
-    id: str
-    plan: str
-    status: str
-    trial_ends_at: Optional[datetime]
 
     class Config:
         from_attributes = True

@@ -22,7 +22,7 @@ from app.exceptions.base import (
     ResourceNotFoundException,
     ValidationException,
 )
-from app.models.auth import Tenant, Role, User, RefreshToken, PasswordResetToken, EmailVerificationToken
+from app.models.auth import Tenant, Subscription, Role, User, RefreshToken, PasswordResetToken, EmailVerificationToken
 from app.repositories.audit_repository import AuditRepository
 from app.services.token_service import TokenService
 from app.services.email_service import get_email_provider
@@ -34,6 +34,51 @@ from app.schemas.auth import (
     ResetPasswordRequest,
     EmailVerificationConfirmRequest,
 )
+
+
+async def _enforce_tenant_access(db: AsyncSession, tenant_id: str) -> None:
+    """
+    Real backend enforcement of tenant access lifecycle (Trial/Indefinite/
+    Suspended) — called on every login and token refresh for a non-SuperAdmin
+    user, so a suspended tenant or an expired trial actually blocks access
+    rather than just being a display flag the frontend could ignore.
+
+    A tenant with no Subscription row (shouldn't happen for anything
+    provisioned via SuperAdminService, but is possible for older/seed data)
+    is treated as indefinite — absence of a subscription is not itself a
+    reason to lock someone out.
+    """
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == tenant_id))).scalar_one_or_none()
+    if not tenant:
+        raise UnauthorizedException("Tenant account no longer exists")
+
+    subscription = (
+        await db.execute(select(Subscription).where(Subscription.tenant_id == tenant_id))
+    ).scalar_one_or_none()
+
+    # Lazily flip an expired trial to Expired/Inactive right here — the only
+    # trigger point that matters is "someone tried to use this tenant",
+    # since there is no background scheduler in this codebase.
+    if (
+        subscription
+        and subscription.trial_ends_at is not None
+        and subscription.trial_ends_at.replace(tzinfo=timezone.utc) < datetime.now(timezone.utc)
+        and subscription.status not in ("Expired", "Suspended")
+    ):
+        subscription.status = "Expired"
+        tenant.status = "Inactive"
+        await AuditRepository.create_log(
+            db, tenant_id=tenant.id, actor_user_id="system", actor_name="System",
+            actor_role="System", action="SUBSCRIPTION_AUTO_EXPIRE",
+            target_entity="subscriptions", target_id=subscription.id,
+            before_state={"status": "Trial"}, after_state={"status": "Expired"},
+        )
+        await db.commit()
+
+    if tenant.status != "Active":
+        if subscription and subscription.status == "Expired":
+            raise UnauthorizedException("This store's trial period has expired. Contact your platform administrator.")
+        raise UnauthorizedException("This store's access has been suspended. Contact your platform administrator.")
 
 
 class AuthService:
@@ -131,6 +176,9 @@ class AuthService:
         if not user.is_active:
             raise UnauthorizedException("Account is inactive")
 
+        if user.tenant_id:
+            await _enforce_tenant_access(db, user.tenant_id)
+
         # Generate tokens
         token_id = f"tkn_{uuid.uuid4().hex[:16]}"
         access_token = create_access_token(
@@ -209,6 +257,9 @@ class AuthService:
         user = (await db.execute(stmt_usr)).scalar_one_or_none()
         if not user or not user.is_active:
             raise UnauthorizedException("User account associated with refresh token is invalid")
+
+        if user.tenant_id:
+            await _enforce_tenant_access(db, user.tenant_id)
 
         # 1. Revoke current refresh token
         db_token.is_revoked = True
