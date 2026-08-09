@@ -23,6 +23,13 @@ class Settings(BaseSettings):
     SYNC_DATABASE_URL: Optional[str] = "sqlite:///./jros_dev.db"
     DIRECT_URL: Optional[str] = None
 
+    # Isolated database for the pytest suite ONLY — never read by the running
+    # application. tests/conftest.py refuses to start without this set to a
+    # value distinct from DATABASE_URL, so a test run can never write to
+    # whatever database DATABASE_URL happens to point at (dev, staging, or
+    # production). See tests/conftest.py's _resolve_test_database_url().
+    TEST_DATABASE_URL: Optional[str] = None
+
     # Connection Pooling Settings
     DB_POOL_SIZE: int = 20
     DB_MAX_OVERFLOW: int = 10

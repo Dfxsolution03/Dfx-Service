@@ -5,16 +5,22 @@ JROS Test Suite — conftest.py
 Central pytest fixtures for the entire JROS test suite.
 
 Design:
-- Uses the real Supabase PostgreSQL database (same DB engine as production)
+- Runs against an ISOLATED test database (TEST_DATABASE_URL) — never against
+  DATABASE_URL, which is whatever database the running application (dev,
+  staging, or production) is actually using. See _resolve_test_database_url()
+  below: pytest refuses to even start collecting tests if TEST_DATABASE_URL
+  isn't set, or if it's identical to DATABASE_URL.
 - Every test run creates uniquely-named test data (uuid-tagged) to prevent
   collisions with existing records
-- Cleanup is performed via finalizers — production rows are never modified
+- Cleanup is performed via finalizers where practical — but the real safety
+  guarantee is database isolation, not per-test cleanup discipline (several
+  tests predating this guard created rows with no teardown at all).
 - All tests are isolated by design (each test creates its own data)
 - The JROS FastAPI app is tested through httpx.AsyncClient (real HTTP layer)
 
 Fixtures provided:
 - client            → httpx.AsyncClient bound to the JROS app
-- db_session        → real AsyncSession against Supabase
+- db_session        → real AsyncSession against the isolated test database
 - test_tenant       → a live Tenant row (seeded at test time)
 - customer_token    → JWT pair for a freshly-registered test customer
 - customer_user     → the User model object for the test customer
@@ -22,6 +28,8 @@ Fixtures provided:
 - auth_headers      → Authorization header dict for a given token
 """
 
+import os
+import sys
 import uuid
 import pytest
 import pytest_asyncio
@@ -42,8 +50,45 @@ from app.models.auth import Tenant, Role, User, RefreshToken
 from sqlalchemy.ext.asyncio import create_async_engine, async_sessionmaker, AsyncSession as _AsyncSession
 from sqlalchemy.pool import NullPool
 
+
+def _resolve_test_database_url() -> str:
+    """
+    Refuses to run any test if there's a real risk of touching a non-test
+    database. This is the ONLY thing standing between `pytest` and writing
+    directly into production — see the Phase-4/6/7 incident where the lack
+    of this check let dozens of tnt_test_*/"Provision Test Co"/"Other Tenant"
+    rows accumulate in the live production database.
+
+    Checked in order:
+      1. TEST_DATABASE_URL (env var or .env) must be set at all.
+      2. It must not be identical to DATABASE_URL — the two must be
+         different databases, full stop.
+    """
+    test_url = os.environ.get("TEST_DATABASE_URL") or settings.TEST_DATABASE_URL
+    if not test_url:
+        raise RuntimeError(
+            "\n\n"
+            "REFUSING TO RUN TESTS: TEST_DATABASE_URL is not set.\n"
+            "tests/conftest.py will not fall back to DATABASE_URL — that may be "
+            "a shared dev database or, worse, production.\n"
+            "Set TEST_DATABASE_URL to a separate, isolated Postgres database "
+            "(see .env.example) before running pytest.\n"
+        )
+    if test_url == settings.DATABASE_URL:
+        raise RuntimeError(
+            "\n\n"
+            "REFUSING TO RUN TESTS: TEST_DATABASE_URL is identical to DATABASE_URL.\n"
+            "Tests must run against a database that is NOT the one the "
+            "application itself uses. Point TEST_DATABASE_URL at a separate "
+            "database.\n"
+        )
+    return test_url
+
+
+_TEST_DATABASE_URL = _resolve_test_database_url()
+
 _test_engine = create_async_engine(
-    settings.DATABASE_URL,
+    _TEST_DATABASE_URL,
     poolclass=NullPool,
     echo=False,
     future=True,
