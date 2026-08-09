@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_db
 from app.models.auth import User
-from app.permissions.dependencies import require_admin_only
+from app.permissions.dependencies import require_admin_or_staff_module
 from app.schemas.auth import StandardSuccessResponse
 from app.schemas.report import ReportPeriod
 from app.schemas.export import ExportFormat
@@ -29,7 +29,7 @@ async def get_dashboard_summary(
     period: Optional[ReportPeriod] = Query(None, description="today | this_week | this_month | this_year"),
     date_from: Optional[date] = Query(None, description="Custom range start (requires date_to)"),
     date_to: Optional[date] = Query(None, description="Custom range end (requires date_from)"),
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
     db: AsyncSession = Depends(get_async_db),
 ):
     data = await ReportService.get_dashboard_summary(db, current_user, period, date_from, date_to)
@@ -51,7 +51,7 @@ async def get_payment_summary(
     period: Optional[ReportPeriod] = Query(None),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
     db: AsyncSession = Depends(get_async_db),
 ):
     data = await ReportService.get_payment_summary(db, current_user, period, date_from, date_to)
@@ -74,7 +74,7 @@ async def get_top_customers(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
     limit: int = Query(10, ge=1, le=50),
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
     db: AsyncSession = Depends(get_async_db),
 ):
     data = await ReportService.get_top_customers(db, current_user, period, date_from, date_to, limit)
@@ -96,7 +96,7 @@ async def get_enrollment_summary(
     period: Optional[ReportPeriod] = Query(None),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
     db: AsyncSession = Depends(get_async_db),
 ):
     data = await ReportService.get_enrollment_summary(db, current_user, period, date_from, date_to)
@@ -118,7 +118,7 @@ async def get_gold_rate_trend(
     period: Optional[ReportPeriod] = Query(None),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
     db: AsyncSession = Depends(get_async_db),
 ):
     data = await ReportService.get_gold_rate_trend(db, current_user, period, date_from, date_to)
@@ -140,7 +140,7 @@ async def get_scheme_summary(
     period: Optional[ReportPeriod] = Query(None),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
     db: AsyncSession = Depends(get_async_db),
 ):
     data = await ReportService.get_scheme_summary(db, current_user, period, date_from, date_to)
@@ -170,7 +170,7 @@ async def export_reports_summary(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
     limit: int = Query(10, ge=1, le=50),
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
     db: AsyncSession = Depends(get_async_db),
 ):
     file = await ReportService.export_reports_summary(db, current_user, period, date_from, date_to, limit, format)
@@ -190,7 +190,7 @@ async def export_reports_summary(
 )
 async def export_analytics_summary(
     format: ExportFormat = Query("excel"),
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
     db: AsyncSession = Depends(get_async_db),
 ):
     file = await ReportService.export_analytics_summary(db, current_user, format)
@@ -210,7 +210,7 @@ async def export_analytics_summary(
 )
 async def export_dashboard_summary(
     format: ExportFormat = Query("excel"),
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
     db: AsyncSession = Depends(get_async_db),
 ):
     file = await ReportService.export_dashboard_summary(db, current_user, format)

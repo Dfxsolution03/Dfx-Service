@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_db
 from app.models.auth import User
-from app.permissions.dependencies import get_current_user, require_admin_only
+from app.permissions.dependencies import require_admin_or_staff_module, get_current_user
 from app.schemas.auth import StandardSuccessResponse
 from app.schemas.enrollment import EnrollmentCreateRequest
 from app.services.enrollment_service import EnrollmentService
@@ -20,7 +20,7 @@ router = APIRouter()
     description="Returns all scheme enrollments for the admin's tenant. Read-only.",
 )
 async def list_enrollments(
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("enrollments")),
     db: AsyncSession = Depends(get_async_db),
 ):
     enrollments = await EnrollmentService.get_enrollments(db, current_user)
@@ -40,7 +40,7 @@ async def list_enrollments(
 )
 async def get_enrollment(
     enrollment_id: str,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("enrollments")),
     db: AsyncSession = Depends(get_async_db),
 ):
     enrollment = await EnrollmentService.get_enrollment_by_id(db, current_user, enrollment_id)

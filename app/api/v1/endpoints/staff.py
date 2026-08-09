@@ -5,7 +5,7 @@ from app.core.database import get_async_db
 from app.models.auth import User
 from app.permissions.dependencies import require_admin_only
 from app.schemas.auth import StandardSuccessResponse
-from app.schemas.staff import StaffCreateRequest, StaffStatusUpdateRequest
+from app.schemas.staff import StaffCreateRequest, StaffStatusUpdateRequest, StaffPermissionsUpdateRequest
 from app.services.staff_service import StaffService
 
 router = APIRouter()
@@ -67,5 +67,26 @@ async def update_staff_status(
     return StandardSuccessResponse(
         success=True,
         message="Staff status updated successfully",
+        data={"staff": staff.model_dump(mode="json")},
+    )
+
+
+@router.put(
+    "/admin/staff/{staff_id}/permissions",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update Staff Module Permissions (Admin)",
+    description="Sets the exact set of admin-panel modules a Staff member can access. Own-tenant only. Replaces the full grant set — not additive.",
+)
+async def update_staff_permissions(
+    staff_id: str,
+    req: StaffPermissionsUpdateRequest,
+    current_user: User = Depends(require_admin_only),
+    db: AsyncSession = Depends(get_async_db),
+):
+    staff = await StaffService.update_staff_permissions(db, current_user, staff_id, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Staff permissions updated successfully",
         data={"staff": staff.model_dump(mode="json")},
     )

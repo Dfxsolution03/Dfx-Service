@@ -9,7 +9,35 @@ from app.models.auth import User
 from app.repositories.customer_repository import CustomerRepository
 from app.repositories.audit_repository import AuditRepository
 from app.exceptions.base import ConflictException, ResourceNotFoundException, ForbiddenException
-from app.schemas.staff import StaffCreateRequest, StaffStatusUpdateRequest, StaffResponse
+from app.schemas.staff import (
+    StaffCreateRequest,
+    StaffStatusUpdateRequest,
+    StaffPermissionsUpdateRequest,
+    StaffResponse,
+)
+
+
+def _parse_permissions(staff_permissions: str | None) -> List[str]:
+    if not staff_permissions:
+        return []
+    return [m.strip() for m in staff_permissions.split(",") if m.strip()]
+
+
+def _serialize_permissions(permissions: List[str]) -> str | None:
+    return ",".join(permissions) if permissions else None
+
+
+def _to_response(user: User) -> StaffResponse:
+    return StaffResponse(
+        id=user.id,
+        name=user.name,
+        email=user.email,
+        phone=user.phone,
+        is_active=user.is_active,
+        member_since=user.member_since,
+        permissions=_parse_permissions(user.staff_permissions),
+        created_at=user.created_at,
+    )
 
 
 class StaffService:
@@ -20,6 +48,10 @@ class StaffService:
     itself is never imported or modified. Role is always looked up as Staff
     server-side (StaffCreateRequest has no role field at all), so there is no
     input path that could create an Admin or SuperAdmin account here.
+
+    staff_permissions is stored as a comma-separated string on User (see
+    app/models/auth.py) — parsed/serialized only here at the service
+    boundary, same convention as CatalogueDesign.canvas_json.
     """
 
     @staticmethod
@@ -28,7 +60,7 @@ class StaffService:
             raise ForbiddenException("Tenant context required")
 
         staff = await CustomerRepository.get_staff_by_tenant(db, current_user.tenant_id)
-        return [StaffResponse.model_validate(s) for s in staff]
+        return [_to_response(s) for s in staff]
 
     @staticmethod
     async def create_staff(
@@ -66,6 +98,7 @@ class StaffService:
             kyc_status="Pending",
             member_since=datetime.now(timezone.utc).strftime("%B %Y"),
             is_active=True,
+            staff_permissions=_serialize_permissions(req.permissions),
         )
         await CustomerRepository.create_staff_user(db, staff_user)
 
@@ -79,12 +112,12 @@ class StaffService:
             target_entity="users",
             target_id=staff_id,
             before_state=None,
-            after_state={"name": req.name, "email": req.email, "phone": req.phone},
+            after_state={"name": req.name, "email": req.email, "phone": req.phone, "permissions": req.permissions},
         )
 
         await db.commit()
         await db.refresh(staff_user)
-        return StaffResponse.model_validate(staff_user)
+        return _to_response(staff_user)
 
     @staticmethod
     async def update_staff_status(
@@ -118,4 +151,38 @@ class StaffService:
 
         await db.commit()
         await db.refresh(staff_user)
-        return StaffResponse.model_validate(staff_user)
+        return _to_response(staff_user)
+
+    @staticmethod
+    async def update_staff_permissions(
+        db: AsyncSession, current_user: User, staff_id: str, req: StaffPermissionsUpdateRequest
+    ) -> StaffResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        staff_user = await CustomerRepository.get_staff_by_id_for_tenant(
+            db, current_user.tenant_id, staff_id
+        )
+        if not staff_user:
+            raise ResourceNotFoundException(f"Staff member ID '{staff_id}' not found")
+
+        before_state = {"permissions": _parse_permissions(staff_user.staff_permissions)}
+        staff_user.staff_permissions = _serialize_permissions(req.permissions)
+        after_state = {"permissions": req.permissions}
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="STAFF_PERMISSIONS_UPDATE",
+            target_entity="users",
+            target_id=staff_id,
+            before_state=before_state,
+            after_state=after_state,
+        )
+
+        await db.commit()
+        await db.refresh(staff_user)
+        return _to_response(staff_user)

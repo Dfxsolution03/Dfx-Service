@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_db
 from app.models.auth import User
-from app.permissions.dependencies import get_current_user, require_admin_only
+from app.permissions.dependencies import require_admin_or_staff_module, get_current_user, require_admin_only
 from app.schemas.auth import StandardSuccessResponse
 from app.schemas.customer import (
     ProfileUpdateRequest,
@@ -133,7 +133,7 @@ async def submit_kyc_document_metadata(
     description="Returns all KYC submissions for the admin's tenant, newest first.",
 )
 async def list_kyc_records(
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("kyc")),
     db: AsyncSession = Depends(get_async_db),
 ):
     records = await CustomerService.get_kyc_records_for_admin(db, current_user)
@@ -153,7 +153,7 @@ async def list_kyc_records(
 )
 async def get_kyc_record(
     kyc_id: str,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("kyc")),
     db: AsyncSession = Depends(get_async_db),
 ):
     record = await CustomerService.get_kyc_record_for_admin(db, current_user, kyc_id)
@@ -173,7 +173,7 @@ async def get_kyc_record(
 )
 async def approve_kyc_record(
     kyc_id: str,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("kyc")),
     db: AsyncSession = Depends(get_async_db),
 ):
     record = await CustomerService.approve_kyc(db, current_user, kyc_id)
@@ -194,7 +194,7 @@ async def approve_kyc_record(
 async def reject_kyc_record(
     kyc_id: str,
     req: KYCRejectRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("kyc")),
     db: AsyncSession = Depends(get_async_db),
 ):
     record = await CustomerService.reject_kyc(db, current_user, kyc_id, req)
@@ -359,7 +359,7 @@ async def list_customers_admin(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     search: Optional[str] = Query(None),
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("customers")),
     db: AsyncSession = Depends(get_async_db),
 ):
     customers, pagination = await CustomerService.get_customers_for_admin(db, current_user, page, limit, search)
@@ -380,7 +380,7 @@ async def list_customers_admin(
 )
 async def get_customer_detail_admin(
     customer_id: str,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("customers")),
     db: AsyncSession = Depends(get_async_db),
 ):
     customer = await CustomerService.get_customer_detail_for_admin(db, current_user, customer_id)
@@ -440,7 +440,7 @@ async def update_tenant_profile(
     description="All branches for the admin's own tenant, including inactive ones.",
 )
 async def list_branches_admin(
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("branches")),
     db: AsyncSession = Depends(get_async_db),
 ):
     branches = await CustomerService.get_branches_for_admin(db, current_user)
@@ -460,7 +460,7 @@ async def list_branches_admin(
 )
 async def create_branch_admin(
     req: BranchCreateRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("branches")),
     db: AsyncSession = Depends(get_async_db),
 ):
     branch = await CustomerService.create_branch_for_admin(db, current_user, req)
@@ -481,7 +481,7 @@ async def create_branch_admin(
 async def update_branch_admin(
     branch_id: str,
     req: BranchUpdateRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("branches")),
     db: AsyncSession = Depends(get_async_db),
 ):
     branch = await CustomerService.update_branch_for_admin(db, current_user, branch_id, req)
@@ -502,7 +502,7 @@ async def update_branch_admin(
 async def set_branch_status_admin(
     branch_id: str,
     req: BranchStatusUpdateRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("branches")),
     db: AsyncSession = Depends(get_async_db),
 ):
     branch = await CustomerService.set_branch_status_for_admin(db, current_user, branch_id, req)

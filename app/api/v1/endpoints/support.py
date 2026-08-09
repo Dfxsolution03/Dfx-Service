@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_db
 from app.models.auth import User
-from app.permissions.dependencies import get_current_user, require_admin_only
+from app.permissions.dependencies import require_admin_or_staff_module, get_current_user
 from app.schemas.auth import StandardSuccessResponse
 from app.schemas.support import (
     SupportTicketCreateRequest,
@@ -124,7 +124,7 @@ async def list_faqs(
     description="Returns all support tickets for the admin's tenant, newest first.",
 )
 async def list_tickets_admin(
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("support")),
     db: AsyncSession = Depends(get_async_db),
 ):
     tickets = await SupportService.get_tickets_for_admin(db, current_user)
@@ -145,7 +145,7 @@ async def list_tickets_admin(
 async def update_ticket_admin(
     ticket_id: str,
     req: SupportTicketAdminUpdateRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("support")),
     db: AsyncSession = Depends(get_async_db),
 ):
     ticket = await SupportService.update_ticket_for_admin(db, current_user, ticket_id, req)
@@ -165,7 +165,7 @@ async def update_ticket_admin(
 )
 async def get_ticket_detail_admin(
     ticket_id: str,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("support")),
     db: AsyncSession = Depends(get_async_db),
 ):
     ticket = await SupportService.get_ticket_detail_for_admin(db, current_user, ticket_id)
@@ -186,7 +186,7 @@ async def get_ticket_detail_admin(
 async def add_message_admin(
     ticket_id: str,
     req: SupportMessageCreateRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("support")),
     db: AsyncSession = Depends(get_async_db),
 ):
     message = await SupportService.add_message_for_admin(db, current_user, ticket_id, req)

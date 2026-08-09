@@ -231,6 +231,7 @@ async def get_my_profile(
         kyc_status=current_user.kyc_status,
         member_since=current_user.member_since,
         is_active=current_user.is_active,
+        permissions=[m.strip() for m in (current_user.staff_permissions or "").split(",") if m.strip()],
     )
     return StandardSuccessResponse(
         success=True,

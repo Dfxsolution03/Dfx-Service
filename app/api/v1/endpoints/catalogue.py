@@ -4,7 +4,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_db
 from app.models.auth import User
-from app.permissions.dependencies import require_admin_only
+from app.permissions.dependencies import require_admin_or_staff_module
 from app.schemas.auth import StandardSuccessResponse
 from app.schemas.catalogue import (
     ProductCreateRequest,
@@ -33,7 +33,7 @@ router = APIRouter()
     description="Returns all products (active and inactive) for the admin's tenant, each with its image variants.",
 )
 async def list_products(
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     products = await CatalogueService.get_products(db, current_user)
@@ -52,7 +52,7 @@ async def list_products(
 )
 async def get_product(
     product_id: str,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     product = await CatalogueService.get_product_by_id(db, current_user, product_id)
@@ -71,7 +71,7 @@ async def get_product(
 )
 async def create_product(
     req: ProductCreateRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     product = await CatalogueService.create_product(db, current_user, req)
@@ -91,7 +91,7 @@ async def create_product(
 async def update_product(
     product_id: str,
     req: ProductUpdateRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     product = await CatalogueService.update_product(db, current_user, product_id, req)
@@ -111,7 +111,7 @@ async def update_product(
 )
 async def deactivate_product(
     product_id: str,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     await CatalogueService.deactivate_product(db, current_user, product_id)
@@ -132,7 +132,7 @@ async def upload_image(
     product_id: str,
     file: UploadFile = File(...),
     shot_type: Optional[str] = Form(None),
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     image = await CatalogueService.upload_image(db, current_user, product_id, file, shot_type)
@@ -152,7 +152,7 @@ async def upload_image(
 async def set_primary_image(
     product_id: str,
     image_id: str,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     await CatalogueService.set_primary_image(db, current_user, product_id, image_id)
@@ -168,7 +168,7 @@ async def set_primary_image(
 async def reorder_images(
     product_id: str,
     req: ImageReorderRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     await CatalogueService.reorder_images(db, current_user, product_id, req)
@@ -184,7 +184,7 @@ async def reorder_images(
 async def delete_image(
     product_id: str,
     image_id: str,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     await CatalogueService.delete_image(db, current_user, product_id, image_id)
@@ -200,7 +200,7 @@ async def delete_image(
     description="Every image variant across every product for the admin's tenant.",
 )
 async def get_media_library(
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     images = await CatalogueService.get_media_library(db, current_user)
@@ -219,7 +219,7 @@ async def get_media_library(
     description="Reports whether uploads are backed by local disk or a configured Supabase Storage bucket.",
 )
 async def get_storage_status(
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
 ):
     result = CatalogueService.get_storage_status()
     return StandardSuccessResponse(
@@ -235,7 +235,7 @@ async def get_storage_status(
     description="Reports which AI provider (if any) is configured — always 'Stub'/not configured until Module 21's provider architecture is wired to a real vendor.",
 )
 async def get_ai_provider_status(
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
 ):
     result = CatalogueService.get_ai_provider_status()
     return StandardSuccessResponse(
@@ -259,7 +259,7 @@ async def enhance_image(
     product_id: str,
     image_id: str,
     req: EnhancementRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     await CatalogueService.enhance_image(db, current_user, product_id, image_id, req)
@@ -286,7 +286,7 @@ async def preview_edit_image(
     product_id: str,
     image_id: str,
     req: ImageEditRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await CatalogueService.preview_edit_image(db, current_user, product_id, image_id, req)
@@ -311,7 +311,7 @@ async def save_edit_image(
     product_id: str,
     image_id: str,
     req: ImageEditRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     image = await CatalogueService.save_edit_image(db, current_user, product_id, image_id, req)
@@ -338,7 +338,7 @@ async def save_edit_image(
 async def get_pipeline_status(
     product_id: str,
     image_id: str,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await CatalogueService.get_pipeline_status(db, current_user, product_id, image_id)
@@ -359,7 +359,7 @@ async def get_pipeline_status(
     summary="List Design Templates (Admin)",
     description="The 10 preset templates (Luxury White/Black, Royal Blue, Wedding, Festival, Instagram, WhatsApp, Square, Portrait, Landscape), each a preloaded, product-agnostic canvas document.",
 )
-async def list_templates(current_user: User = Depends(require_admin_only)):
+async def list_templates(current_user: User = Depends(require_admin_or_staff_module("catalogue"))):
     templates = CatalogueService.list_templates()
     return StandardSuccessResponse(
         success=True,
@@ -374,7 +374,7 @@ async def list_templates(current_user: User = Depends(require_admin_only)):
     status_code=status.HTTP_200_OK,
     summary="List Output Presets (Admin)",
 )
-async def list_output_presets(current_user: User = Depends(require_admin_only)):
+async def list_output_presets(current_user: User = Depends(require_admin_or_staff_module("catalogue"))):
     presets = CatalogueService.list_output_presets()
     return StandardSuccessResponse(
         success=True,
@@ -395,7 +395,7 @@ async def list_output_presets(current_user: User = Depends(require_admin_only)):
 async def save_design(
     product_id: str,
     req: CatalogueDesignSaveRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     design = await CatalogueService.save_design(db, current_user, product_id, req)
@@ -413,7 +413,7 @@ async def save_design(
 )
 async def list_designs(
     product_id: str,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     designs = await CatalogueService.get_designs(db, current_user, product_id)
@@ -436,7 +436,7 @@ async def list_designs(
 async def render_preview(
     product_id: str,
     req: RenderPreviewRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await CatalogueService.render_preview(db, current_user, product_id, req)
@@ -454,7 +454,7 @@ async def render_preview(
 async def get_design(
     product_id: str,
     design_id: str,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     design = await CatalogueService.get_design(db, current_user, product_id, design_id)
@@ -474,7 +474,7 @@ async def restore_design(
     product_id: str,
     design_id: str,
     req: CatalogueDesignCloneRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     design = await CatalogueService.restore_design(db, current_user, product_id, design_id, req)
@@ -494,7 +494,7 @@ async def duplicate_design(
     product_id: str,
     design_id: str,
     req: CatalogueDesignCloneRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     design = await CatalogueService.duplicate_design(db, current_user, product_id, design_id, req)
@@ -514,7 +514,7 @@ async def export_design(
     product_id: str,
     design_id: str,
     req: ExportDesignRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     image = await CatalogueService.export_design(db, current_user, product_id, design_id, req)
@@ -534,7 +534,7 @@ async def export_design(
 )
 async def batch_render(
     req: BatchRenderRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     images = await CatalogueService.batch_render(db, current_user, req)
@@ -554,7 +554,7 @@ async def batch_render(
 )
 async def generate_catalogue_pdf(
     req: CataloguePdfRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await CatalogueService.generate_catalogue_pdf(db, current_user, req)

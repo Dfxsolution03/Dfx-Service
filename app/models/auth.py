@@ -103,6 +103,12 @@ class User(Base, TimestampMixin):
     member_since: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     avatar_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    # Staff-only module access grants — comma-separated STAFF_MODULE keys
+    # (see app/core/constants.py). Same "plain Text, manual (de)serialization
+    # at the service boundary" convention as CatalogueDesign.canvas_json,
+    # rather than a first-of-its-kind JSON column. NULL/empty for every
+    # non-Staff role — Admin/SuperAdmin access is never gated by this.
+    staff_permissions: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     # Module 18 — nullable timestamp, same "value not just flag" convention as
     # KYCRecord.verified_at. NULL = not verified. Set once, never cleared.
     email_verified_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

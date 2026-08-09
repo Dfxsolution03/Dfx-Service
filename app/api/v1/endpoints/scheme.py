@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_db
 from app.models.auth import User
-from app.permissions.dependencies import get_current_user, require_admin_only
+from app.permissions.dependencies import require_admin_or_staff_module, get_current_user
 from app.schemas.auth import StandardSuccessResponse
 from app.schemas.scheme import SchemeCreateRequest, SchemeUpdateRequest
 from app.services.scheme_service import SchemeService
@@ -20,7 +20,7 @@ router = APIRouter()
     description="Returns all schemes (active and inactive) for the admin's tenant.",
 )
 async def list_schemes(
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("schemes")),
     db: AsyncSession = Depends(get_async_db),
 ):
     schemes = await SchemeService.get_schemes(db, current_user)
@@ -40,7 +40,7 @@ async def list_schemes(
 )
 async def get_scheme(
     scheme_id: str,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("schemes")),
     db: AsyncSession = Depends(get_async_db),
 ):
     scheme = await SchemeService.get_scheme_by_id(db, current_user, scheme_id)
@@ -60,7 +60,7 @@ async def get_scheme(
 )
 async def create_scheme(
     req: SchemeCreateRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("schemes")),
     db: AsyncSession = Depends(get_async_db),
 ):
     scheme = await SchemeService.create_scheme(db, current_user, req)
@@ -81,7 +81,7 @@ async def create_scheme(
 async def update_scheme(
     scheme_id: str,
     req: SchemeUpdateRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("schemes")),
     db: AsyncSession = Depends(get_async_db),
 ):
     scheme = await SchemeService.update_scheme(db, current_user, scheme_id, req)
@@ -101,7 +101,7 @@ async def update_scheme(
 )
 async def deactivate_scheme(
     scheme_id: str,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("schemes")),
     db: AsyncSession = Depends(get_async_db),
 ):
     await SchemeService.deactivate_scheme(db, current_user, scheme_id)

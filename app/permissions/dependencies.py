@@ -10,6 +10,7 @@ from app.core.security import decode_jwt_token
 from app.core.tenant_context import set_current_tenant_id
 from app.core.constants import (
     ROLE_ADMIN,
+    ROLE_STAFF,
     ROLE_SUPERADMIN,
     ROLE_PERMISSIONS_MAP,
 )
@@ -119,3 +120,28 @@ async def require_admin_only(
     if current_user.role.name != ROLE_ADMIN:
         raise ForbiddenException("Admin privileges required")
     return current_user
+
+
+def require_admin_or_staff_module(*modules: str) -> Callable:
+    """
+    Admin/SuperAdmin: always allowed — unrestricted tenant access, never
+    gated by staff_permissions.
+    Staff: allowed only if the account was granted at least one of the given
+    module keys (User.staff_permissions, comma-separated — see
+    app/core/constants.py's STAFF_MODULE_* / ALL_STAFF_MODULES). Anyone else
+    (Customer) is rejected outright, matching require_admin_only's scope.
+    """
+    async def checker(current_user: User = Depends(get_current_user)) -> User:
+        role_name = current_user.role.name
+        if role_name in (ROLE_ADMIN, ROLE_SUPERADMIN):
+            return current_user
+        if role_name == ROLE_STAFF:
+            granted = {m.strip() for m in (current_user.staff_permissions or "").split(",") if m.strip()}
+            if granted.intersection(modules):
+                return current_user
+            raise ForbiddenException(
+                f"Staff access to '{', '.join(modules)}' has not been granted for this account"
+            )
+        raise ForbiddenException("Admin privileges required")
+
+    return checker

@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_db
 from app.models.auth import User
-from app.permissions.dependencies import get_current_user, require_admin_only
+from app.permissions.dependencies import require_admin_or_staff_module, get_current_user
 from app.schemas.auth import StandardSuccessResponse
 from app.schemas.goldrate import GoldRateCreateRequest, GoldRateUpdateRequest
 from app.services.goldrate_service import GoldRateService
@@ -20,7 +20,7 @@ router = APIRouter()
     description="Returns today's 24K gold rate for the admin's tenant, or null if not yet set.",
 )
 async def get_today_rate(
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("gold_rate")),
     db: AsyncSession = Depends(get_async_db),
 ):
     rate = await GoldRateService.get_today_rate(db, current_user)
@@ -40,7 +40,7 @@ async def get_today_rate(
 )
 async def create_today_rate(
     req: GoldRateCreateRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("gold_rate")),
     db: AsyncSession = Depends(get_async_db),
 ):
     rate = await GoldRateService.create_today_rate(db, current_user, req)
@@ -60,7 +60,7 @@ async def create_today_rate(
 )
 async def update_today_rate(
     req: GoldRateUpdateRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("gold_rate")),
     db: AsyncSession = Depends(get_async_db),
 ):
     rate = await GoldRateService.update_today_rate(db, current_user, req)

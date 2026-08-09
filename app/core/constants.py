@@ -60,3 +60,38 @@ ROLE_PERMISSIONS_MAP = {
         PERM_BRANDING_MANAGE,
     ],
 }
+
+# Staff module access grants (Phase — Admin/Staff granular permissions).
+# Distinct from ROLE_PERMISSIONS_MAP above: that map is fixed per-role and
+# unused by any live endpoint today. This is per-INDIVIDUAL-STAFF-USER —
+# each Staff account is granted its own subset of these module keys
+# (User.staff_permissions), so two Staff accounts under the same tenant can
+# have entirely different access. Admin/SuperAdmin are never gated by this;
+# they always have unrestricted tenant access.
+STAFF_MODULE_CUSTOMERS = "customers"
+STAFF_MODULE_KYC = "kyc"
+STAFF_MODULE_GOLD_RATE = "gold_rate"
+STAFF_MODULE_SCHEMES = "schemes"
+STAFF_MODULE_ENROLLMENTS = "enrollments"
+STAFF_MODULE_PAYMENTS = "payments"
+STAFF_MODULE_CATALOGUE = "catalogue"
+STAFF_MODULE_MARKETING = "marketing"
+STAFF_MODULE_REPORTS = "reports"
+STAFF_MODULE_ANALYTICS = "analytics"
+STAFF_MODULE_BRANCHES = "branches"
+STAFF_MODULE_SUPPORT = "support"
+
+ALL_STAFF_MODULES = [
+    STAFF_MODULE_CUSTOMERS,
+    STAFF_MODULE_KYC,
+    STAFF_MODULE_GOLD_RATE,
+    STAFF_MODULE_SCHEMES,
+    STAFF_MODULE_ENROLLMENTS,
+    STAFF_MODULE_PAYMENTS,
+    STAFF_MODULE_CATALOGUE,
+    STAFF_MODULE_MARKETING,
+    STAFF_MODULE_REPORTS,
+    STAFF_MODULE_ANALYTICS,
+    STAFF_MODULE_BRANCHES,
+    STAFF_MODULE_SUPPORT,
+]

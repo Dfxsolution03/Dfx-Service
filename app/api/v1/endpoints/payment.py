@@ -3,7 +3,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_db
 from app.models.auth import User
-from app.permissions.dependencies import get_current_user, require_admin_only
+from app.permissions.dependencies import require_admin_or_staff_module, get_current_user
 from app.schemas.auth import StandardSuccessResponse
 from app.schemas.payment import PaymentManualCreateRequest, PaymentUpdateRequest
 from app.services.payment_service import PaymentService
@@ -20,7 +20,7 @@ router = APIRouter()
     description="Returns all payments for the admin's tenant.",
 )
 async def list_payments(
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("payments")),
     db: AsyncSession = Depends(get_async_db),
 ):
     payments = await PaymentService.get_payments(db, current_user)
@@ -40,7 +40,7 @@ async def list_payments(
 )
 async def get_payment(
     payment_id: str,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("payments")),
     db: AsyncSession = Depends(get_async_db),
 ):
     payment = await PaymentService.get_payment_by_id(db, current_user, payment_id)
@@ -60,7 +60,7 @@ async def get_payment(
 )
 async def create_manual_payment(
     req: PaymentManualCreateRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("payments")),
     db: AsyncSession = Depends(get_async_db),
 ):
     payment = await PaymentService.create_manual_payment(db, current_user, req)
@@ -81,7 +81,7 @@ async def create_manual_payment(
 async def update_payment(
     payment_id: str,
     req: PaymentUpdateRequest,
-    current_user: User = Depends(require_admin_only),
+    current_user: User = Depends(require_admin_or_staff_module("payments")),
     db: AsyncSession = Depends(get_async_db),
 ):
     payment = await PaymentService.update_payment(db, current_user, payment_id, req)

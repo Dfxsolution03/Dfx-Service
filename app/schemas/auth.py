@@ -54,6 +54,10 @@ class UserResponse(BaseModel):
     kyc_status: str
     member_since: Optional[str]
     is_active: bool
+    # Staff-only module access grants (see app/core/constants.py's
+    # ALL_STAFF_MODULES). Always empty for non-Staff roles — Admin/
+    # SuperAdmin access is never gated by this.
+    permissions: List[str] = Field(default_factory=list)
 
     class Config:
         from_attributes = True
