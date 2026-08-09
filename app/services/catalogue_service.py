@@ -329,12 +329,20 @@ class CatalogueService:
             raise ValidationException("Uploaded file is empty.")
 
         provider = get_storage_provider()
-        storage_path = await provider.upload(
-            tenant_id=current_user.tenant_id,
-            file_name=file.filename or "upload",
-            content_type=content_type,
-            file_bytes=file_bytes,
-        )
+        try:
+            storage_path = await provider.upload(
+                tenant_id=current_user.tenant_id,
+                file_name=file.filename or "upload",
+                content_type=content_type,
+                file_bytes=file_bytes,
+            )
+        except Exception as e:
+            # Never create a ProductImage row for a file that didn't actually
+            # land in storage — that's how broken image URLs happen.
+            logger.error(f"Image storage upload failed for product '{product_id}': {e}")
+            raise ValidationException(
+                "Could not upload the image to storage right now. Please try again."
+            )
 
         # Performance: `product.images` was already eager-loaded by the
         # get_product_by_id call above (selectinload) — reuse it instead of

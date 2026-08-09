@@ -127,7 +127,9 @@ class SupabaseStorageProvider(StorageProvider):
                 self._object_url(storage_path),
                 headers={
                     "Authorization": f"Bearer {self._key}",
+                    "apikey": self._key,
                     "Content-Type": content_type,
+                    "x-upsert": "true",
                 },
                 content=file_bytes,
             )
@@ -141,7 +143,7 @@ class SupabaseStorageProvider(StorageProvider):
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.delete(
                 self._object_url(storage_path),
-                headers={"Authorization": f"Bearer {self._key}"},
+                headers={"Authorization": f"Bearer {self._key}", "apikey": self._key},
             )
             if response.status_code not in (200, 204, 404):
                 logger.warning(
@@ -153,7 +155,7 @@ class SupabaseStorageProvider(StorageProvider):
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.get(
                 self._object_url(storage_path),
-                headers={"Authorization": f"Bearer {self._key}"},
+                headers={"Authorization": f"Bearer {self._key}", "apikey": self._key},
             )
             response.raise_for_status()
             return response.content
