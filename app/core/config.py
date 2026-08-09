@@ -132,6 +132,18 @@ class Settings(BaseSettings):
     IBJA_API_KEY: str = ""
     GOLDAPI_KEY: str = ""
 
+    # SuperAdmin Integrations — providers with no credentials yet. Same
+    # convention as SMTP_HOST/SUPABASE_URL above: empty string means
+    # "not configured", the provider status API reports that truthfully, and
+    # setting these env vars is the entire "configure the provider" step —
+    # no code or UI change needed once real credentials exist.
+    WHATSAPP_API_KEY: str = ""
+    WHATSAPP_PHONE_NUMBER_ID: str = ""
+    SMS_API_KEY: str = ""
+    SMS_SENDER_ID: str = ""
+    PAYMENT_GATEWAY_API_KEY: str = ""
+    PAYMENT_GATEWAY_SECRET: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

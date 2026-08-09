@@ -2,7 +2,8 @@ from fastapi import APIRouter
 from app.api.v1.endpoints import (
     health, auth, customer, goldrate, scheme, enrollment, passbook, payment,
     report, audit, superadmin, catalogue, support, customer_catalogue, wishlist,
-    dashboard, staff, notification, promotion,
+    dashboard, staff, notification, promotion, admin_notification, platform_settings,
+    integration,
 )
 
 api_router = APIRouter()
@@ -63,3 +64,12 @@ api_router.include_router(staff.router, tags=["Staff Module"])
 
 # Promotion Banner Module — Home screen promotion banners
 api_router.include_router(promotion.router, tags=["Promotion Module"])
+
+# Admin Notification Authoring — draft/edit/send/list campaigns
+api_router.include_router(admin_notification.router, tags=["Admin Notifications Module"])
+
+# SuperAdmin Platform Settings — non-sensitive platform configuration
+api_router.include_router(platform_settings.router, tags=["Platform Settings Module"])
+
+# SuperAdmin Integrations — provider status/enable/test + webhook foundation
+api_router.include_router(integration.router, tags=["Integrations Module"])

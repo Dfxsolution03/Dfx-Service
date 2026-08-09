@@ -20,11 +20,13 @@ from app.models.payment import Payment
 from app.models.catalogue import Product, ProductImage, CatalogueDesign
 from app.models.support import SupportTicket, SupportMessage, FAQ
 from app.models.wishlist import WishlistItem
-from app.models.notification import Notification
+from app.models.notification import Notification, NotificationCampaign
 from app.models.market_rate import MarketRate
 from app.models.tenant_pricing import TenantPricingConfig
 from app.models.provider_health import ProviderHealth
 from app.models.promotion import Promotion
+from app.models.integration import PlatformIntegration, Webhook
+from app.models.platform_settings import PlatformSettings
 
 __all__ = [
     "Base",
@@ -56,8 +58,12 @@ __all__ = [
     "FAQ",
     "WishlistItem",
     "Notification",
+    "NotificationCampaign",
     "MarketRate",
     "TenantPricingConfig",
     "ProviderHealth",
     "Promotion",
+    "PlatformIntegration",
+    "Webhook",
+    "PlatformSettings",
 ]
