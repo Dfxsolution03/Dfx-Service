@@ -5,7 +5,7 @@ from app.core.database import get_async_db
 from app.models.auth import User
 from app.permissions.dependencies import require_superadmin
 from app.schemas.auth import StandardSuccessResponse
-from app.schemas.integration import IntegrationEnableRequest, WebhookCreateRequest
+from app.schemas.integration import IntegrationConfigRequest, IntegrationEnableRequest, WebhookCreateRequest
 from app.services.integration_service import IntegrationService
 
 router = APIRouter()
@@ -39,6 +39,38 @@ async def get_integration(
 ):
     item = await IntegrationService.get_integration(db, provider)
     return StandardSuccessResponse(success=True, message="Integration retrieved successfully", data={"integration": item.model_dump(mode="json")})
+
+
+@router.put(
+    "/superadmin/integrations/{provider}/config",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Configure Integration Credentials (SuperAdmin)",
+    description="Encrypts and stores provider credentials at rest. Never returns them — the response contains only masked values.",
+)
+async def configure_integration(
+    provider: str,
+    req: IntegrationConfigRequest,
+    current_user: User = Depends(require_superadmin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    item = await IntegrationService.save_config(db, current_user, provider, req.values)
+    return StandardSuccessResponse(success=True, message="Integration configuration saved", data={"integration": item.model_dump(mode="json")})
+
+
+@router.delete(
+    "/superadmin/integrations/{provider}/config",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Remove Integration Configuration (SuperAdmin)",
+)
+async def remove_integration_config(
+    provider: str,
+    current_user: User = Depends(require_superadmin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    item = await IntegrationService.clear_config(db, current_user, provider)
+    return StandardSuccessResponse(success=True, message="Integration configuration removed", data={"integration": item.model_dump(mode="json")})
 
 
 @router.put(

@@ -144,6 +144,14 @@ class Settings(BaseSettings):
     PAYMENT_GATEWAY_API_KEY: str = ""
     PAYMENT_GATEWAY_SECRET: str = ""
 
+    # Encrypts SuperAdmin-entered integration credentials at rest (see
+    # app/core/crypto.py). Must be a urlsafe-base64 32-byte Fernet key,
+    # generated once via `Fernet.generate_key()` and set only in the
+    # deployment environment — never committed. Unset means credential
+    # encrypt/decrypt is unavailable and the UI-based "Configure" flow
+    # reports a configuration error rather than ever storing plaintext.
+    INTEGRATION_ENCRYPTION_KEY: str = ""
+
     model_config = SettingsConfigDict(
         env_file=".env",
         env_file_encoding="utf-8",

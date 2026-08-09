@@ -26,6 +26,22 @@ class PlatformSettings(Base, TimestampMixin):
     # Comma-separated feature-flag keys that are currently "on" — same plain
     # Text convention as User.staff_permissions/CatalogueDesign.canvas_json.
     feature_flags: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+    # White-label / branding — platform-level defaults, distinct from
+    # per-tenant Tenant.brand_color/logo_url (app/models/auth.py). None of
+    # these are secrets, so they live here rather than the encrypted
+    # integration config path.
+    logo_url: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    favicon_url: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
+    brand_color_primary: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    brand_color_secondary: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    login_tagline: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    email_from_name: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    # Configuration/status only — no DNS/domain provisioning happens in this
+    # application. status is one of: not_configured | pending | active.
+    custom_domain: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    custom_domain_status: Mapped[str] = mapped_column(String(20), default="not_configured", nullable=False)
+
     updated_by: Mapped[Optional[str]] = mapped_column(
         String(50), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
     )

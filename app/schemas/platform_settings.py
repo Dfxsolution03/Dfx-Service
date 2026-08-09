@@ -22,6 +22,16 @@ class PlatformSettingsResponse(BaseModel):
     email_status: ProviderStatus
     whatsapp_status: ProviderStatus
     security_status: dict
+    # White-label / branding — platform-level, distinct from per-tenant
+    # Tenant.brand_color/logo_url.
+    logo_url: Optional[str] = None
+    favicon_url: Optional[str] = None
+    brand_color_primary: Optional[str] = None
+    brand_color_secondary: Optional[str] = None
+    login_tagline: Optional[str] = None
+    email_from_name: Optional[str] = None
+    custom_domain: Optional[str] = None
+    custom_domain_status: str = "not_configured"
 
 
 class PlatformSettingsUpdateRequest(BaseModel):
@@ -32,6 +42,13 @@ class PlatformSettingsUpdateRequest(BaseModel):
     default_timezone: Optional[str] = Field(None, min_length=2, max_length=50)
     maintenance_mode: Optional[bool] = None
     feature_flags: Optional[List[str]] = None
+    logo_url: Optional[str] = Field(None, max_length=1000)
+    favicon_url: Optional[str] = Field(None, max_length=1000)
+    brand_color_primary: Optional[str] = Field(None, pattern=r"^#[0-9A-Fa-f]{6}$")
+    brand_color_secondary: Optional[str] = Field(None, pattern=r"^#[0-9A-Fa-f]{6}$")
+    login_tagline: Optional[str] = Field(None, max_length=255)
+    email_from_name: Optional[str] = Field(None, max_length=100)
+    custom_domain: Optional[str] = Field(None, max_length=255)
 
 
 class PlatformSettingsStatusResponse(BaseModel):

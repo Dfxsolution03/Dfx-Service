@@ -1,11 +1,23 @@
 from datetime import datetime
-from typing import Optional
+from typing import Any, Dict, List, Optional
 from pydantic import BaseModel
 
 
+class ConfigFieldSchema(BaseModel):
+    """Describes one configurable field for a provider's Configure form —
+    the frontend renders forms from this, no per-provider hardcoding."""
+    key: str
+    label: str
+    secret: bool
+    required: bool
+    type: str
+
+
 class IntegrationResponse(BaseModel):
-    """Never includes a raw credential — those are never persisted at all
-    (see app/core/integration_registry.py)."""
+    """Never includes a raw credential — those are encrypted at rest and
+    only ever decrypted server-side for a real connection test (see
+    app/core/crypto.py / IntegrationService). `masked_config` shows only
+    non-secret values in full and secret values as a trailing-4-char mask."""
     provider: str
     label: str
     category: str
@@ -15,6 +27,15 @@ class IntegrationResponse(BaseModel):
     last_tested_at: Optional[datetime] = None
     last_test_status: Optional[str] = None
     last_error: Optional[str] = None
+    fields: List[ConfigFieldSchema] = []
+    masked_config: Dict[str, Any] = {}
+
+
+class IntegrationConfigRequest(BaseModel):
+    """Raw field values from the Configure form — validated against the
+    provider's ConfigField list server-side, encrypted immediately, never
+    logged (see IntegrationService.save_config)."""
+    values: Dict[str, Any]
 
 
 class IntegrationEnableRequest(BaseModel):

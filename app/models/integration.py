@@ -18,6 +18,11 @@ class PlatformIntegration(Base, TimestampMixin):
     id: Mapped[str] = mapped_column(String(50), primary_key=True)
     provider: Mapped[str] = mapped_column(String(50), unique=True, nullable=False, index=True)
     enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    # Fernet-encrypted JSON blob of the provider's ConfigField values (see
+    # app/core/crypto.py / app/core/integration_registry.py). NEVER the raw
+    # plaintext — encryption/decryption happens only in IntegrationService,
+    # and decrypted values are never included in any API response.
+    config_encrypted: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     last_tested_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     last_test_status: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)  # 'success' | 'failed'
     last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

@@ -14,7 +14,7 @@ Adding a real provider later (e.g. wiring an actual WhatsApp Business API
 call) means implementing that provider's `test()`/`send()` and setting its
 env vars — the DB schema, endpoints, and frontend UI do not change.
 """
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Callable, Dict, List, Optional
 
 from app.core.config import settings
@@ -25,11 +25,25 @@ CATEGORY_PAYMENTS = "payments"
 
 
 @dataclass(frozen=True)
+class ConfigField:
+    key: str
+    label: str
+    secret: bool = False
+    required: bool = True
+    type: str = "text"  # text | number | boolean
+
+
+@dataclass(frozen=True)
 class ProviderDefinition:
     key: str
     label: str
     category: str
     is_configured: Callable[[], bool]
+    # UI-configurable fields for the "Configure" form — no field list yet
+    # means no real provider/API contract has been chosen for this category
+    # (per product decision: don't invent fields for a provider we haven't
+    # picked). Populated once, e.g., Twilio is actually selected for SMS.
+    fields: List[ConfigField] = field(default_factory=list)
 
 
 def _gold_rate_configured() -> bool:
@@ -53,11 +67,53 @@ def _payment_gateway_configured() -> bool:
 
 
 PROVIDER_REGISTRY: Dict[str, ProviderDefinition] = {
-    "gold_rate": ProviderDefinition("gold_rate", "Gold Rate Provider", CATEGORY_GOLD_RATE, _gold_rate_configured),
-    "email": ProviderDefinition("email", "Email / SMTP", CATEGORY_MESSAGING, _email_configured),
-    "whatsapp": ProviderDefinition("whatsapp", "WhatsApp", CATEGORY_MESSAGING, _whatsapp_configured),
-    "sms": ProviderDefinition("sms", "SMS", CATEGORY_MESSAGING, _sms_configured),
-    "payment_gateway": ProviderDefinition("payment_gateway", "Payment Gateway", CATEGORY_PAYMENTS, _payment_gateway_configured),
+    "gold_rate": ProviderDefinition(
+        "gold_rate", "Gold Rate Provider", CATEGORY_GOLD_RATE, _gold_rate_configured,
+        fields=[
+            ConfigField("provider_name", "Provider Name", required=False),
+            ConfigField("api_url", "API URL"),
+            ConfigField("api_key", "API Key", secret=True),
+        ],
+    ),
+    "email": ProviderDefinition(
+        "email", "Email / SMTP", CATEGORY_MESSAGING, _email_configured,
+        fields=[
+            ConfigField("host", "SMTP Host"),
+            ConfigField("port", "SMTP Port", type="number"),
+            ConfigField("username", "Username", required=False),
+            ConfigField("password", "Password", secret=True, required=False),
+            ConfigField("use_tls", "Use TLS", type="boolean", required=False),
+            ConfigField("from_email", "Sender Email"),
+            ConfigField("from_name", "Sender Name", required=False),
+        ],
+    ),
+    "whatsapp": ProviderDefinition(
+        "whatsapp", "WhatsApp", CATEGORY_MESSAGING, _whatsapp_configured,
+        fields=[
+            ConfigField("provider_name", "Provider Name", required=False),
+            ConfigField("base_url", "API Base URL", required=False),
+            ConfigField("api_key", "API Key / Token", secret=True),
+            ConfigField("sender_id", "Sender Phone Number ID"),
+        ],
+    ),
+    "sms": ProviderDefinition(
+        "sms", "SMS", CATEGORY_MESSAGING, _sms_configured,
+        fields=[
+            ConfigField("provider_name", "Provider Name", required=False),
+            ConfigField("base_url", "API Base URL", required=False),
+            ConfigField("api_key", "API Key / Token", secret=True),
+            ConfigField("sender_id", "Sender ID"),
+        ],
+    ),
+    "payment_gateway": ProviderDefinition(
+        "payment_gateway", "Payment Gateway", CATEGORY_PAYMENTS, _payment_gateway_configured,
+        fields=[
+            ConfigField("provider_name", "Provider Name", required=False),
+            ConfigField("base_url", "API Base URL", required=False),
+            ConfigField("client_id", "Public / Client ID"),
+            ConfigField("secret_key", "Secret Key", secret=True),
+        ],
+    ),
 }
 
 

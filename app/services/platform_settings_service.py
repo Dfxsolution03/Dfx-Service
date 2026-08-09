@@ -49,6 +49,14 @@ def _to_response(row: PlatformSettings) -> PlatformSettingsResponse:
         email_status=_provider_status("email"),
         whatsapp_status=_provider_status("whatsapp"),
         security_status=_security_status(),
+        logo_url=row.logo_url,
+        favicon_url=row.favicon_url,
+        brand_color_primary=row.brand_color_primary,
+        brand_color_secondary=row.brand_color_secondary,
+        login_tagline=row.login_tagline,
+        email_from_name=row.email_from_name,
+        custom_domain=row.custom_domain,
+        custom_domain_status=row.custom_domain_status,
     )
 
 
@@ -109,6 +117,22 @@ class PlatformSettingsService:
             row.maintenance_mode = req.maintenance_mode
         if req.feature_flags is not None:
             row.feature_flags = _serialize_flags(req.feature_flags)
+        if req.logo_url is not None:
+            row.logo_url = req.logo_url or None
+        if req.favicon_url is not None:
+            row.favicon_url = req.favicon_url or None
+        if req.brand_color_primary is not None:
+            row.brand_color_primary = req.brand_color_primary
+        if req.brand_color_secondary is not None:
+            row.brand_color_secondary = req.brand_color_secondary
+        if req.login_tagline is not None:
+            row.login_tagline = req.login_tagline or None
+        if req.email_from_name is not None:
+            row.email_from_name = req.email_from_name or None
+        if req.custom_domain is not None:
+            row.custom_domain = req.custom_domain or None
+            # Honest status only — no DNS/TLS provisioning happens here.
+            row.custom_domain_status = "pending" if row.custom_domain else "not_configured"
         row.updated_by = current_user.id
 
         await AuditRepository.create_log(
