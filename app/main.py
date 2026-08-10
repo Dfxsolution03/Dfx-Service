@@ -8,7 +8,11 @@ from fastapi.staticfiles import StaticFiles
 
 from app.core.config import settings
 from app.core.logging import setup_logging, logger
-from app.core.database import check_database_connection, close_database_connections
+from app.core.database import (
+    AsyncSessionFactory,
+    check_database_connection,
+    close_database_connections,
+)
 from app.api.v1.router import api_router
 from app.exceptions.base import JROSException
 
@@ -27,6 +31,18 @@ async def lifespan(app: FastAPI):
     # Verify DB connectivity on startup
     db_status = await check_database_connection()
     logger.info(f"Startup Database Status: {db_status}")
+
+    # Temporary, startup-gated SuperAdmin credential rotation — no-op unless
+    # ROTATE_SUPERADMIN_CREDENTIALS is explicitly set in the environment.
+    # See app/core/credential_rotation.py. Never allowed to block startup:
+    # a rotation failure is logged, not raised.
+    if settings.ROTATE_SUPERADMIN_CREDENTIALS:
+        try:
+            from app.core.credential_rotation import rotate_superadmin_credentials
+            async with AsyncSessionFactory() as rotation_db:
+                await rotate_superadmin_credentials(rotation_db)
+        except Exception:
+            logger.exception("[credential_rotation] Unexpected error during rotation — startup continuing.")
 
     # Module 31 / Phase 0 — market rate sync scheduler. Inert unless
     # explicitly enabled; sync() itself is unimplemented scaffolding until

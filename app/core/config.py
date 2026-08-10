@@ -68,6 +68,15 @@ class Settings(BaseSettings):
     SUPERADMIN_EMAIL: str = "superadmin@dfxsolution.com"
     SUPERADMIN_PASSWORD: str = INSECURE_SUPERADMIN_PASSWORD_DEFAULT
 
+    # Temporary, startup-gated SuperAdmin credential rotation (see
+    # app/core/credential_rotation.py). Off by default everywhere — only
+    # set these three in the deployment environment (never in a committed
+    # file) when a one-time rotation is actually needed, then unset
+    # ROTATE_SUPERADMIN_CREDENTIALS again afterward to disarm it.
+    ROTATE_SUPERADMIN_CREDENTIALS: bool = False
+    NEW_SUPERADMIN_EMAIL: Optional[str] = None
+    NEW_SUPERADMIN_PASSWORD: Optional[str] = None
+
     # Module 18 — Authentication Hardening: reset/verification token lifetimes.
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24
