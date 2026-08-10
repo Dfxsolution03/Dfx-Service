@@ -3,6 +3,11 @@ from fastapi import APIRouter, Depends, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_db
+from app.core.rate_limit import (
+    rate_limit_login,
+    rate_limit_password_reset,
+    rate_limit_email_verification,
+)
 from app.models.auth import User
 from app.permissions.dependencies import get_current_user
 from app.schemas.auth import (
@@ -82,6 +87,7 @@ async def customer_signup(
 async def user_login(
     req: UserLoginRequest,
     db: AsyncSession = Depends(get_async_db),
+    _rate_limit: None = Depends(rate_limit_login),
 ):
     token_data = await AuthService.login_user(db, req)
     return StandardSuccessResponse(
@@ -145,6 +151,7 @@ async def user_logout(
 async def forgot_password(
     req: ForgotPasswordRequest,
     db: AsyncSession = Depends(get_async_db),
+    _rate_limit: None = Depends(rate_limit_password_reset),
 ):
     await AuthService.forgot_password(db, req)
     return StandardSuccessResponse(
@@ -164,6 +171,7 @@ async def forgot_password(
 async def reset_password(
     req: ResetPasswordRequest,
     db: AsyncSession = Depends(get_async_db),
+    _rate_limit: None = Depends(rate_limit_password_reset),
 ):
     await AuthService.reset_password(db, req)
     return StandardSuccessResponse(
@@ -183,6 +191,7 @@ async def reset_password(
 async def request_email_verification(
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
+    _rate_limit: None = Depends(rate_limit_email_verification),
 ):
     await AuthService.request_email_verification(db, current_user)
     return StandardSuccessResponse(

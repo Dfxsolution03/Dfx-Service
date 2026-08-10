@@ -68,6 +68,16 @@ from app.schemas.catalogue import (
 # this is a jewellery photo catalogue, not a general file store.
 ALLOWED_CONTENT_TYPES = {"image/jpeg", "image/png", "image/webp"}
 
+# Maps the declared Content-Type to the Pillow format identifier(s) its
+# actual decoded bytes must match — used by _verify_image_bytes to catch a
+# spoofed header (e.g. an .exe/.svg/.php renamed with Content-Type:
+# image/png). Pillow reports WebP files as "WEBP".
+_CONTENT_TYPE_TO_PIL_FORMAT = {
+    "image/jpeg": {"JPEG"},
+    "image/png": {"PNG"},
+    "image/webp": {"WEBP"},
+}
+
 # Module 21 — Phase 8 (Performance): real thumbnails, not just a smaller
 # <img> tag pointing at the full-size original. Longest edge, aspect
 # preserved.
@@ -298,6 +308,31 @@ class CatalogueService:
 
     # -- Images ---------------------------------------------------------------
     @staticmethod
+    def _verify_image_bytes(file_bytes: bytes, declared_content_type: str) -> None:
+        """Rejects a file whose actual decoded bytes don't match the
+        declared Content-Type — the client-sent header alone can't be
+        trusted for authorization of what gets written to storage/disk."""
+        expected_formats = _CONTENT_TYPE_TO_PIL_FORMAT.get(declared_content_type)
+        if not expected_formats:
+            raise ValidationException("Unsupported image type.")
+        try:
+            with Image.open(io.BytesIO(file_bytes)) as img:
+                img.verify()
+            # Image.verify() leaves the file object unusable for further
+            # decoding, so re-open on a fresh buffer to confirm .format
+            # after a successful integrity check.
+            with Image.open(io.BytesIO(file_bytes)) as img:
+                actual_format = img.format
+        except Exception:
+            raise ValidationException(
+                "Uploaded file is not a valid image (failed integrity check)."
+            )
+        if actual_format not in expected_formats:
+            raise ValidationException(
+                f"File content does not match declared type '{declared_content_type}'."
+            )
+
+    @staticmethod
     async def upload_image(
         db: AsyncSession,
         current_user: User,
@@ -327,6 +362,13 @@ class CatalogueService:
             raise ValidationException(f"Image exceeds the {max_mb}MB upload limit.")
         if not file_bytes:
             raise ValidationException("Uploaded file is empty.")
+
+        # The `content_type` check above only trusts the browser-supplied
+        # Content-Type header, which a client fully controls and can spoof
+        # (e.g. relabel an arbitrary/executable file as "image/png"). Sniff
+        # the actual bytes with Pillow so only genuinely-decodable images of
+        # an allowed format ever reach storage/disk.
+        CatalogueService._verify_image_bytes(file_bytes, content_type)
 
         provider = get_storage_provider()
         try:
