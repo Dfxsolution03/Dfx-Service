@@ -9,6 +9,18 @@ from app.repositories.customer_catalogue_repository import CustomerCatalogueRepo
 from app.repositories.audit_repository import AuditRepository
 from app.exceptions.base import ResourceNotFoundException, ConflictException, ForbiddenException
 from app.schemas.wishlist import WishlistItemResponse
+from app.services.storage_service import get_storage_provider
+
+
+def _primary_image_url(product) -> str | None:
+    """Resolve a product's primary image to a public URL, mirroring
+    CustomerCatalogueService._primary_image_path. Never return a raw
+    storage_path — that is a provider-internal object key, not a URL."""
+    provider = get_storage_provider()
+    for img in product.images:
+        if img.is_primary:
+            return provider.get_public_url(img.storage_path)
+    return provider.get_public_url(product.images[0].storage_path) if product.images else None
 
 
 class WishlistService:
@@ -54,20 +66,12 @@ class WishlistService:
         await db.commit()
         await db.refresh(item)
 
-        primary_image = None
-        for img in product.images:
-            if img.is_primary:
-                primary_image = img.storage_path
-                break
-        if not primary_image and product.images:
-            primary_image = product.images[0].storage_path
-
         return WishlistItemResponse(
             id=item.id,
             product_id=product.id,
             product_name=product.name,
             product_price=product.price,
-            product_image_path=primary_image,
+            product_image_path=_primary_image_url(product),
             created_at=item.created_at,
         )
 
@@ -122,21 +126,13 @@ class WishlistService:
                 # skip rather than error, same "just absent" convention
                 # CatalogueRepository.get_products_by_ids already documents.
                 continue
-            primary_image = None
-            for img in product.images:
-                if img.is_primary:
-                    primary_image = img.storage_path
-                    break
-            if not primary_image and product.images:
-                primary_image = product.images[0].storage_path
-
             results.append(
                 WishlistItemResponse(
                     id=item.id,
                     product_id=product.id,
                     product_name=product.name,
                     product_price=product.price,
-                    product_image_path=primary_image,
+                    product_image_path=_primary_image_url(product),
                     created_at=item.created_at,
                 )
             )
