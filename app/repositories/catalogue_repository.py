@@ -13,7 +13,7 @@ class CatalogueRepository:
         stmt = (
             select(Product)
             .options(selectinload(Product.images))
-            .where(Product.tenant_id == tenant_id)
+            .where(Product.tenant_id == tenant_id, Product.is_active == True)  # noqa: E712
             .order_by(Product.created_at.desc())
         )
         result = await db.execute(stmt)

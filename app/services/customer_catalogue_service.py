@@ -6,6 +6,7 @@ from app.models.auth import User
 from app.models.catalogue import Product
 from app.repositories.customer_catalogue_repository import CustomerCatalogueRepository
 from app.exceptions.base import ResourceNotFoundException, ForbiddenException, ValidationException
+from app.services.storage_service import get_storage_provider
 from app.schemas.customer_catalogue import (
     CustomerProductListItem,
     CustomerProductDetailResponse,
@@ -15,10 +16,17 @@ from app.schemas.customer_catalogue import (
 
 
 def _primary_image_path(product: Product) -> Optional[str]:
+    # Field is named `primary_image_path` for historical/schema-compat reasons,
+    # but callers (Web, Flutter) need a fetchable URL — same conversion the
+    # Admin catalogue service already applies via provider.get_public_url().
+    # Previously this returned the raw DB storage_path (e.g. a Supabase object
+    # key), which isn't a loadable URL on its own — the actual root cause of
+    # customer-facing product images not displaying.
+    provider = get_storage_provider()
     for img in product.images:
         if img.is_primary:
-            return img.storage_path
-    return product.images[0].storage_path if product.images else None
+            return provider.get_public_url(img.storage_path)
+    return provider.get_public_url(product.images[0].storage_path) if product.images else None
 
 
 def _to_list_item(product: Product) -> CustomerProductListItem:
@@ -36,6 +44,7 @@ def _to_list_item(product: Product) -> CustomerProductListItem:
 
 def _to_detail(product: Product) -> CustomerProductDetailResponse:
     tags = [t.strip() for t in (product.tags or "").split(",") if t.strip()]
+    provider = get_storage_provider()
     return CustomerProductDetailResponse(
         id=product.id,
         name=product.name,
@@ -46,7 +55,15 @@ def _to_detail(product: Product) -> CustomerProductDetailResponse:
         price=product.price,
         weight_grams=product.weight_grams,
         tags=tags,
-        images=[CustomerProductImageResponse.model_validate(i) for i in product.images],
+        images=[
+            CustomerProductImageResponse(
+                id=i.id,
+                storage_path=provider.get_public_url(i.storage_path),
+                variant_type=i.variant_type,
+                is_primary=i.is_primary,
+            )
+            for i in product.images
+        ],
     )
 
 
