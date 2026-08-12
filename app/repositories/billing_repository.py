@@ -3,7 +3,31 @@ from typing import List, Optional, Tuple
 from sqlalchemy import select, update, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.billing import InventoryItem, Sale
+from app.models.billing import Vendor, InventoryItem, Sale
+
+
+class VendorRepository:
+    @staticmethod
+    async def get_by_id(db: AsyncSession, vendor_id: str, tenant_id: str) -> Optional[Vendor]:
+        stmt = select(Vendor).where(Vendor.id == vendor_id, Vendor.tenant_id == tenant_id)
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def list_by_tenant(
+        db: AsyncSession, tenant_id: str, search: Optional[str] = None, active_only: bool = False
+    ) -> List[Vendor]:
+        conditions = [Vendor.tenant_id == tenant_id]
+        if active_only:
+            conditions.append(Vendor.is_active == True)  # noqa: E712
+        if search:
+            conditions.append(Vendor.name.ilike(f"%{search}%"))
+        stmt = select(Vendor).where(*conditions).order_by(Vendor.name)
+        return list((await db.execute(stmt)).scalars().all())
+
+    @staticmethod
+    async def create(db: AsyncSession, vendor: Vendor) -> Vendor:
+        db.add(vendor)
+        return vendor
 
 
 class InventoryRepository:
@@ -34,6 +58,7 @@ class InventoryRepository:
         search: Optional[str] = None,
         stock_status: Optional[str] = None,
         category: Optional[str] = None,
+        vendor_id: Optional[str] = None,
     ) -> Tuple[List[InventoryItem], int]:
         conditions = [InventoryItem.tenant_id == tenant_id]
         if search:
@@ -45,6 +70,8 @@ class InventoryRepository:
             conditions.append(InventoryItem.stock_status == stock_status)
         if category:
             conditions.append(InventoryItem.category == category)
+        if vendor_id:
+            conditions.append(InventoryItem.vendor_id == vendor_id)
 
         count_stmt = select(func.count(InventoryItem.id))
         list_stmt = select(InventoryItem)

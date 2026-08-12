@@ -27,7 +27,7 @@ from app.models.provider_health import ProviderHealth
 from app.models.promotion import Promotion
 from app.models.integration import PlatformIntegration, Webhook
 from app.models.platform_settings import PlatformSettings
-from app.models.billing import InventoryItem, Sale
+from app.models.billing import Vendor, InventoryItem, Sale
 
 __all__ = [
     "Base",
@@ -67,6 +67,7 @@ __all__ = [
     "PlatformIntegration",
     "Webhook",
     "PlatformSettings",
+    "Vendor",
     "InventoryItem",
     "Sale",
 ]

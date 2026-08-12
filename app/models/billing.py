@@ -1,9 +1,34 @@
 from datetime import date, datetime
 from typing import Optional
-from sqlalchemy import String, Float, Date, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy import String, Float, Date, DateTime, Boolean, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
+
+
+class Vendor(Base, TimestampMixin):
+    """A jewellery business's gold/finished-goods supplier. Purchases and
+    inventory link here so purchase history stays queryable/filterable by
+    vendor; deactivating a vendor (is_active=False) never touches past
+    InventoryItem rows — they keep their own vendor_id/vendor_name snapshot."""
+    __tablename__ = "vendors"
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    name: Mapped[str] = mapped_column(String(200), nullable=False)
+    contact_person: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    phone: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    email: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    address: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    gst_number: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+    created_by: Mapped[str] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+
+    tenant: Mapped["Tenant"] = relationship("Tenant")
 
 
 class InventoryItem(Base, TimestampMixin):
@@ -42,11 +67,19 @@ class InventoryItem(Base, TimestampMixin):
     gross_weight_grams: Mapped[float] = mapped_column(Float, nullable=False)
     net_gold_weight_grams: Mapped[float] = mapped_column(Float, nullable=False)
 
+    # Nullable FK so pre-existing rows (created before Vendor existed) and
+    # free-text-only entries keep working — vendor_name is always the
+    # display snapshot (copied from Vendor.name at purchase time), vendor_id
+    # is the queryable/filterable link.
+    vendor_id: Mapped[Optional[str]] = mapped_column(
+        String(50), ForeignKey("vendors.id", ondelete="SET NULL"), nullable=True, index=True
+    )
     vendor_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     purchase_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     purchase_invoice_ref: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     # Historical cost only — never used as, or confused with, a selling
     # price. See this model's own docstring.
+    purchase_rate_per_gram: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     purchase_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
 
     image_storage_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
@@ -121,6 +154,7 @@ class Sale(Base, TimestampMixin):
     # of any later edit to that row.
     product_code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
     product_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    vendor_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
     huid: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     purity: Mapped[str] = mapped_column(String(10), nullable=False)
     gross_weight_grams: Mapped[float] = mapped_column(Float, nullable=False)
@@ -151,6 +185,11 @@ class Sale(Base, TimestampMixin):
     tax_amount: Mapped[float] = mapped_column(Float, nullable=False)
     discount_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0)
     final_amount: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # Editable commercial fields — recorded on the finalized bill, never
+    # feed back into the deterministic price calculation itself.
+    payment_method: Mapped[str] = mapped_column(String(30), nullable=False, default="CASH")
+    payment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="PAID")
 
     # Internal only (see schemas/billing.py — never labeled "net profit",
     # never returned to a Staff-role caller). NULL when the source item had

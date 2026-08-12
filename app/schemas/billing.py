@@ -5,6 +5,47 @@ from pydantic import BaseModel, Field, model_validator
 Purity = Literal["9K", "14K", "18K", "20K", "22K", "24K"]
 ChargeType = Literal["FIXED", "PER_GRAM", "PERCENTAGE"]
 StockStatus = Literal["IN_STOCK", "SOLD", "INACTIVE"]
+PaymentMethod = Literal["CASH", "CARD", "UPI", "BANK_TRANSFER", "OTHER"]
+PaymentStatus = Literal["PAID", "PENDING", "PARTIAL"]
+
+
+# =============================================================================
+# Vendor
+# =============================================================================
+
+class VendorCreateRequest(BaseModel):
+    name: str = Field(..., min_length=2, max_length=200)
+    contact_person: Optional[str] = Field(None, max_length=150)
+    phone: Optional[str] = Field(None, max_length=20)
+    email: Optional[str] = Field(None, max_length=255)
+    address: Optional[str] = Field(None, max_length=500)
+    gst_number: Optional[str] = Field(None, max_length=20)
+
+
+class VendorUpdateRequest(BaseModel):
+    name: Optional[str] = Field(None, min_length=2, max_length=200)
+    contact_person: Optional[str] = Field(None, max_length=150)
+    phone: Optional[str] = Field(None, max_length=20)
+    email: Optional[str] = Field(None, max_length=255)
+    address: Optional[str] = Field(None, max_length=500)
+    gst_number: Optional[str] = Field(None, max_length=20)
+    is_active: Optional[bool] = None
+
+
+class VendorResponse(BaseModel):
+    id: str
+    tenant_id: str
+    name: str
+    contact_person: Optional[str] = None
+    phone: Optional[str] = None
+    email: Optional[str] = None
+    address: Optional[str] = None
+    gst_number: Optional[str] = None
+    is_active: bool
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
 
 
 # =============================================================================
@@ -20,9 +61,11 @@ class InventoryItemCreateRequest(BaseModel):
     purity: Purity
     gross_weight_grams: float = Field(..., gt=0)
     net_gold_weight_grams: float = Field(..., gt=0)
+    vendor_id: Optional[str] = Field(None, max_length=50)
     vendor_name: Optional[str] = Field(None, max_length=200)
     purchase_date: Optional[date] = None
     purchase_invoice_ref: Optional[str] = Field(None, max_length=100)
+    purchase_rate_per_gram: Optional[float] = Field(None, ge=0)
     purchase_cost: Optional[float] = Field(None, ge=0)
 
     making_charge_type: ChargeType = "PERCENTAGE"
@@ -53,9 +96,11 @@ class InventoryItemUpdateRequest(BaseModel):
     purity: Optional[Purity] = None
     gross_weight_grams: Optional[float] = Field(None, gt=0)
     net_gold_weight_grams: Optional[float] = Field(None, gt=0)
+    vendor_id: Optional[str] = Field(None, max_length=50)
     vendor_name: Optional[str] = Field(None, max_length=200)
     purchase_date: Optional[date] = None
     purchase_invoice_ref: Optional[str] = Field(None, max_length=100)
+    purchase_rate_per_gram: Optional[float] = Field(None, ge=0)
     purchase_cost: Optional[float] = Field(None, ge=0)
 
     making_charge_type: Optional[ChargeType] = None
@@ -80,12 +125,14 @@ class InventoryItemResponse(BaseModel):
     purity: str
     gross_weight_grams: float
     net_gold_weight_grams: float
+    vendor_id: Optional[str] = None
     vendor_name: Optional[str] = None
     purchase_date: Optional[date] = None
     purchase_invoice_ref: Optional[str] = None
     # Omitted entirely for Staff-role callers (see BillingService's response
     # builder) — purchase cost is commercially sensitive, same reasoning as
     # estimated_gross_margin on SaleResponse.
+    purchase_rate_per_gram: Optional[float] = None
     purchase_cost: Optional[float] = None
     image_url: Optional[str] = None
     stock_status: str
@@ -107,6 +154,56 @@ class InventoryItemResponse(BaseModel):
 class InventoryItemListResponse(BaseModel):
     items: List[InventoryItemResponse]
     total: int
+
+
+# =============================================================================
+# Bulk Purchase Entry — one vendor/date/invoice header, many products
+# =============================================================================
+
+class BulkPurchaseLineItem(BaseModel):
+    """Same shape as InventoryItemCreateRequest minus the header fields
+    (vendor/date/invoice), which are entered once for the whole purchase."""
+    product_code: str = Field(..., min_length=1, max_length=50)
+    product_name: str = Field(..., min_length=2, max_length=200)
+    category: Optional[str] = Field(None, max_length=100)
+    subcategory: Optional[str] = Field(None, max_length=100)
+    huid: Optional[str] = Field(None, max_length=20)
+    purity: Purity
+    gross_weight_grams: float = Field(..., gt=0)
+    net_gold_weight_grams: float = Field(..., gt=0)
+    purchase_rate_per_gram: Optional[float] = Field(None, ge=0)
+    purchase_cost: Optional[float] = Field(None, ge=0)
+    making_charge_type: ChargeType = "PERCENTAGE"
+    making_charge_value: float = Field(0, ge=0)
+    wastage_type: ChargeType = "PERCENTAGE"
+    wastage_value: float = Field(0, ge=0)
+    stone_charge_amount: float = Field(0, ge=0)
+    other_charges_amount: float = Field(0, ge=0)
+    tax_rate_percent: float = Field(..., ge=0, le=100)
+
+    @model_validator(mode="after")
+    def _net_not_more_than_gross(self) -> "BulkPurchaseLineItem":
+        if self.net_gold_weight_grams > self.gross_weight_grams:
+            raise ValueError("net_gold_weight_grams cannot exceed gross_weight_grams")
+        return self
+
+
+class BulkPurchaseRequest(BaseModel):
+    vendor_id: str = Field(..., min_length=1, max_length=50)
+    purchase_date: date
+    purchase_invoice_ref: Optional[str] = Field(None, max_length=100)
+    items: List[BulkPurchaseLineItem] = Field(..., min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def _unique_codes(self) -> "BulkPurchaseRequest":
+        codes = [i.product_code for i in self.items]
+        if len(codes) != len(set(codes)):
+            raise ValueError("product_code must be unique within a single purchase entry")
+        return self
+
+
+class BulkPurchaseResponse(BaseModel):
+    items: List[InventoryItemResponse]
 
 
 # =============================================================================
@@ -156,6 +253,8 @@ class SaleCreateRequest(BaseModel):
     customer_name: Optional[str] = Field(None, max_length=150)
     customer_phone: Optional[str] = Field(None, max_length=20)
     discount_amount: float = Field(0, ge=0)
+    payment_method: PaymentMethod = "CASH"
+    payment_status: PaymentStatus = "PAID"
 
     @model_validator(mode="after")
     def _customer_identified(self) -> "SaleCreateRequest":
@@ -175,6 +274,7 @@ class SaleResponse(BaseModel):
 
     product_code: str
     product_name: str
+    vendor_name: Optional[str] = None
     huid: Optional[str] = None
     purity: str
     gross_weight_grams: float
@@ -201,6 +301,8 @@ class SaleResponse(BaseModel):
     tax_amount: float
     discount_amount: float
     final_amount: float
+    payment_method: str
+    payment_status: str
 
     # Internal-only fields — see this module's own note on InventoryItemResponse.purchase_cost.
     # Omitted for Staff-role callers.

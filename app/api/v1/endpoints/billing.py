@@ -1,22 +1,79 @@
 from datetime import date
 from typing import Optional
-from fastapi import APIRouter, Depends, File, Query, UploadFile, status
+from fastapi import APIRouter, Depends, File, Query, Response, UploadFile, status
+from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_db
 from app.core.config import settings
-from app.models.auth import User
+from app.models.auth import User, Tenant
 from app.permissions.dependencies import require_admin_or_staff_module
 from app.schemas.auth import StandardSuccessResponse
 from app.schemas.billing import (
+    VendorCreateRequest,
+    VendorUpdateRequest,
     InventoryItemCreateRequest,
     InventoryItemUpdateRequest,
+    BulkPurchaseRequest,
     SaleCreateRequest,
 )
-from app.services.billing_service import InventoryService, SaleService
+from app.services.billing_service import VendorService, InventoryService, SaleService
+from app.services import billing_export_service
 from app.exceptions.base import ValidationException
 
 router = APIRouter()
+
+
+# =============================================================================
+# 0. Vendors
+# =============================================================================
+
+@router.post(
+    "/billing/vendors",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create Vendor (Admin)",
+)
+async def create_vendor(
+    req: VendorCreateRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    vendor = await VendorService.create_vendor(db, current_user, req)
+    return StandardSuccessResponse(success=True, message="Vendor created successfully", data={"vendor": vendor.model_dump(mode="json")})
+
+
+@router.get(
+    "/billing/vendors",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List Vendors (Admin)",
+)
+async def list_vendors(
+    search: Optional[str] = Query(None),
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    vendors = await VendorService.list_vendors(db, current_user, search)
+    return StandardSuccessResponse(
+        success=True, message="Vendors retrieved successfully", data={"vendors": [v.model_dump(mode="json") for v in vendors]}
+    )
+
+
+@router.put(
+    "/billing/vendors/{vendor_id}",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update Vendor (Admin)",
+)
+async def update_vendor(
+    vendor_id: str,
+    req: VendorUpdateRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    vendor = await VendorService.update_vendor(db, current_user, vendor_id, req)
+    return StandardSuccessResponse(success=True, message="Vendor updated successfully", data={"vendor": vendor.model_dump(mode="json")})
 
 
 # =============================================================================
@@ -53,10 +110,11 @@ async def list_inventory_items(
     search: Optional[str] = Query(None, description="Matches product code or product name"),
     stock_status: Optional[str] = Query(None, description="IN_STOCK | SOLD | INACTIVE"),
     category: Optional[str] = Query(None),
+    vendor_id: Optional[str] = Query(None),
     current_user: User = Depends(require_admin_or_staff_module("billing")),
     db: AsyncSession = Depends(get_async_db),
 ):
-    result = await InventoryService.list_items(db, current_user, page, limit, search, stock_status, category)
+    result = await InventoryService.list_items(db, current_user, page, limit, search, stock_status, category, vendor_id)
     return StandardSuccessResponse(
         success=True,
         message="Inventory items retrieved successfully",
@@ -125,6 +183,26 @@ async def upload_inventory_item_image(
     )
     return StandardSuccessResponse(
         success=True, message="Image uploaded successfully", data={"item": item.model_dump(mode="json")}
+    )
+
+
+@router.post(
+    "/billing/inventory/bulk-purchase",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Bulk Purchase Entry (Admin)",
+    description="One vendor/date/invoice header entered once, many finished-goods items created together in a single transaction.",
+)
+async def bulk_purchase(
+    req: BulkPurchaseRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await InventoryService.bulk_create_items(db, current_user, req)
+    return StandardSuccessResponse(
+        success=True,
+        message=f"{len(result.items)} inventory item(s) created successfully",
+        data={"items": [i.model_dump(mode="json") for i in result.items]},
     )
 
 
@@ -217,4 +295,44 @@ async def get_sale(
     sale = await SaleService.get_sale(db, current_user, sale_id)
     return StandardSuccessResponse(
         success=True, message="Sale retrieved successfully", data={"sale": sale.model_dump(mode="json")}
+    )
+
+
+@router.get(
+    "/billing/sales/{sale_id}/invoice.pdf",
+    status_code=status.HTTP_200_OK,
+    summary="Download Invoice PDF (Admin)",
+)
+async def download_invoice_pdf(
+    sale_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    sale = await SaleService.get_sale_orm(db, current_user, sale_id)
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))).scalar_one_or_none()
+    pdf_bytes = billing_export_service.build_invoice_pdf(sale, tenant)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{sale.invoice_number}.pdf"'},
+    )
+
+
+@router.get(
+    "/billing/sales/{sale_id}/invoice.xlsx",
+    status_code=status.HTTP_200_OK,
+    summary="Download Invoice Excel (Admin)",
+)
+async def download_invoice_excel(
+    sale_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    sale = await SaleService.get_sale_orm(db, current_user, sale_id)
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))).scalar_one_or_none()
+    xlsx_bytes = billing_export_service.build_invoice_excel(sale, tenant)
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{sale.invoice_number}.xlsx"'},
     )

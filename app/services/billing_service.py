@@ -7,8 +7,8 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import PURITY_KARATS, ROLE_ADMIN, ROLE_SUPERADMIN
 from app.models.auth import User
-from app.models.billing import InventoryItem, Sale
-from app.repositories.billing_repository import InventoryRepository, SaleRepository
+from app.models.billing import Vendor, InventoryItem, Sale
+from app.repositories.billing_repository import VendorRepository, InventoryRepository, SaleRepository
 from app.repositories.audit_repository import AuditRepository
 from app.services.storage_service import get_storage_provider
 from app.services.goldrate_service import GoldRateService
@@ -19,10 +19,15 @@ from app.exceptions.base import (
     ConflictException,
 )
 from app.schemas.billing import (
+    VendorCreateRequest,
+    VendorUpdateRequest,
+    VendorResponse,
     InventoryItemCreateRequest,
     InventoryItemUpdateRequest,
     InventoryItemResponse,
     InventoryItemListResponse,
+    BulkPurchaseRequest,
+    BulkPurchaseResponse,
     PriceBreakdown,
     SaleQuoteResponse,
     SaleCreateRequest,
@@ -123,6 +128,60 @@ class BillingCalculationEngine:
         )
 
 
+class VendorService:
+    @staticmethod
+    async def list_vendors(db: AsyncSession, current_user: User, search: Optional[str] = None) -> list:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        vendors = await VendorRepository.list_by_tenant(db, current_user.tenant_id, search)
+        return [VendorResponse.model_validate(v) for v in vendors]
+
+    @staticmethod
+    async def create_vendor(db: AsyncSession, current_user: User, req: VendorCreateRequest) -> VendorResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        vendor = Vendor(
+            id=f"vnd_{uuid.uuid4().hex[:12]}",
+            tenant_id=current_user.tenant_id,
+            name=req.name,
+            contact_person=req.contact_person,
+            phone=req.phone,
+            email=req.email,
+            address=req.address,
+            gst_number=req.gst_number,
+            is_active=True,
+            created_by=current_user.id,
+        )
+        await VendorRepository.create(db, vendor)
+        await db.commit()
+        await db.refresh(vendor)
+        return VendorResponse.model_validate(vendor)
+
+    @staticmethod
+    async def update_vendor(
+        db: AsyncSession, current_user: User, vendor_id: str, req: VendorUpdateRequest
+    ) -> VendorResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        vendor = await VendorRepository.get_by_id(db, vendor_id, current_user.tenant_id)
+        if not vendor:
+            raise ResourceNotFoundException(f"Vendor '{vendor_id}' not found")
+        for field in ["name", "contact_person", "phone", "email", "address", "gst_number", "is_active"]:
+            val = getattr(req, field, None)
+            if val is not None:
+                setattr(vendor, field, val)
+        await db.commit()
+        await db.refresh(vendor)
+        return VendorResponse.model_validate(vendor)
+
+    @staticmethod
+    async def _get_owned_vendor(db: AsyncSession, current_user: User, vendor_id: str) -> Vendor:
+        vendor = await VendorRepository.get_by_id(db, vendor_id, current_user.tenant_id)
+        if not vendor:
+            raise ResourceNotFoundException(f"Vendor '{vendor_id}' not found")
+        return vendor
+
+
 class InventoryService:
     @staticmethod
     def _build_response(item: InventoryItem, current_user: User) -> InventoryItemResponse:
@@ -139,9 +198,11 @@ class InventoryService:
             purity=item.purity,
             gross_weight_grams=item.gross_weight_grams,
             net_gold_weight_grams=item.net_gold_weight_grams,
+            vendor_id=item.vendor_id,
             vendor_name=item.vendor_name,
             purchase_date=item.purchase_date,
             purchase_invoice_ref=item.purchase_invoice_ref,
+            purchase_rate_per_gram=item.purchase_rate_per_gram if privileged else None,
             purchase_cost=item.purchase_cost if privileged else None,
             image_url=provider.get_public_url(item.image_storage_path) if item.image_storage_path else None,
             stock_status=item.stock_status,
@@ -166,11 +227,12 @@ class InventoryService:
         search: Optional[str],
         stock_status: Optional[str],
         category: Optional[str],
+        vendor_id: Optional[str] = None,
     ) -> InventoryItemListResponse:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
         items, total = await InventoryRepository.list_by_tenant(
-            db, current_user.tenant_id, page, limit, search, stock_status, category
+            db, current_user.tenant_id, page, limit, search, stock_status, category, vendor_id
         )
         return InventoryItemListResponse(
             items=[InventoryService._build_response(i, current_user) for i in items], total=total
@@ -186,6 +248,18 @@ class InventoryService:
         return InventoryService._build_response(item, current_user)
 
     @staticmethod
+    async def _resolve_vendor_snapshot(db: AsyncSession, current_user: User, vendor_id, vendor_name):
+        """If a real Vendor is linked, its current name is the snapshot
+        (kept in sync at purchase time); otherwise fall back to whatever
+        free-text vendor_name was supplied (pre-Vendor-model convention)."""
+        if not vendor_id:
+            return None, vendor_name
+        vendor = await VendorRepository.get_by_id(db, vendor_id, current_user.tenant_id)
+        if not vendor:
+            raise ResourceNotFoundException(f"Vendor '{vendor_id}' not found")
+        return vendor.id, vendor.name
+
+    @staticmethod
     async def create_item(
         db: AsyncSession, current_user: User, req: InventoryItemCreateRequest
     ) -> InventoryItemResponse:
@@ -197,6 +271,10 @@ class InventoryService:
         )
         if existing:
             raise ConflictException(f"Product code '{req.product_code}' is already in use")
+
+        vendor_id, vendor_name = await InventoryService._resolve_vendor_snapshot(
+            db, current_user, req.vendor_id, req.vendor_name
+        )
 
         item_id = f"iv_{uuid.uuid4().hex[:12]}"
         item = InventoryItem(
@@ -210,9 +288,11 @@ class InventoryService:
             purity=req.purity,
             gross_weight_grams=req.gross_weight_grams,
             net_gold_weight_grams=req.net_gold_weight_grams,
-            vendor_name=req.vendor_name,
+            vendor_id=vendor_id,
+            vendor_name=vendor_name,
             purchase_date=req.purchase_date,
             purchase_invoice_ref=req.purchase_invoice_ref,
+            purchase_rate_per_gram=req.purchase_rate_per_gram,
             purchase_cost=req.purchase_cost,
             stock_status="IN_STOCK",
             making_charge_type=req.making_charge_type,
@@ -295,6 +375,82 @@ class InventoryService:
         return InventoryService._build_response(item, current_user)
 
     @staticmethod
+    async def bulk_create_items(
+        db: AsyncSession, current_user: User, req: BulkPurchaseRequest
+    ) -> BulkPurchaseResponse:
+        """One purchase header (vendor/date/invoice) entered once, many
+        InventoryItem rows created together in a single transaction — either
+        all of them are created or none are (a bad product_code partway
+        through must not leave a half-recorded purchase)."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        vendor = await VendorService._get_owned_vendor(db, current_user, req.vendor_id)
+
+        # Cheap existing-codes check per item (small batches — bulk entry is
+        # a manual counter-entry workflow, not a mass import job).
+        for line in req.items:
+            if await InventoryRepository.get_by_product_code(db, line.product_code, current_user.tenant_id):
+                raise ConflictException(f"Product code '{line.product_code}' is already in use")
+
+        created_items = []
+        for line in req.items:
+            item = InventoryItem(
+                id=f"iv_{uuid.uuid4().hex[:12]}",
+                tenant_id=current_user.tenant_id,
+                product_code=line.product_code,
+                product_name=line.product_name,
+                category=line.category,
+                subcategory=line.subcategory,
+                huid=line.huid,
+                purity=line.purity,
+                gross_weight_grams=line.gross_weight_grams,
+                net_gold_weight_grams=line.net_gold_weight_grams,
+                vendor_id=vendor.id,
+                vendor_name=vendor.name,
+                purchase_date=req.purchase_date,
+                purchase_invoice_ref=req.purchase_invoice_ref,
+                purchase_rate_per_gram=line.purchase_rate_per_gram,
+                purchase_cost=line.purchase_cost,
+                stock_status="IN_STOCK",
+                making_charge_type=line.making_charge_type,
+                making_charge_value=line.making_charge_value,
+                wastage_type=line.wastage_type,
+                wastage_value=line.wastage_value,
+                stone_charge_amount=line.stone_charge_amount,
+                other_charges_amount=line.other_charges_amount,
+                tax_rate_percent=line.tax_rate_percent,
+                created_by=current_user.id,
+            )
+            await InventoryRepository.create(db, item)
+            created_items.append(item)
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="INVENTORY_BULK_PURCHASE",
+            target_entity="inventory_items",
+            target_id=None,
+            before_state=None,
+            after_state={"vendor_id": vendor.id, "invoice_ref": req.purchase_invoice_ref, "item_count": len(created_items)},
+        )
+
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            raise ConflictException("One or more product codes in this purchase are already in use")
+
+        responses = []
+        for item in created_items:
+            fresh = await InventoryRepository.get_by_id(db, item.id, current_user.tenant_id)
+            responses.append(InventoryService._build_response(fresh, current_user))
+        return BulkPurchaseResponse(items=responses)
+
+    @staticmethod
     async def upload_image(
         db: AsyncSession, current_user: User, item_id: str, file_bytes: bytes, file_name: str, content_type: str
     ) -> InventoryItemResponse:
@@ -347,6 +503,7 @@ class SaleService:
             customer_phone=sale.customer_phone,
             product_code=sale.product_code,
             product_name=sale.product_name,
+            vendor_name=sale.vendor_name,
             huid=sale.huid,
             purity=sale.purity,
             gross_weight_grams=sale.gross_weight_grams,
@@ -370,6 +527,8 @@ class SaleService:
             tax_amount=sale.tax_amount,
             discount_amount=sale.discount_amount,
             final_amount=sale.final_amount,
+            payment_method=sale.payment_method,
+            payment_status=sale.payment_status,
             purchase_cost_snapshot=sale.purchase_cost_snapshot if privileged else None,
             estimated_gross_margin=sale.estimated_gross_margin if privileged else None,
             sale_timestamp=sale.sale_timestamp,
@@ -463,6 +622,7 @@ class SaleService:
             customer_phone=req.customer_phone,
             product_code=item.product_code,
             product_name=item.product_name,
+            vendor_name=item.vendor_name,
             huid=item.huid,
             purity=item.purity,
             gross_weight_grams=item.gross_weight_grams,
@@ -486,6 +646,8 @@ class SaleService:
             tax_amount=breakdown.tax_amount,
             discount_amount=breakdown.discount_amount,
             final_amount=breakdown.final_amount,
+            payment_method=req.payment_method,
+            payment_status=req.payment_status,
             purchase_cost_snapshot=purchase_cost_snapshot,
             estimated_gross_margin=estimated_gross_margin,
             sale_timestamp=datetime.now(timezone.utc),
@@ -546,3 +708,14 @@ class SaleService:
         if not sale:
             raise ResourceNotFoundException(f"Sale '{sale_id}' not found")
         return SaleService._build_response(sale, current_user)
+
+    @staticmethod
+    async def get_sale_orm(db: AsyncSession, current_user: User, sale_id: str) -> Sale:
+        """Raw ORM row for invoice export (PDF/Excel) — the export renders
+        directly off the immutable snapshot, not the API response shape."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        sale = await SaleRepository.get_by_id(db, sale_id, current_user.tenant_id)
+        if not sale:
+            raise ResourceNotFoundException(f"Sale '{sale_id}' not found")
+        return sale
