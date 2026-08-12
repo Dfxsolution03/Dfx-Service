@@ -181,6 +181,11 @@ class Sale(Base, TimestampMixin):
     other_charges_amount: Mapped[float] = mapped_column(Float, nullable=False)
 
     subtotal_before_tax: Mapped[float] = mapped_column(Float, nullable=False)
+    # Whether GST was applied to this sale — stored per-sale so a historical
+    # invoice's mode never changes even if the item's configured tax rate is
+    # edited later. When False, tax_rate_percent/tax_amount are both 0 for
+    # this row (no invented rate — GST is simply skipped, not recalculated).
+    gst_applied: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     tax_rate_percent: Mapped[float] = mapped_column(Float, nullable=False)
     tax_amount: Mapped[float] = mapped_column(Float, nullable=False)
     discount_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0)

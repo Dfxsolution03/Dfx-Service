@@ -26,7 +26,7 @@ def _rows(sale: Sale):
         ("Stone Charge", sale.stone_charge_amount),
         ("Other Charges", sale.other_charges_amount),
         ("Subtotal", sale.subtotal_before_tax),
-        (f"Tax / GST ({sale.tax_rate_percent}%)", sale.tax_amount),
+        (f"GST ({sale.tax_rate_percent}%)" if sale.gst_applied else "GST (not applied)", sale.tax_amount),
         ("Discount", -sale.discount_amount),
         ("Final Amount", sale.final_amount),
     ]

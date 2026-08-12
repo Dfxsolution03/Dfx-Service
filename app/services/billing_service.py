@@ -11,7 +11,7 @@ from app.models.billing import Vendor, InventoryItem, Sale
 from app.repositories.billing_repository import VendorRepository, InventoryRepository, SaleRepository
 from app.repositories.audit_repository import AuditRepository
 from app.services.storage_service import get_storage_provider
-from app.services.goldrate_service import GoldRateService
+from app.services.goldrate_service import GoldRateService, IST
 from app.exceptions.base import (
     ResourceNotFoundException,
     ForbiddenException,
@@ -33,6 +33,9 @@ from app.schemas.billing import (
     SaleCreateRequest,
     SaleResponse,
     SaleListResponse,
+    BillingPeriodSummary,
+    RecentSaleSummary,
+    BillingDashboardSummaryResponse,
 )
 
 
@@ -71,6 +74,8 @@ class BillingCalculationEngine:
         rate_source: str,
         rate_effective_date: date,
         discount_amount: float,
+        gst_applied: bool = True,
+        customer_price: Optional[float] = None,
     ) -> PriceBreakdown:
         karat = PURITY_KARATS.get(item.purity)
         if karat is None:
@@ -93,15 +98,24 @@ class BillingCalculationEngine:
             + item.stone_charge_amount
             + item.other_charges_amount
         )
-        tax_amount = subtotal_before_tax * (item.tax_rate_percent / 100)
+        effective_tax_rate = item.tax_rate_percent if gst_applied else 0.0
+        tax_amount = subtotal_before_tax * (effective_tax_rate / 100)
         payable_before_discount = subtotal_before_tax + tax_amount
 
         if discount_amount < 0:
             raise ValidationException("discount_amount cannot be negative")
-        if discount_amount > payable_before_discount:
-            raise ValidationException("discount_amount cannot exceed the payable amount")
 
-        final_amount = payable_before_discount - discount_amount
+        if customer_price is not None:
+            # The Admin's negotiated price IS the final amount — discount is
+            # derived from it (for record-keeping) rather than the other way
+            # round. A price above the reference total is honored as-is
+            # (no discount, no invented "premium" field).
+            final_amount = customer_price
+            discount_amount = max(0.0, _round2(payable_before_discount - customer_price))
+        else:
+            if discount_amount > payable_before_discount:
+                raise ValidationException("discount_amount cannot exceed the payable amount")
+            final_amount = payable_before_discount - discount_amount
 
         return PriceBreakdown(
             purity=item.purity,
@@ -121,7 +135,8 @@ class BillingCalculationEngine:
             stone_charge_amount=_round2(item.stone_charge_amount),
             other_charges_amount=_round2(item.other_charges_amount),
             subtotal_before_tax=_round2(subtotal_before_tax),
-            tax_rate_percent=item.tax_rate_percent,
+            gst_applied=gst_applied,
+            tax_rate_percent=effective_tax_rate,
             tax_amount=_round2(tax_amount),
             discount_amount=_round2(discount_amount),
             final_amount=_round2(final_amount),
@@ -523,6 +538,7 @@ class SaleService:
             stone_charge_amount=sale.stone_charge_amount,
             other_charges_amount=sale.other_charges_amount,
             subtotal_before_tax=sale.subtotal_before_tax,
+            gst_applied=sale.gst_applied,
             tax_rate_percent=sale.tax_rate_percent,
             tax_amount=sale.tax_amount,
             discount_amount=sale.discount_amount,
@@ -558,11 +574,17 @@ class SaleService:
 
     @staticmethod
     async def get_quote(
-        db: AsyncSession, current_user: User, product_code: str, discount_amount: float = 0
+        db: AsyncSession,
+        current_user: User,
+        product_code: str,
+        discount_amount: float = 0,
+        gst_applied: bool = True,
+        customer_price: Optional[float] = None,
     ) -> SaleQuoteResponse:
         item, rate = await SaleService._get_sellable_item_and_rate(db, current_user, product_code)
         breakdown = BillingCalculationEngine.calculate(
-            item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date, discount_amount
+            item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
+            discount_amount, gst_applied, customer_price,
         )
         return SaleQuoteResponse(
             inventory_item=InventoryService._build_response(item, current_user),
@@ -594,7 +616,8 @@ class SaleService:
         await SaleService._validate_customer_id(db, current_user, req.customer_id)
         item, rate = await SaleService._get_sellable_item_and_rate(db, current_user, req.product_code)
         breakdown = BillingCalculationEngine.calculate(
-            item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date, req.discount_amount
+            item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
+            req.discount_amount, req.gst_applied, req.customer_price,
         )
 
         sold = await InventoryRepository.mark_sold_if_in_stock(db, item.id, current_user.tenant_id)
@@ -642,6 +665,7 @@ class SaleService:
             stone_charge_amount=breakdown.stone_charge_amount,
             other_charges_amount=breakdown.other_charges_amount,
             subtotal_before_tax=breakdown.subtotal_before_tax,
+            gst_applied=breakdown.gst_applied,
             tax_rate_percent=breakdown.tax_rate_percent,
             tax_amount=breakdown.tax_amount,
             discount_amount=breakdown.discount_amount,
@@ -698,6 +722,44 @@ class SaleService:
         )
         return SaleListResponse(
             sales=[SaleService._build_response(s, current_user) for s in sales], total=total
+        )
+
+    @staticmethod
+    async def get_dashboard_summary(db: AsyncSession, current_user: User) -> BillingDashboardSummaryResponse:
+        """Powers the Admin Dashboard's Billing Summary — every figure is
+        aggregated straight off finalized Sale rows (see
+        SaleRepository.get_period_summary's own docstring); nothing here is
+        recomputed against today's live gold rate."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        now_ist = datetime.now(IST)
+        today_start = datetime.combine(now_ist.date(), datetime.min.time(), tzinfo=IST)
+        today_end = datetime.combine(now_ist.date(), datetime.max.time(), tzinfo=IST)
+        month_start = today_start.replace(day=1)
+
+        today_raw = await SaleRepository.get_period_summary(db, current_user.tenant_id, today_start, today_end)
+        month_raw = await SaleRepository.get_period_summary(db, current_user.tenant_id, month_start, today_end)
+        recent = await SaleRepository.get_recent(db, current_user.tenant_id, limit=5)
+        rate = await GoldRateService.get_customer_today_rate(db, current_user)
+
+        return BillingDashboardSummaryResponse(
+            today=BillingPeriodSummary(**today_raw),
+            this_month=BillingPeriodSummary(**month_raw),
+            today_gold_rate_24k=rate.rate_24k if rate else None,
+            recent_sales=[
+                RecentSaleSummary(
+                    id=s.id,
+                    invoice_number=s.invoice_number,
+                    customer_name=s.customer_name,
+                    product_code=s.product_code,
+                    product_name=s.product_name,
+                    final_amount=s.final_amount,
+                    profit_or_loss=s.estimated_gross_margin,
+                    sale_timestamp=s.sale_timestamp,
+                )
+                for s in recent
+            ],
         )
 
     @staticmethod

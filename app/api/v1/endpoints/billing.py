@@ -224,10 +224,12 @@ async def bulk_purchase(
 async def get_sale_quote(
     product_code: str,
     discount_amount: float = Query(0, ge=0),
+    gst_applied: bool = Query(True),
+    customer_price: Optional[float] = Query(None, ge=0),
     current_user: User = Depends(require_admin_or_staff_module("billing")),
     db: AsyncSession = Depends(get_async_db),
 ):
-    quote = await SaleService.get_quote(db, current_user, product_code, discount_amount)
+    quote = await SaleService.get_quote(db, current_user, product_code, discount_amount, gst_applied, customer_price)
     return StandardSuccessResponse(
         success=True, message="Quote calculated successfully", data=quote.model_dump(mode="json")
     )
@@ -251,6 +253,23 @@ async def create_sale(
     sale = await SaleService.create_sale(db, current_user, req)
     return StandardSuccessResponse(
         success=True, message="Sale completed successfully", data={"sale": sale.model_dump(mode="json")}
+    )
+
+
+@router.get(
+    "/billing/dashboard-summary",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Billing Dashboard Summary (Admin)",
+    description="Today's and this-month's sales/profit/loss aggregated from finalized sale records, plus the 5 most recent sales.",
+)
+async def get_billing_dashboard_summary(
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    summary = await SaleService.get_dashboard_summary(db, current_user)
+    return StandardSuccessResponse(
+        success=True, message="Billing summary retrieved successfully", data=summary.model_dump(mode="json")
     )
 
 

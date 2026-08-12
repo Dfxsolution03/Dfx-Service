@@ -407,7 +407,7 @@ async def get_tenant_profile(
     return StandardSuccessResponse(
         success=True,
         message="Tenant profile retrieved successfully",
-        data={"tenant": profile.model_dump()},
+        data={"profile": profile.model_dump()},
     )
 
 
@@ -427,7 +427,7 @@ async def update_tenant_profile(
     return StandardSuccessResponse(
         success=True,
         message="Tenant profile updated successfully",
-        data={"tenant": profile.model_dump()},
+        data={"profile": profile.model_dump()},
     )
 
 

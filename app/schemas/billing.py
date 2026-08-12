@@ -234,6 +234,7 @@ class PriceBreakdown(BaseModel):
     other_charges_amount: float
 
     subtotal_before_tax: float
+    gst_applied: bool
     tax_rate_percent: float
     tax_amount: float
     discount_amount: float
@@ -253,6 +254,12 @@ class SaleCreateRequest(BaseModel):
     customer_name: Optional[str] = Field(None, max_length=150)
     customer_phone: Optional[str] = Field(None, max_length=20)
     discount_amount: float = Field(0, ge=0)
+    # If provided, this becomes the actual final_amount charged (the
+    # Admin's negotiated selling price) — discount_amount is then derived
+    # as the gap below the backend-computed reference total, purely for
+    # record-keeping. The reference total itself is never client-supplied.
+    customer_price: Optional[float] = Field(None, ge=0)
+    gst_applied: bool = True
     payment_method: PaymentMethod = "CASH"
     payment_status: PaymentStatus = "PAID"
 
@@ -297,6 +304,7 @@ class SaleResponse(BaseModel):
     other_charges_amount: float
 
     subtotal_before_tax: float
+    gst_applied: bool
     tax_rate_percent: float
     tax_amount: float
     discount_amount: float
@@ -320,3 +328,38 @@ class SaleResponse(BaseModel):
 class SaleListResponse(BaseModel):
     sales: List[SaleResponse]
     total: int
+
+
+# =============================================================================
+# Dashboard Billing Summary
+# =============================================================================
+
+class BillingPeriodSummary(BaseModel):
+    """total_sales/total_profit/total_loss come straight from finalized Sale
+    snapshots (final_amount / estimated_gross_margin) — never recomputed
+    against today's gold rate. bill_count and items_sold are currently
+    identical (one item per sale in this data model) but reported
+    separately since that's a data-model detail, not a guarantee."""
+    total_sales: float
+    total_profit: float
+    total_loss: float
+    bill_count: int
+    items_sold: int
+
+
+class RecentSaleSummary(BaseModel):
+    id: str
+    invoice_number: str
+    customer_name: Optional[str] = None
+    product_code: str
+    product_name: str
+    final_amount: float
+    profit_or_loss: Optional[float] = None
+    sale_timestamp: datetime
+
+
+class BillingDashboardSummaryResponse(BaseModel):
+    today: BillingPeriodSummary
+    this_month: BillingPeriodSummary
+    today_gold_rate_24k: Optional[float] = None
+    recent_sales: List[RecentSaleSummary]

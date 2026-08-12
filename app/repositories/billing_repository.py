@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from typing import List, Optional, Tuple
-from sqlalchemy import select, update, func, or_
+from sqlalchemy import select, update, func, or_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.billing import Vendor, InventoryItem, Sale
@@ -171,3 +171,34 @@ class SaleRepository:
         )
         rows = (await db.execute(list_stmt)).scalars().all()
         return list(rows), total
+
+    @staticmethod
+    async def get_period_summary(db: AsyncSession, tenant_id: str, start_dt: datetime, end_dt: datetime) -> dict:
+        """Aggregates directly off the immutable Sale snapshot rows — never
+        touches InventoryItem or the live gold rate, so this can never drift
+        from what was actually recorded at sale time."""
+        margin = Sale.estimated_gross_margin
+        stmt = select(
+            func.coalesce(func.sum(Sale.final_amount), 0.0),
+            func.coalesce(func.sum(case((margin > 0, margin), else_=0.0)), 0.0),
+            func.coalesce(func.sum(case((margin < 0, -margin), else_=0.0)), 0.0),
+            func.count(Sale.id),
+        ).where(Sale.tenant_id == tenant_id, Sale.sale_timestamp >= start_dt, Sale.sale_timestamp <= end_dt)
+        total_sales, total_profit, total_loss, bill_count = (await db.execute(stmt)).one()
+        return {
+            "total_sales": float(total_sales),
+            "total_profit": float(total_profit),
+            "total_loss": float(total_loss),
+            "bill_count": int(bill_count),
+            "items_sold": int(bill_count),  # one item per sale in this data model
+        }
+
+    @staticmethod
+    async def get_recent(db: AsyncSession, tenant_id: str, limit: int = 5) -> List[Sale]:
+        stmt = (
+            select(Sale)
+            .where(Sale.tenant_id == tenant_id)
+            .order_by(Sale.sale_timestamp.desc())
+            .limit(limit)
+        )
+        return list((await db.execute(stmt)).scalars().all())
