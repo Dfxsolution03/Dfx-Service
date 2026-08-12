@@ -1,0 +1,167 @@
+from datetime import date, datetime
+from typing import Optional
+from sqlalchemy import String, Float, Date, DateTime, ForeignKey, UniqueConstraint
+from sqlalchemy.orm import Mapped, mapped_column, relationship
+
+from app.models.base import Base, TimestampMixin
+
+
+class InventoryItem(Base, TimestampMixin):
+    """
+    Billing System — Inventory / Product Master. One row per finished
+    jewellery piece bought from a vendor (this business buys finished goods,
+    it does not manufacture from raw gold — see Selling's own docstring).
+    product_code is the key used later to pull this exact item up during a
+    sale (scan/enter code -> load product -> calculate -> sell).
+
+    Purchase fields (vendor/date/invoice/cost) are historical record-keeping
+    only — Selling never reads purchase_cost to price a sale; it exists so a
+    Sale row can later snapshot it for an internal margin estimate (see
+    Sale.estimated_gross_margin).
+
+    purity is a closed Literal (see app/core/constants.py PURITY_CHOICES,
+    validated at the schema layer) — unlike catalogue.Product.purity's free
+    text, Billing's calculation engine must look purity up in the karat/24K
+    conversion table, so it can't be an arbitrary string here.
+    """
+    __tablename__ = "inventory_items"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "product_code", name="uq_inventory_items_tenant_product_code"),
+    )
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    product_code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    product_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    subcategory: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    huid: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    purity: Mapped[str] = mapped_column(String(10), nullable=False)
+    gross_weight_grams: Mapped[float] = mapped_column(Float, nullable=False)
+    net_gold_weight_grams: Mapped[float] = mapped_column(Float, nullable=False)
+
+    vendor_name: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    purchase_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    purchase_invoice_ref: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    # Historical cost only — never used as, or confused with, a selling
+    # price. See this model's own docstring.
+    purchase_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    image_storage_path: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    # IN_STOCK -> SOLD (permanent, set only by SaleService on a completed
+    # sale) or -> INACTIVE (manual admin retire, e.g. data-entry mistake /
+    # returned-to-vendor — never used for a sold item).
+    stock_status: Mapped[str] = mapped_column(
+        String(20), default="IN_STOCK", nullable=False, index=True
+    )
+
+    # Making Charge / Wastage — configurable rule stored on the product, per
+    # the explicit "do not hard-code one business rule" requirement. type is
+    # one of CHARGE_CALCULATION_TYPES; value's unit depends on type (rupees
+    # for FIXED, rupees/gram for PER_GRAM, percent for PERCENTAGE).
+    making_charge_type: Mapped[str] = mapped_column(String(20), nullable=False, default="PERCENTAGE")
+    making_charge_value: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    wastage_type: Mapped[str] = mapped_column(String(20), nullable=False, default="PERCENTAGE")
+    wastage_value: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+
+    # Stone Charge / Other Charges — flat rupee amounts (spec gives no
+    # calculation-type variants for these two, unlike Making/Wastage).
+    stone_charge_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    other_charges_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+
+    # GST/tax — required, no default, so a rate is never silently assumed
+    # for a real sale (see schemas/billing.py's InventoryItemCreateRequest).
+    tax_rate_percent: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+
+    created_by: Mapped[str] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+
+    tenant: Mapped["Tenant"] = relationship("Tenant")
+
+
+class Sale(Base, TimestampMixin):
+    """
+    Billing System — one row per completed sale/invoice. Every pricing input
+    (gold rate, purity factor, making/wastage/stone/other charges, tax) is
+    snapshotted here at the moment of sale, exactly as SaleService computed
+    it — so this row never changes when tomorrow's live gold rate changes,
+    when the source InventoryItem is edited, or when tax rules change later.
+    This table is the permanent historical record; InventoryItem only ever
+    reflects current stock state.
+    """
+    __tablename__ = "sales"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "invoice_number", name="uq_sales_tenant_invoice_number"),
+    )
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    invoice_number: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+
+    inventory_item_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("inventory_items.id"), nullable=False, index=True
+    )
+
+    # Customer — an existing tenant User (Customer role) when picked from
+    # the system, or a plain walk-in name/phone when not. Never required to
+    # be a registered account (counter sales must stay fast).
+    customer_id: Mapped[Optional[str]] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    customer_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    customer_phone: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
+    # Product snapshot — copied from InventoryItem at sale time, independent
+    # of any later edit to that row.
+    product_code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    product_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    huid: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    purity: Mapped[str] = mapped_column(String(10), nullable=False)
+    gross_weight_grams: Mapped[float] = mapped_column(Float, nullable=False)
+    net_gold_weight_grams: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # Gold rate snapshot — the exact rate this sale was priced at, and where
+    # it came from (see GoldRateService.get_customer_today_rate's fallback
+    # chain), so a historical invoice is fully explainable after the fact.
+    gold_rate_24k: Mapped[float] = mapped_column(Float, nullable=False)
+    gold_rate_purity_factor: Mapped[float] = mapped_column(Float, nullable=False)
+    gold_rate_applied: Mapped[float] = mapped_column(Float, nullable=False)
+    gold_rate_source: Mapped[str] = mapped_column(String(50), nullable=False)
+    gold_rate_effective_date: Mapped[date] = mapped_column(Date, nullable=False)
+
+    gold_value_amount: Mapped[float] = mapped_column(Float, nullable=False)
+
+    making_charge_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    making_charge_value: Mapped[float] = mapped_column(Float, nullable=False)
+    making_charge_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    wastage_type: Mapped[str] = mapped_column(String(20), nullable=False)
+    wastage_value: Mapped[float] = mapped_column(Float, nullable=False)
+    wastage_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    stone_charge_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    other_charges_amount: Mapped[float] = mapped_column(Float, nullable=False)
+
+    subtotal_before_tax: Mapped[float] = mapped_column(Float, nullable=False)
+    tax_rate_percent: Mapped[float] = mapped_column(Float, nullable=False)
+    tax_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    discount_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    final_amount: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # Internal only (see schemas/billing.py — never labeled "net profit",
+    # never returned to a Staff-role caller). NULL when the source item had
+    # no purchase_cost on record.
+    purchase_cost_snapshot: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    estimated_gross_margin: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    sale_timestamp: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    created_by: Mapped[str] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+
+    tenant: Mapped["Tenant"] = relationship("Tenant")
+    inventory_item: Mapped["InventoryItem"] = relationship("InventoryItem")

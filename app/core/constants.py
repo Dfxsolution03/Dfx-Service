@@ -81,6 +81,11 @@ STAFF_MODULE_ANALYTICS = "analytics"
 STAFF_MODULE_BRANCHES = "branches"
 STAFF_MODULE_SUPPORT = "support"
 STAFF_MODULE_NOTIFICATIONS = "notifications"
+# Billing System (Inventory + Selling/Sales History) — one module key gates
+# all three sub-screens, same "one module key, several sub-features" grant
+# granularity as STAFF_MODULE_CATALOGUE (images/designs/rendering all live
+# under "catalogue").
+STAFF_MODULE_BILLING = "billing"
 
 ALL_STAFF_MODULES = [
     STAFF_MODULE_CUSTOMERS,
@@ -96,7 +101,35 @@ ALL_STAFF_MODULES = [
     STAFF_MODULE_BRANCHES,
     STAFF_MODULE_SUPPORT,
     STAFF_MODULE_NOTIFICATIONS,
+    STAFF_MODULE_BILLING,
 ]
+
+# Billing Module — Inventory / Selling. Karat-to-24K fraction table
+# (karat/24), the standard jewellery-industry purity conversion — GoldRate
+# and MarketRate only ever store a 24K rate, so a purity-specific rate is
+# always derived from it via this real, well-known ratio (e.g. 22K = 916
+# hallmark = 22/24), never a fabricated/independent rate.
+PURITY_KARATS = {
+    "9K": 9,
+    "14K": 14,
+    "18K": 18,
+    "20K": 20,
+    "22K": 22,
+    "24K": 24,
+}
+PURITY_CHOICES = list(PURITY_KARATS.keys())
+
+# Making Charge / Wastage configurable calculation types.
+CHARGE_TYPE_FIXED = "FIXED"
+CHARGE_TYPE_PER_GRAM = "PER_GRAM"
+CHARGE_TYPE_PERCENTAGE = "PERCENTAGE"
+CHARGE_CALCULATION_TYPES = [CHARGE_TYPE_FIXED, CHARGE_TYPE_PER_GRAM, CHARGE_TYPE_PERCENTAGE]
+
+# InventoryItem.stock_status values.
+STOCK_STATUS_IN_STOCK = "IN_STOCK"
+STOCK_STATUS_SOLD = "SOLD"
+STOCK_STATUS_INACTIVE = "INACTIVE"
+INVENTORY_STOCK_STATUSES = [STOCK_STATUS_IN_STOCK, STOCK_STATUS_SOLD, STOCK_STATUS_INACTIVE]
 
 # Notification campaign constants
 NOTIFICATION_CHANNELS = ["IN_APP", "EMAIL", "WHATSAPP", "SMS", "PUSH"]

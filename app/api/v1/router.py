@@ -3,7 +3,7 @@ from app.api.v1.endpoints import (
     health, auth, customer, goldrate, scheme, enrollment, passbook, payment,
     report, audit, superadmin, catalogue, support, customer_catalogue, wishlist,
     dashboard, staff, notification, promotion, admin_notification, platform_settings,
-    integration,
+    integration, billing,
 )
 
 api_router = APIRouter()
@@ -73,3 +73,6 @@ api_router.include_router(platform_settings.router, tags=["Platform Settings Mod
 
 # SuperAdmin Integrations — provider status/enable/test + webhook foundation
 api_router.include_router(integration.router, tags=["Integrations Module"])
+
+# Billing System — Inventory (Product Master) + Selling + Sales History
+api_router.include_router(billing.router, tags=["Billing Module"])

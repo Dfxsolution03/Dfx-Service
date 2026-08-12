@@ -1,0 +1,548 @@
+import uuid
+from datetime import date, datetime, timezone
+from typing import Optional
+from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
+from sqlalchemy.ext.asyncio import AsyncSession
+
+from app.core.constants import PURITY_KARATS, ROLE_ADMIN, ROLE_SUPERADMIN
+from app.models.auth import User
+from app.models.billing import InventoryItem, Sale
+from app.repositories.billing_repository import InventoryRepository, SaleRepository
+from app.repositories.audit_repository import AuditRepository
+from app.services.storage_service import get_storage_provider
+from app.services.goldrate_service import GoldRateService
+from app.exceptions.base import (
+    ResourceNotFoundException,
+    ForbiddenException,
+    ValidationException,
+    ConflictException,
+)
+from app.schemas.billing import (
+    InventoryItemCreateRequest,
+    InventoryItemUpdateRequest,
+    InventoryItemResponse,
+    InventoryItemListResponse,
+    PriceBreakdown,
+    SaleQuoteResponse,
+    SaleCreateRequest,
+    SaleResponse,
+    SaleListResponse,
+)
+
+
+def _is_privileged(current_user: User) -> bool:
+    """Admin/SuperAdmin see commercially sensitive fields (purchase cost,
+    estimated gross margin); Staff do not."""
+    return current_user.role.name in (ROLE_ADMIN, ROLE_SUPERADMIN)
+
+
+def _charge_amount(charge_type: str, value: float, net_gold_weight_grams: float, gold_value_amount: float) -> float:
+    if charge_type == "FIXED":
+        return value
+    if charge_type == "PER_GRAM":
+        return value * net_gold_weight_grams
+    if charge_type == "PERCENTAGE":
+        return gold_value_amount * (value / 100)
+    raise ValidationException(f"Unknown charge calculation type '{charge_type}'")
+
+
+def _round2(value: float) -> float:
+    return round(value, 2)
+
+
+class BillingCalculationEngine:
+    """The one place a sale's price is computed — used identically by the
+    ephemeral quote (SaleService.get_quote) and the persisted sale
+    (SaleService.create_sale), so a confirmed sale is always priced by
+    exactly the same math the staff member previewed. Deterministic: same
+    item + same gold rate + same discount always produces the same
+    breakdown."""
+
+    @staticmethod
+    def calculate(
+        item: InventoryItem,
+        rate_24k: float,
+        rate_source: str,
+        rate_effective_date: date,
+        discount_amount: float,
+    ) -> PriceBreakdown:
+        karat = PURITY_KARATS.get(item.purity)
+        if karat is None:
+            raise ValidationException(f"Unsupported purity '{item.purity}'")
+        purity_factor = karat / 24.0
+        gold_rate_applied = rate_24k * purity_factor
+        gold_value_amount = item.net_gold_weight_grams * gold_rate_applied
+
+        making_charge_amount = _charge_amount(
+            item.making_charge_type, item.making_charge_value, item.net_gold_weight_grams, gold_value_amount
+        )
+        wastage_amount = _charge_amount(
+            item.wastage_type, item.wastage_value, item.net_gold_weight_grams, gold_value_amount
+        )
+
+        subtotal_before_tax = (
+            gold_value_amount
+            + making_charge_amount
+            + wastage_amount
+            + item.stone_charge_amount
+            + item.other_charges_amount
+        )
+        tax_amount = subtotal_before_tax * (item.tax_rate_percent / 100)
+        payable_before_discount = subtotal_before_tax + tax_amount
+
+        if discount_amount < 0:
+            raise ValidationException("discount_amount cannot be negative")
+        if discount_amount > payable_before_discount:
+            raise ValidationException("discount_amount cannot exceed the payable amount")
+
+        final_amount = payable_before_discount - discount_amount
+
+        return PriceBreakdown(
+            purity=item.purity,
+            net_gold_weight_grams=item.net_gold_weight_grams,
+            gold_rate_24k=_round2(rate_24k),
+            gold_rate_purity_factor=purity_factor,
+            gold_rate_applied=_round2(gold_rate_applied),
+            gold_rate_source=rate_source,
+            gold_rate_effective_date=rate_effective_date,
+            gold_value_amount=_round2(gold_value_amount),
+            making_charge_type=item.making_charge_type,
+            making_charge_value=item.making_charge_value,
+            making_charge_amount=_round2(making_charge_amount),
+            wastage_type=item.wastage_type,
+            wastage_value=item.wastage_value,
+            wastage_amount=_round2(wastage_amount),
+            stone_charge_amount=_round2(item.stone_charge_amount),
+            other_charges_amount=_round2(item.other_charges_amount),
+            subtotal_before_tax=_round2(subtotal_before_tax),
+            tax_rate_percent=item.tax_rate_percent,
+            tax_amount=_round2(tax_amount),
+            discount_amount=_round2(discount_amount),
+            final_amount=_round2(final_amount),
+        )
+
+
+class InventoryService:
+    @staticmethod
+    def _build_response(item: InventoryItem, current_user: User) -> InventoryItemResponse:
+        provider = get_storage_provider()
+        privileged = _is_privileged(current_user)
+        return InventoryItemResponse(
+            id=item.id,
+            tenant_id=item.tenant_id,
+            product_code=item.product_code,
+            product_name=item.product_name,
+            category=item.category,
+            subcategory=item.subcategory,
+            huid=item.huid,
+            purity=item.purity,
+            gross_weight_grams=item.gross_weight_grams,
+            net_gold_weight_grams=item.net_gold_weight_grams,
+            vendor_name=item.vendor_name,
+            purchase_date=item.purchase_date,
+            purchase_invoice_ref=item.purchase_invoice_ref,
+            purchase_cost=item.purchase_cost if privileged else None,
+            image_url=provider.get_public_url(item.image_storage_path) if item.image_storage_path else None,
+            stock_status=item.stock_status,
+            making_charge_type=item.making_charge_type,
+            making_charge_value=item.making_charge_value,
+            wastage_type=item.wastage_type,
+            wastage_value=item.wastage_value,
+            stone_charge_amount=item.stone_charge_amount,
+            other_charges_amount=item.other_charges_amount,
+            tax_rate_percent=item.tax_rate_percent,
+            created_by=item.created_by,
+            created_at=item.created_at,
+            updated_at=item.updated_at,
+        )
+
+    @staticmethod
+    async def list_items(
+        db: AsyncSession,
+        current_user: User,
+        page: int,
+        limit: int,
+        search: Optional[str],
+        stock_status: Optional[str],
+        category: Optional[str],
+    ) -> InventoryItemListResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        items, total = await InventoryRepository.list_by_tenant(
+            db, current_user.tenant_id, page, limit, search, stock_status, category
+        )
+        return InventoryItemListResponse(
+            items=[InventoryService._build_response(i, current_user) for i in items], total=total
+        )
+
+    @staticmethod
+    async def get_item(db: AsyncSession, current_user: User, item_id: str) -> InventoryItemResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        item = await InventoryRepository.get_by_id(db, item_id, current_user.tenant_id)
+        if not item:
+            raise ResourceNotFoundException(f"Inventory item '{item_id}' not found")
+        return InventoryService._build_response(item, current_user)
+
+    @staticmethod
+    async def create_item(
+        db: AsyncSession, current_user: User, req: InventoryItemCreateRequest
+    ) -> InventoryItemResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        existing = await InventoryRepository.get_by_product_code(
+            db, req.product_code, current_user.tenant_id
+        )
+        if existing:
+            raise ConflictException(f"Product code '{req.product_code}' is already in use")
+
+        item_id = f"iv_{uuid.uuid4().hex[:12]}"
+        item = InventoryItem(
+            id=item_id,
+            tenant_id=current_user.tenant_id,
+            product_code=req.product_code,
+            product_name=req.product_name,
+            category=req.category,
+            subcategory=req.subcategory,
+            huid=req.huid,
+            purity=req.purity,
+            gross_weight_grams=req.gross_weight_grams,
+            net_gold_weight_grams=req.net_gold_weight_grams,
+            vendor_name=req.vendor_name,
+            purchase_date=req.purchase_date,
+            purchase_invoice_ref=req.purchase_invoice_ref,
+            purchase_cost=req.purchase_cost,
+            stock_status="IN_STOCK",
+            making_charge_type=req.making_charge_type,
+            making_charge_value=req.making_charge_value,
+            wastage_type=req.wastage_type,
+            wastage_value=req.wastage_value,
+            stone_charge_amount=req.stone_charge_amount,
+            other_charges_amount=req.other_charges_amount,
+            tax_rate_percent=req.tax_rate_percent,
+            created_by=current_user.id,
+        )
+        await InventoryRepository.create(db, item)
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="INVENTORY_ITEM_CREATE",
+            target_entity="inventory_items",
+            target_id=item_id,
+            before_state=None,
+            after_state={"product_code": req.product_code, "purity": req.purity},
+        )
+
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            raise ConflictException(f"Product code '{req.product_code}' is already in use")
+
+        item = await InventoryRepository.get_by_id(db, item_id, current_user.tenant_id)
+        return InventoryService._build_response(item, current_user)
+
+    @staticmethod
+    async def update_item(
+        db: AsyncSession, current_user: User, item_id: str, req: InventoryItemUpdateRequest
+    ) -> InventoryItemResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        item = await InventoryRepository.get_by_id(db, item_id, current_user.tenant_id)
+        if not item:
+            raise ResourceNotFoundException(f"Inventory item '{item_id}' not found")
+        if item.stock_status == "SOLD":
+            raise ConflictException("A sold inventory item's record cannot be edited")
+
+        before_state = {"stock_status": item.stock_status}
+        fields = [
+            "product_name", "category", "subcategory", "huid", "purity",
+            "gross_weight_grams", "net_gold_weight_grams", "vendor_name",
+            "purchase_date", "purchase_invoice_ref", "purchase_cost",
+            "making_charge_type", "making_charge_value", "wastage_type", "wastage_value",
+            "stone_charge_amount", "other_charges_amount", "tax_rate_percent", "stock_status",
+        ]
+        for field in fields:
+            val = getattr(req, field, None)
+            if val is not None:
+                setattr(item, field, val)
+
+        if item.net_gold_weight_grams > item.gross_weight_grams:
+            raise ValidationException("net_gold_weight_grams cannot exceed gross_weight_grams")
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="INVENTORY_ITEM_UPDATE",
+            target_entity="inventory_items",
+            target_id=item_id,
+            before_state=before_state,
+            after_state={"stock_status": item.stock_status},
+        )
+
+        await db.commit()
+        item = await InventoryRepository.get_by_id(db, item_id, current_user.tenant_id)
+        return InventoryService._build_response(item, current_user)
+
+    @staticmethod
+    async def upload_image(
+        db: AsyncSession, current_user: User, item_id: str, file_bytes: bytes, file_name: str, content_type: str
+    ) -> InventoryItemResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        item = await InventoryRepository.get_by_id(db, item_id, current_user.tenant_id)
+        if not item:
+            raise ResourceNotFoundException(f"Inventory item '{item_id}' not found")
+        if content_type not in ("image/jpeg", "image/png", "image/webp"):
+            raise ValidationException(f"Unsupported image type '{content_type}'. Allowed: JPEG, PNG, WebP.")
+
+        provider = get_storage_provider()
+        storage_path = await provider.upload(
+            tenant_id=current_user.tenant_id,
+            file_name=file_name,
+            content_type=content_type,
+            file_bytes=file_bytes,
+        )
+        item.image_storage_path = storage_path
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="INVENTORY_ITEM_IMAGE_UPLOAD",
+            target_entity="inventory_items",
+            target_id=item_id,
+            before_state=None,
+            after_state={"image_storage_path": storage_path},
+        )
+
+        await db.commit()
+        item = await InventoryRepository.get_by_id(db, item_id, current_user.tenant_id)
+        return InventoryService._build_response(item, current_user)
+
+
+class SaleService:
+    @staticmethod
+    def _build_response(sale: Sale, current_user: User) -> SaleResponse:
+        privileged = _is_privileged(current_user)
+        return SaleResponse(
+            id=sale.id,
+            tenant_id=sale.tenant_id,
+            invoice_number=sale.invoice_number,
+            inventory_item_id=sale.inventory_item_id,
+            customer_id=sale.customer_id,
+            customer_name=sale.customer_name,
+            customer_phone=sale.customer_phone,
+            product_code=sale.product_code,
+            product_name=sale.product_name,
+            huid=sale.huid,
+            purity=sale.purity,
+            gross_weight_grams=sale.gross_weight_grams,
+            net_gold_weight_grams=sale.net_gold_weight_grams,
+            gold_rate_24k=sale.gold_rate_24k,
+            gold_rate_purity_factor=sale.gold_rate_purity_factor,
+            gold_rate_applied=sale.gold_rate_applied,
+            gold_rate_source=sale.gold_rate_source,
+            gold_rate_effective_date=sale.gold_rate_effective_date,
+            gold_value_amount=sale.gold_value_amount,
+            making_charge_type=sale.making_charge_type,
+            making_charge_value=sale.making_charge_value,
+            making_charge_amount=sale.making_charge_amount,
+            wastage_type=sale.wastage_type,
+            wastage_value=sale.wastage_value,
+            wastage_amount=sale.wastage_amount,
+            stone_charge_amount=sale.stone_charge_amount,
+            other_charges_amount=sale.other_charges_amount,
+            subtotal_before_tax=sale.subtotal_before_tax,
+            tax_rate_percent=sale.tax_rate_percent,
+            tax_amount=sale.tax_amount,
+            discount_amount=sale.discount_amount,
+            final_amount=sale.final_amount,
+            purchase_cost_snapshot=sale.purchase_cost_snapshot if privileged else None,
+            estimated_gross_margin=sale.estimated_gross_margin if privileged else None,
+            sale_timestamp=sale.sale_timestamp,
+            created_by=sale.created_by,
+            created_at=sale.created_at,
+        )
+
+    @staticmethod
+    async def _get_sellable_item_and_rate(db: AsyncSession, current_user: User, product_code: str):
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        item = await InventoryRepository.get_by_product_code(db, product_code, current_user.tenant_id)
+        if not item:
+            raise ResourceNotFoundException(f"No inventory item found for product code '{product_code}'")
+        if item.stock_status != "IN_STOCK":
+            raise ConflictException(
+                f"Product '{product_code}' is not available for sale (status: {item.stock_status})"
+            )
+
+        rate = await GoldRateService.get_customer_today_rate(db, current_user)
+        if not rate:
+            raise ResourceNotFoundException(
+                "No live gold rate is available for today. Set today's gold rate before completing a sale."
+            )
+        return item, rate
+
+    @staticmethod
+    async def get_quote(
+        db: AsyncSession, current_user: User, product_code: str, discount_amount: float = 0
+    ) -> SaleQuoteResponse:
+        item, rate = await SaleService._get_sellable_item_and_rate(db, current_user, product_code)
+        breakdown = BillingCalculationEngine.calculate(
+            item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date, discount_amount
+        )
+        return SaleQuoteResponse(
+            inventory_item=InventoryService._build_response(item, current_user),
+            breakdown=breakdown,
+        )
+
+    @staticmethod
+    def _generate_invoice_number() -> str:
+        # Same PREFIX-YYMMDD-<6 hex> convention as Payment.payment_reference
+        # (see app/services/payment_service.py) — random suffix + a unique
+        # constraint on (tenant_id, invoice_number), not a DB sequence.
+        return f"INV-{date.today():%y%m%d}-{uuid.uuid4().hex[:6].upper()}"
+
+    @staticmethod
+    async def _validate_customer_id(db: AsyncSession, current_user: User, customer_id: Optional[str]) -> None:
+        """A client-supplied customer_id must never be trusted blindly — without
+        this check, a Sale row could end up pointing at a user from another
+        tenant entirely (the users table has no tenant-partitioned FK, so the
+        database itself won't catch that)."""
+        if not customer_id:
+            return
+        stmt = select(User.id).where(User.id == customer_id, User.tenant_id == current_user.tenant_id)
+        found = (await db.execute(stmt)).scalar_one_or_none()
+        if not found:
+            raise ResourceNotFoundException(f"Customer '{customer_id}' not found in your tenant")
+
+    @staticmethod
+    async def create_sale(db: AsyncSession, current_user: User, req: SaleCreateRequest) -> SaleResponse:
+        await SaleService._validate_customer_id(db, current_user, req.customer_id)
+        item, rate = await SaleService._get_sellable_item_and_rate(db, current_user, req.product_code)
+        breakdown = BillingCalculationEngine.calculate(
+            item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date, req.discount_amount
+        )
+
+        sold = await InventoryRepository.mark_sold_if_in_stock(db, item.id, current_user.tenant_id)
+        if not sold:
+            await db.rollback()
+            raise ConflictException(
+                f"Product '{req.product_code}' was just sold in another transaction. Please rescan."
+            )
+
+        purchase_cost_snapshot = item.purchase_cost
+        estimated_gross_margin = (
+            _round2(breakdown.subtotal_before_tax - purchase_cost_snapshot)
+            if purchase_cost_snapshot is not None
+            else None
+        )
+
+        sale_id = f"sl_{uuid.uuid4().hex[:12]}"
+        sale = Sale(
+            id=sale_id,
+            tenant_id=current_user.tenant_id,
+            invoice_number=SaleService._generate_invoice_number(),
+            inventory_item_id=item.id,
+            customer_id=req.customer_id,
+            customer_name=req.customer_name,
+            customer_phone=req.customer_phone,
+            product_code=item.product_code,
+            product_name=item.product_name,
+            huid=item.huid,
+            purity=item.purity,
+            gross_weight_grams=item.gross_weight_grams,
+            net_gold_weight_grams=item.net_gold_weight_grams,
+            gold_rate_24k=breakdown.gold_rate_24k,
+            gold_rate_purity_factor=breakdown.gold_rate_purity_factor,
+            gold_rate_applied=breakdown.gold_rate_applied,
+            gold_rate_source=breakdown.gold_rate_source,
+            gold_rate_effective_date=breakdown.gold_rate_effective_date,
+            gold_value_amount=breakdown.gold_value_amount,
+            making_charge_type=breakdown.making_charge_type,
+            making_charge_value=breakdown.making_charge_value,
+            making_charge_amount=breakdown.making_charge_amount,
+            wastage_type=breakdown.wastage_type,
+            wastage_value=breakdown.wastage_value,
+            wastage_amount=breakdown.wastage_amount,
+            stone_charge_amount=breakdown.stone_charge_amount,
+            other_charges_amount=breakdown.other_charges_amount,
+            subtotal_before_tax=breakdown.subtotal_before_tax,
+            tax_rate_percent=breakdown.tax_rate_percent,
+            tax_amount=breakdown.tax_amount,
+            discount_amount=breakdown.discount_amount,
+            final_amount=breakdown.final_amount,
+            purchase_cost_snapshot=purchase_cost_snapshot,
+            estimated_gross_margin=estimated_gross_margin,
+            sale_timestamp=datetime.now(timezone.utc),
+            created_by=current_user.id,
+        )
+        await SaleRepository.create(db, sale)
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="SALE_CREATE",
+            target_entity="sales",
+            target_id=sale_id,
+            before_state=None,
+            after_state={
+                "product_code": item.product_code,
+                "invoice_number": sale.invoice_number,
+                "final_amount": breakdown.final_amount,
+            },
+        )
+
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            raise ConflictException("Could not generate a unique invoice number. Please try again.")
+
+        sale = await SaleRepository.get_by_id(db, sale_id, current_user.tenant_id)
+        return SaleService._build_response(sale, current_user)
+
+    @staticmethod
+    async def list_sales(
+        db: AsyncSession,
+        current_user: User,
+        page: int,
+        limit: int,
+        search: Optional[str],
+        date_from: Optional[date],
+        date_to: Optional[date],
+    ) -> SaleListResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        sales, total = await SaleRepository.list_by_tenant(
+            db, current_user.tenant_id, page, limit, search, date_from, date_to
+        )
+        return SaleListResponse(
+            sales=[SaleService._build_response(s, current_user) for s in sales], total=total
+        )
+
+    @staticmethod
+    async def get_sale(db: AsyncSession, current_user: User, sale_id: str) -> SaleResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        sale = await SaleRepository.get_by_id(db, sale_id, current_user.tenant_id)
+        if not sale:
+            raise ResourceNotFoundException(f"Sale '{sale_id}' not found")
+        return SaleService._build_response(sale, current_user)
