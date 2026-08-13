@@ -803,9 +803,15 @@ class SaleService:
             item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
             discount_amount, gst_applied, customer_price,
         )
+        privileged = _is_privileged(current_user)
+        profit_or_loss = (
+            _round2(breakdown.subtotal_before_tax - item.purchase_cost)
+            if privileged and item.purchase_cost is not None else None
+        )
         return SaleQuoteResponse(
             inventory_item=InventoryService._build_response(item, current_user),
             breakdown=breakdown,
+            profit_or_loss=profit_or_loss,
         )
 
     @staticmethod

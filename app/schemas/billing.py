@@ -322,9 +322,13 @@ class PriceBreakdown(BaseModel):
 
 class SaleQuoteResponse(BaseModel):
     """Ephemeral — nothing is persisted. Backs the Selling screen's
-    scan-and-preview step."""
+    scan-and-preview step. profit_or_loss is backend-computed (subtotal
+    before tax minus the item's historical purchase cost) so the frontend
+    never re-derives it client-side; null for Staff callers, same as
+    purchase_cost on inventory_item."""
     inventory_item: InventoryItemResponse
     breakdown: PriceBreakdown
+    profit_or_loss: Optional[float] = None
 
 
 class SaleCreateRequest(BaseModel):
