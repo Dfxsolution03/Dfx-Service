@@ -30,13 +30,18 @@ class Vendor(Base, TimestampMixin):
     # means "this vendor has no opinion," falling through to Category then
     # Store defaults. Never referenced from a saved InventoryItem/Sale —
     # those always snapshot the resolved value, never a link back here.
-    default_making_charge_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
-    default_making_charge_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    default_wastage_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
-    default_wastage_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    default_stone_charge_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    default_other_charges_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
-    default_tax_rate_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Unprefixed, matching CategoryPricingDefault/TenantBillingDefaults and
+    # BillingDefaultFields exactly (only default_pricing_mode keeps the
+    # prefix, same as those two tables) — a previous prefixed naming here
+    # silently broke persistence, since the shared service/schema field
+    # names never matched these columns.
+    making_charge_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    making_charge_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    wastage_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    wastage_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    stone_charge_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    other_charges_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    tax_rate_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     default_pricing_mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
 
     created_by: Mapped[str] = mapped_column(
