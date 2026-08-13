@@ -16,13 +16,15 @@ class BillingDefaultFields(BaseModel):
     and Store defaults all carry exactly this set of nullable fields.
     Unset (None) means "this tier has no opinion," letting the resolver fall
     through to the next tier. Never linked from a saved InventoryItem/Sale;
-    only the resolved value is ever persisted there."""
+    only the resolved value is ever persisted there. Stone/other charges are
+    deliberately NOT here — those are item-specific (e.g. a diamond's stone
+    cost), not a store-wide/vendor-wide/category-wide default, so they're set
+    per item/sale only (see InventoryItemCreateRequest/SaleCreateRequest)."""
     making_charge_type: Optional[ChargeType] = None
     making_charge_value: Optional[float] = Field(None, ge=0)
     wastage_type: Optional[ChargeType] = None
     wastage_value: Optional[float] = Field(None, ge=0)
-    stone_charge_amount: Optional[float] = Field(None, ge=0)
-    other_charges_amount: Optional[float] = Field(None, ge=0)
+    gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
     tax_rate_percent: Optional[float] = Field(None, ge=0, le=100)
     default_pricing_mode: Optional[PricingMode] = None
 
@@ -109,8 +111,7 @@ class ResolvedInventoryDefaults(BaseModel):
     making_charge_value: Optional[float] = None
     wastage_type: Optional[ChargeType] = None
     wastage_value: Optional[float] = None
-    stone_charge_amount: Optional[float] = None
-    other_charges_amount: Optional[float] = None
+    gold_profit_percent: Optional[float] = None
     tax_rate_percent: Optional[float] = None
     pricing_mode: Optional[PricingMode] = None
     sources: dict[str, DefaultSource] = Field(default_factory=dict)
@@ -140,6 +141,7 @@ class InventoryItemCreateRequest(BaseModel):
     making_charge_value: float = Field(0, ge=0)
     wastage_type: ChargeType = "PERCENTAGE"
     wastage_value: float = Field(0, ge=0)
+    gold_profit_percent: float = Field(0, ge=0, le=100)
     stone_charge_amount: float = Field(0, ge=0)
     other_charges_amount: float = Field(0, ge=0)
     # Required, no default — a GST/tax rate must be a conscious choice per
@@ -176,6 +178,7 @@ class InventoryItemUpdateRequest(BaseModel):
     making_charge_value: Optional[float] = Field(None, ge=0)
     wastage_type: Optional[ChargeType] = None
     wastage_value: Optional[float] = Field(None, ge=0)
+    gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
     stone_charge_amount: Optional[float] = Field(None, ge=0)
     other_charges_amount: Optional[float] = Field(None, ge=0)
     tax_rate_percent: Optional[float] = Field(None, ge=0, le=100)
@@ -210,6 +213,7 @@ class InventoryItemResponse(BaseModel):
     making_charge_value: float
     wastage_type: str
     wastage_value: float
+    gold_profit_percent: float
     stone_charge_amount: float
     other_charges_amount: float
     tax_rate_percent: float
@@ -248,6 +252,7 @@ class BulkPurchaseLineItem(BaseModel):
     making_charge_value: float = Field(0, ge=0)
     wastage_type: ChargeType = "PERCENTAGE"
     wastage_value: float = Field(0, ge=0)
+    gold_profit_percent: float = Field(0, ge=0, le=100)
     stone_charge_amount: float = Field(0, ge=0)
     other_charges_amount: float = Field(0, ge=0)
     tax_rate_percent: float = Field(..., ge=0, le=100)
@@ -302,6 +307,8 @@ class PriceBreakdown(BaseModel):
     wastage_type: str
     wastage_value: float
     wastage_amount: float
+    gold_profit_percent: float
+    gold_profit_amount: float
     stone_charge_amount: float
     other_charges_amount: float
 
@@ -376,6 +383,8 @@ class SaleResponse(BaseModel):
     wastage_type: str
     wastage_value: float
     wastage_amount: float
+    gold_profit_percent: float
+    gold_profit_amount: float
     stone_charge_amount: float
     other_charges_amount: float
 
@@ -422,6 +431,8 @@ class BillingPeriodSummary(BaseModel):
     total_loss: Optional[float] = None
     bill_count: int
     items_sold: int
+    total_tax: float = 0.0
+    avg_bill_value: float = 0.0
 
 
 class RecentSaleSummary(BaseModel):
@@ -440,6 +451,13 @@ class BillingDashboardSummaryResponse(BaseModel):
     this_month: BillingPeriodSummary
     today_gold_rate_24k: Optional[float] = None
     recent_sales: List[RecentSaleSummary]
+    # Business History — the caller-selected period (via `period` or
+    # date_from/date_to query params). Defaults to today (same as `today`
+    # above) when no period is requested, so the field is always populated.
+    selected_period: BillingPeriodSummary
+    selected_period_label: str
+    selected_date_from: date
+    selected_date_to: date
 
 
 # =============================================================================
@@ -457,6 +475,7 @@ class PriceLinePreviewRequest(BaseModel):
     making_charge_value: float = Field(0, ge=0)
     wastage_type: ChargeType = "PERCENTAGE"
     wastage_value: float = Field(0, ge=0)
+    gold_profit_percent: float = Field(0, ge=0, le=100)
     stone_charge_amount: float = Field(0, ge=0)
     other_charges_amount: float = Field(0, ge=0)
     tax_rate_percent: float = Field(0, ge=0, le=100)

@@ -21,6 +21,7 @@ from app.models.auth import Tenant
 def _rows(sale: Sale):
     return [
         ("Gold Value", sale.gold_value_amount),
+        *([(f"Gold Profit ({sale.gold_profit_percent}%)", sale.gold_profit_amount)] if sale.gold_profit_percent else []),
         (f"Making Charge ({sale.making_charge_type})", sale.making_charge_amount),
         (f"Wastage ({sale.wastage_type})", sale.wastage_amount),
         ("Stone Charge", sale.stone_charge_amount),

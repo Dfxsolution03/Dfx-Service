@@ -39,6 +39,10 @@ class Vendor(Base, TimestampMixin):
     making_charge_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     wastage_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     wastage_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gold_profit_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # Deprecated as a DEFAULT-tier field (stone/other charges are item-specific,
+    # not a vendor/category/store default) — columns kept for existing data,
+    # no longer read/written by BillingDefaultFields/_DEFAULT_FIELD_NAMES.
     stone_charge_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     other_charges_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     tax_rate_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -71,6 +75,7 @@ class CategoryPricingDefault(Base, TimestampMixin):
     making_charge_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     wastage_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     wastage_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gold_profit_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     stone_charge_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     other_charges_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     tax_rate_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -99,6 +104,7 @@ class TenantBillingDefaults(Base, TimestampMixin):
     making_charge_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     wastage_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     wastage_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gold_profit_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     stone_charge_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     other_charges_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     tax_rate_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
@@ -179,6 +185,11 @@ class InventoryItem(Base, TimestampMixin):
     making_charge_value: Mapped[float] = mapped_column(Float, nullable=False, default=0)
     wastage_type: Mapped[str] = mapped_column(String(20), nullable=False, default="PERCENTAGE")
     wastage_value: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+
+    # Store margin on the gold-value portion only (never applied to the
+    # whole invoice) — percent, resolved the same VENDOR->CATEGORY->STORE
+    # way as making/wastage.
+    gold_profit_percent: Mapped[float] = mapped_column(Float, nullable=False, default=0)
 
     # Stone Charge / Other Charges — flat rupee amounts (spec gives no
     # calculation-type variants for these two, unlike Making/Wastage).
@@ -263,6 +274,8 @@ class Sale(Base, TimestampMixin):
     wastage_type: Mapped[str] = mapped_column(String(20), nullable=False)
     wastage_value: Mapped[float] = mapped_column(Float, nullable=False)
     wastage_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    gold_profit_percent: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    gold_profit_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0)
     stone_charge_amount: Mapped[float] = mapped_column(Float, nullable=False)
     other_charges_amount: Mapped[float] = mapped_column(Float, nullable=False)
 

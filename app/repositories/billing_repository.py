@@ -220,14 +220,17 @@ class SaleRepository:
             func.coalesce(func.sum(case((margin > 0, margin), else_=0.0)), 0.0),
             func.coalesce(func.sum(case((margin < 0, -margin), else_=0.0)), 0.0),
             func.count(Sale.id),
+            func.coalesce(func.sum(Sale.tax_amount), 0.0),
         ).where(Sale.tenant_id == tenant_id, Sale.sale_timestamp >= start_dt, Sale.sale_timestamp <= end_dt)
-        total_sales, total_profit, total_loss, bill_count = (await db.execute(stmt)).one()
+        total_sales, total_profit, total_loss, bill_count, total_tax = (await db.execute(stmt)).one()
         return {
             "total_sales": float(total_sales),
             "total_profit": float(total_profit),
             "total_loss": float(total_loss),
             "bill_count": int(bill_count),
             "items_sold": int(bill_count),  # one item per sale in this data model
+            "total_tax": float(total_tax),
+            "avg_bill_value": float(total_sales) / bill_count if bill_count else 0.0,
         }
 
     @staticmethod

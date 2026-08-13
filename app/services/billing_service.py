@@ -1,5 +1,5 @@
 import uuid
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 from typing import Optional
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
@@ -53,7 +53,7 @@ from app.schemas.billing import (
 
 _DEFAULT_FIELD_NAMES = [
     "making_charge_type", "making_charge_value", "wastage_type", "wastage_value",
-    "stone_charge_amount", "other_charges_amount", "tax_rate_percent", "default_pricing_mode",
+    "gold_profit_percent", "tax_rate_percent", "default_pricing_mode",
 ]
 
 
@@ -108,9 +108,13 @@ class BillingCalculationEngine:
         wastage_amount = _charge_amount(
             item.wastage_type, item.wastage_value, item.net_gold_weight_grams, gold_value_amount
         )
+        # Store margin on the GOLD VALUE portion only — never applied to
+        # making/wastage/stone/other or the whole invoice.
+        gold_profit_amount = gold_value_amount * (item.gold_profit_percent / 100)
 
         subtotal_before_tax = (
             gold_value_amount
+            + gold_profit_amount
             + making_charge_amount
             + wastage_amount
             + item.stone_charge_amount
@@ -150,6 +154,8 @@ class BillingCalculationEngine:
             wastage_type=item.wastage_type,
             wastage_value=item.wastage_value,
             wastage_amount=_round2(wastage_amount),
+            gold_profit_percent=item.gold_profit_percent,
+            gold_profit_amount=_round2(gold_profit_amount),
             stone_charge_amount=_round2(item.stone_charge_amount),
             other_charges_amount=_round2(item.other_charges_amount),
             subtotal_before_tax=_round2(subtotal_before_tax),
@@ -330,8 +336,7 @@ class BillingDefaultsService:
 
         making_type, making_value, making_src = resolve_pair("making_charge_type", "making_charge_value")
         wastage_type, wastage_value, wastage_src = resolve_pair("wastage_type", "wastage_value")
-        stone, stone_src = resolve_single("stone_charge_amount")
-        other, other_src = resolve_single("other_charges_amount")
+        gold_profit, gold_profit_src = resolve_single("gold_profit_percent")
         tax, tax_src = resolve_single("tax_rate_percent")
         mode, mode_src = resolve_single("default_pricing_mode")
 
@@ -340,15 +345,13 @@ class BillingDefaultsService:
             making_charge_value=making_value,
             wastage_type=wastage_type,
             wastage_value=wastage_value,
-            stone_charge_amount=stone,
-            other_charges_amount=other,
+            gold_profit_percent=gold_profit,
             tax_rate_percent=tax,
             pricing_mode=mode,
             sources={
                 "making_charge": making_src,
                 "wastage": wastage_src,
-                "stone_charge_amount": stone_src,
-                "other_charges_amount": other_src,
+                "gold_profit_percent": gold_profit_src,
                 "tax_rate_percent": tax_src,
                 "pricing_mode": mode_src,
             },
@@ -383,6 +386,7 @@ class InventoryService:
             making_charge_value=item.making_charge_value,
             wastage_type=item.wastage_type,
             wastage_value=item.wastage_value,
+            gold_profit_percent=item.gold_profit_percent,
             stone_charge_amount=item.stone_charge_amount,
             other_charges_amount=item.other_charges_amount,
             tax_rate_percent=item.tax_rate_percent,
@@ -473,6 +477,7 @@ class InventoryService:
             making_charge_value=req.making_charge_value,
             wastage_type=req.wastage_type,
             wastage_value=req.wastage_value,
+            gold_profit_percent=req.gold_profit_percent,
             stone_charge_amount=req.stone_charge_amount,
             other_charges_amount=req.other_charges_amount,
             tax_rate_percent=req.tax_rate_percent,
@@ -522,8 +527,8 @@ class InventoryService:
             "gross_weight_grams", "net_gold_weight_grams",
             "purchase_date", "purchase_invoice_ref", "purchase_rate_per_gram", "purchase_cost",
             "making_charge_type", "making_charge_value", "wastage_type", "wastage_value",
-            "stone_charge_amount", "other_charges_amount", "tax_rate_percent", "stock_status",
-            "pricing_mode",
+            "gold_profit_percent", "stone_charge_amount", "other_charges_amount", "tax_rate_percent",
+            "stock_status", "pricing_mode",
         ]
         for field in fields:
             val = getattr(req, field, None)
@@ -600,6 +605,7 @@ class InventoryService:
                 making_charge_value=line.making_charge_value,
                 wastage_type=line.wastage_type,
                 wastage_value=line.wastage_value,
+                gold_profit_percent=line.gold_profit_percent,
                 stone_charge_amount=line.stone_charge_amount,
                 other_charges_amount=line.other_charges_amount,
                 tax_rate_percent=line.tax_rate_percent,
@@ -657,6 +663,7 @@ class InventoryService:
             making_charge_value=req.making_charge_value,
             wastage_type=req.wastage_type,
             wastage_value=req.wastage_value,
+            gold_profit_percent=req.gold_profit_percent,
             stone_charge_amount=req.stone_charge_amount,
             other_charges_amount=req.other_charges_amount,
             tax_rate_percent=req.tax_rate_percent,
@@ -742,6 +749,8 @@ class SaleService:
             wastage_type=sale.wastage_type,
             wastage_value=sale.wastage_value,
             wastage_amount=sale.wastage_amount,
+            gold_profit_percent=sale.gold_profit_percent,
+            gold_profit_amount=sale.gold_profit_amount,
             stone_charge_amount=sale.stone_charge_amount,
             other_charges_amount=sale.other_charges_amount,
             subtotal_before_tax=sale.subtotal_before_tax,
@@ -870,6 +879,8 @@ class SaleService:
             wastage_type=breakdown.wastage_type,
             wastage_value=breakdown.wastage_value,
             wastage_amount=breakdown.wastage_amount,
+            gold_profit_percent=breakdown.gold_profit_percent,
+            gold_profit_amount=breakdown.gold_profit_amount,
             stone_charge_amount=breakdown.stone_charge_amount,
             other_charges_amount=breakdown.other_charges_amount,
             subtotal_before_tax=breakdown.subtotal_before_tax,
@@ -934,7 +945,43 @@ class SaleService:
         )
 
     @staticmethod
-    async def get_dashboard_summary(db: AsyncSession, current_user: User) -> BillingDashboardSummaryResponse:
+    def _resolve_period_range(
+        today: date, period: Optional[str], date_from: Optional[date], date_to: Optional[date]
+    ) -> tuple[date, date, str]:
+        """Business History date-range resolution — real calendar ranges,
+        not a frontend-side filter of already-fetched data. Custom
+        date_from/date_to (if both given) win over `period`."""
+        if date_from and date_to:
+            return date_from, date_to, f"{date_from.isoformat()} to {date_to.isoformat()}"
+        p = (period or "today").lower()
+        if p == "today":
+            return today, today, "Today"
+        if p == "yesterday":
+            d = today - timedelta(days=1)
+            return d, d, "Yesterday"
+        if p == "this_week":
+            return today - timedelta(days=today.weekday()), today, "This Week"
+        if p == "last_week":
+            start = today - timedelta(days=today.weekday() + 7)
+            return start, start + timedelta(days=6), "Last Week"
+        if p == "this_month":
+            return today.replace(day=1), today, "This Month"
+        if p == "last_month":
+            last_day_prev = today.replace(day=1) - timedelta(days=1)
+            return last_day_prev.replace(day=1), last_day_prev, "Last Month"
+        if p == "last_3_months":
+            return today - timedelta(days=90), today, "Last 3 Months"
+        if p == "last_6_months":
+            return today - timedelta(days=182), today, "Last 6 Months"
+        if p == "last_12_months":
+            return today - timedelta(days=365), today, "Last 12 Months"
+        return today, today, "Today"
+
+    @staticmethod
+    async def get_dashboard_summary(
+        db: AsyncSession, current_user: User,
+        period: Optional[str] = None, date_from: Optional[date] = None, date_to: Optional[date] = None,
+    ) -> BillingDashboardSummaryResponse:
         """Powers the Admin Dashboard's Billing Summary — every figure is
         aggregated straight off finalized Sale rows (see
         SaleRepository.get_period_summary's own docstring); nothing here is
@@ -953,14 +1000,24 @@ class SaleService:
         recent = await SaleRepository.get_recent(db, current_user.tenant_id, limit=5)
         rate = await GoldRateService.get_customer_today_rate(db, current_user)
 
+        sel_from, sel_to, sel_label = SaleService._resolve_period_range(now_ist.date(), period, date_from, date_to)
+        sel_start_dt = datetime.combine(sel_from, datetime.min.time(), tzinfo=IST)
+        sel_end_dt = datetime.combine(sel_to, datetime.max.time(), tzinfo=IST)
+        selected_raw = await SaleRepository.get_period_summary(db, current_user.tenant_id, sel_start_dt, sel_end_dt)
+
         if not privileged:
             today_raw = {**today_raw, "total_profit": None, "total_loss": None}
             month_raw = {**month_raw, "total_profit": None, "total_loss": None}
+            selected_raw = {**selected_raw, "total_profit": None, "total_loss": None}
 
         return BillingDashboardSummaryResponse(
             today=BillingPeriodSummary(**today_raw),
             this_month=BillingPeriodSummary(**month_raw),
             today_gold_rate_24k=rate.rate_24k if rate else None,
+            selected_period=BillingPeriodSummary(**selected_raw),
+            selected_period_label=sel_label,
+            selected_date_from=sel_from,
+            selected_date_to=sel_to,
             recent_sales=[
                 RecentSaleSummary(
                     id=s.id,

@@ -366,13 +366,16 @@ async def create_sale(
     response_model=StandardSuccessResponse,
     status_code=status.HTTP_200_OK,
     summary="Billing Dashboard Summary (Admin)",
-    description="Today's and this-month's sales/profit/loss aggregated from finalized sale records, plus the 5 most recent sales.",
+    description="Today's and this-month's sales/profit/loss aggregated from finalized sale records, plus a caller-selected Business History period (via `period` or date_from/date_to) and the 5 most recent sales.",
 )
 async def get_billing_dashboard_summary(
+    period: Optional[str] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
     current_user: User = Depends(require_admin_or_staff_module("billing")),
     db: AsyncSession = Depends(get_async_db),
 ):
-    summary = await SaleService.get_dashboard_summary(db, current_user)
+    summary = await SaleService.get_dashboard_summary(db, current_user, period, date_from, date_to)
     return StandardSuccessResponse(
         success=True, message="Billing summary retrieved successfully", data=summary.model_dump(mode="json")
     )
