@@ -131,6 +131,23 @@ STOCK_STATUS_SOLD = "SOLD"
 STOCK_STATUS_INACTIVE = "INACTIVE"
 INVENTORY_STOCK_STATUSES = [STOCK_STATUS_IN_STOCK, STOCK_STATUS_SOLD, STOCK_STATUS_INACTIVE]
 
+# Pricing mode — a label only. AUTO: system-calculated final amount (no
+# customer_price given). HYBRID: system shows a suggested price, admin may
+# override via customer_price. MANUAL: admin always supplies customer_price.
+# Purely informational for the UI; BillingCalculationEngine's behavior is
+# already determined by whether customer_price is present, not by this
+# label — see app/services/billing_service.py.
+PRICING_MODE_AUTO = "AUTO"
+PRICING_MODE_HYBRID = "HYBRID"
+PRICING_MODE_MANUAL = "MANUAL"
+PRICING_MODES = [PRICING_MODE_AUTO, PRICING_MODE_HYBRID, PRICING_MODE_MANUAL]
+
+# Default-resolution sources, for UI feedback only (see BillingDefaultsService).
+DEFAULT_SOURCE_VENDOR = "VENDOR"
+DEFAULT_SOURCE_CATEGORY = "CATEGORY"
+DEFAULT_SOURCE_STORE = "STORE"
+DEFAULT_SOURCE_NONE = "NONE"
+
 # Notification campaign constants
 NOTIFICATION_CHANNELS = ["IN_APP", "EMAIL", "WHATSAPP", "SMS", "PUSH"]
 NOTIFICATION_TARGET_TYPES = ["ALL", "CUSTOMERS", "SCHEME"]

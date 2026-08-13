@@ -27,7 +27,7 @@ from app.models.provider_health import ProviderHealth
 from app.models.promotion import Promotion
 from app.models.integration import PlatformIntegration, Webhook
 from app.models.platform_settings import PlatformSettings
-from app.models.billing import Vendor, InventoryItem, Sale
+from app.models.billing import Vendor, CategoryPricingDefault, TenantBillingDefaults, InventoryItem, Sale
 
 __all__ = [
     "Base",
@@ -68,6 +68,8 @@ __all__ = [
     "Webhook",
     "PlatformSettings",
     "Vendor",
+    "CategoryPricingDefault",
+    "TenantBillingDefaults",
     "InventoryItem",
     "Sale",
 ]

@@ -12,12 +12,15 @@ from app.schemas.auth import StandardSuccessResponse
 from app.schemas.billing import (
     VendorCreateRequest,
     VendorUpdateRequest,
+    CategoryDefaultUpsertRequest,
+    StoreDefaultsUpdateRequest,
     InventoryItemCreateRequest,
     InventoryItemUpdateRequest,
     BulkPurchaseRequest,
+    PriceLinePreviewRequest,
     SaleCreateRequest,
 )
-from app.services.billing_service import VendorService, InventoryService, SaleService
+from app.services.billing_service import VendorService, BillingDefaultsService, InventoryService, SaleService
 from app.services import billing_export_service
 from app.exceptions.base import ValidationException
 
@@ -74,6 +77,92 @@ async def update_vendor(
 ):
     vendor = await VendorService.update_vendor(db, current_user, vendor_id, req)
     return StandardSuccessResponse(success=True, message="Vendor updated successfully", data={"vendor": vendor.model_dump(mode="json")})
+
+
+# =============================================================================
+# 0b. Billing Defaults — Store / Category / Resolver
+# =============================================================================
+
+@router.get(
+    "/billing/defaults/store",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Store Billing Defaults (Admin)",
+)
+async def get_store_defaults(
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await BillingDefaultsService.get_store_defaults(db, current_user)
+    return StandardSuccessResponse(success=True, message="Store defaults retrieved successfully", data=result.model_dump(mode="json"))
+
+
+@router.put(
+    "/billing/defaults/store",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update Store Billing Defaults (Admin)",
+    description="Pre-fill source only — never changes any already-saved inventory or sale.",
+)
+async def update_store_defaults(
+    req: StoreDefaultsUpdateRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await BillingDefaultsService.update_store_defaults(db, current_user, req)
+    return StandardSuccessResponse(success=True, message="Store defaults updated successfully", data=result.model_dump(mode="json"))
+
+
+@router.get(
+    "/billing/defaults/categories",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List Category Pricing Defaults (Admin)",
+)
+async def list_category_defaults(
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    rows = await BillingDefaultsService.list_category_defaults(db, current_user)
+    return StandardSuccessResponse(
+        success=True, message="Category defaults retrieved successfully", data={"categories": [r.model_dump(mode="json") for r in rows]}
+    )
+
+
+@router.put(
+    "/billing/defaults/categories",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Create/Update Category Pricing Default (Admin)",
+    description="Upserts by category name — never changes any already-saved inventory or sale.",
+)
+async def upsert_category_default(
+    req: CategoryDefaultUpsertRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await BillingDefaultsService.upsert_category_default(db, current_user, req)
+    return StandardSuccessResponse(success=True, message="Category default saved successfully", data=result.model_dump(mode="json"))
+
+
+@router.get(
+    "/billing/defaults/resolve",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Resolve Field-by-Field Inventory Defaults (Admin)",
+    description=(
+        "For each configurable field independently: Vendor default -> Category default -> Store default. "
+        "Pre-fill only — the caller must still save whatever value lands in the form."
+    ),
+)
+async def resolve_defaults(
+    vendor_id: Optional[str] = Query(None),
+    category: Optional[str] = Query(None),
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await BillingDefaultsService.resolve_defaults(db, current_user, vendor_id, category)
+    return StandardSuccessResponse(success=True, message="Defaults resolved successfully", data=result.model_dump(mode="json"))
 
 
 # =============================================================================
@@ -204,6 +293,22 @@ async def bulk_purchase(
         message=f"{len(result.items)} inventory item(s) created successfully",
         data={"items": [i.model_dump(mode="json") for i in result.items]},
     )
+
+
+@router.post(
+    "/billing/inventory/preview-price",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Preview Suggested Price / Profit for an unsaved row (Admin)",
+    description="Bulk Inventory's live preview — reuses the same calculation engine Selling uses, against not-yet-saved field values. Nothing is persisted.",
+)
+async def preview_price(
+    req: PriceLinePreviewRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await InventoryService.preview_price(db, current_user, req)
+    return StandardSuccessResponse(success=True, message="Price preview calculated", data=result.model_dump(mode="json"))
 
 
 # =============================================================================

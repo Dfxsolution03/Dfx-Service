@@ -7,8 +7,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import PURITY_KARATS, ROLE_ADMIN, ROLE_SUPERADMIN
 from app.models.auth import User
-from app.models.billing import Vendor, InventoryItem, Sale
-from app.repositories.billing_repository import VendorRepository, InventoryRepository, SaleRepository
+from app.models.billing import Vendor, CategoryPricingDefault, TenantBillingDefaults, InventoryItem, Sale
+from app.repositories.billing_repository import (
+    VendorRepository,
+    CategoryDefaultRepository,
+    TenantBillingDefaultsRepository,
+    InventoryRepository,
+    SaleRepository,
+)
 from app.repositories.audit_repository import AuditRepository
 from app.services.storage_service import get_storage_provider
 from app.services.goldrate_service import GoldRateService, IST
@@ -22,6 +28,11 @@ from app.schemas.billing import (
     VendorCreateRequest,
     VendorUpdateRequest,
     VendorResponse,
+    CategoryDefaultUpsertRequest,
+    CategoryDefaultResponse,
+    StoreDefaultsUpdateRequest,
+    StoreDefaultsResponse,
+    ResolvedInventoryDefaults,
     InventoryItemCreateRequest,
     InventoryItemUpdateRequest,
     InventoryItemResponse,
@@ -29,6 +40,8 @@ from app.schemas.billing import (
     BulkPurchaseRequest,
     BulkPurchaseResponse,
     PriceBreakdown,
+    PriceLinePreviewRequest,
+    PriceLinePreviewResponse,
     SaleQuoteResponse,
     SaleCreateRequest,
     SaleResponse,
@@ -37,6 +50,11 @@ from app.schemas.billing import (
     RecentSaleSummary,
     BillingDashboardSummaryResponse,
 )
+
+_DEFAULT_FIELD_NAMES = [
+    "making_charge_type", "making_charge_value", "wastage_type", "wastage_value",
+    "stone_charge_amount", "other_charges_amount", "tax_rate_percent", "default_pricing_mode",
+]
 
 
 def _is_privileged(current_user: User) -> bool:
@@ -166,6 +184,7 @@ class VendorService:
             gst_number=req.gst_number,
             is_active=True,
             created_by=current_user.id,
+            **{f: getattr(req, f) for f in _DEFAULT_FIELD_NAMES},
         )
         await VendorRepository.create(db, vendor)
         await db.commit()
@@ -181,7 +200,9 @@ class VendorService:
         vendor = await VendorRepository.get_by_id(db, vendor_id, current_user.tenant_id)
         if not vendor:
             raise ResourceNotFoundException(f"Vendor '{vendor_id}' not found")
-        for field in ["name", "contact_person", "phone", "email", "address", "gst_number", "is_active"]:
+        fields = ["name", "contact_person", "phone", "email", "address", "gst_number", "is_active"]
+        fields += _DEFAULT_FIELD_NAMES
+        for field in fields:
             val = getattr(req, field, None)
             if val is not None:
                 setattr(vendor, field, val)
@@ -195,6 +216,143 @@ class VendorService:
         if not vendor:
             raise ResourceNotFoundException(f"Vendor '{vendor_id}' not found")
         return vendor
+
+
+class BillingDefaultsService:
+    """Store/Category/Vendor default management + the single field-by-field
+    resolver every inventory-entry path (single create, bulk create) uses to
+    pre-fill a form. Resolution is display-time only — nothing here is ever
+    referenced from a saved InventoryItem/Sale, which always snapshot the
+    resolved value, never a link back to a default row."""
+
+    @staticmethod
+    async def get_store_defaults(db: AsyncSession, current_user: User) -> StoreDefaultsResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        row = await TenantBillingDefaultsRepository.get_by_tenant(db, current_user.tenant_id)
+        return StoreDefaultsResponse.model_validate(row) if row else StoreDefaultsResponse()
+
+    @staticmethod
+    async def update_store_defaults(
+        db: AsyncSession, current_user: User, req: StoreDefaultsUpdateRequest
+    ) -> StoreDefaultsResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        row = await TenantBillingDefaultsRepository.get_by_tenant(db, current_user.tenant_id)
+        if not row:
+            row = TenantBillingDefaults(
+                id=f"tbd_{uuid.uuid4().hex[:12]}",
+                tenant_id=current_user.tenant_id,
+                created_by=current_user.id,
+                **{f: getattr(req, f) for f in _DEFAULT_FIELD_NAMES},
+            )
+            await TenantBillingDefaultsRepository.create(db, row)
+        else:
+            for field in _DEFAULT_FIELD_NAMES:
+                val = getattr(req, field, None)
+                if val is not None:
+                    setattr(row, field, val)
+        await db.commit()
+        await db.refresh(row)
+        return StoreDefaultsResponse.model_validate(row)
+
+    @staticmethod
+    async def list_category_defaults(db: AsyncSession, current_user: User) -> list:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        rows = await CategoryDefaultRepository.list_by_tenant(db, current_user.tenant_id)
+        return [CategoryDefaultResponse.model_validate(r) for r in rows]
+
+    @staticmethod
+    async def upsert_category_default(
+        db: AsyncSession, current_user: User, req: CategoryDefaultUpsertRequest
+    ) -> CategoryDefaultResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        row = await CategoryDefaultRepository.get_by_category(db, current_user.tenant_id, req.category)
+        if not row:
+            row = CategoryPricingDefault(
+                id=f"cpd_{uuid.uuid4().hex[:12]}",
+                tenant_id=current_user.tenant_id,
+                category=req.category,
+                created_by=current_user.id,
+                **{f: getattr(req, f) for f in _DEFAULT_FIELD_NAMES},
+            )
+            await CategoryDefaultRepository.create(db, row)
+        else:
+            for field in _DEFAULT_FIELD_NAMES:
+                val = getattr(req, field, None)
+                if val is not None:
+                    setattr(row, field, val)
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            raise ConflictException(f"A pricing default for category '{req.category}' already exists")
+        await db.refresh(row)
+        return CategoryDefaultResponse.model_validate(row)
+
+    @staticmethod
+    async def resolve_defaults(
+        db: AsyncSession, current_user: User, vendor_id: Optional[str], category: Optional[str]
+    ) -> ResolvedInventoryDefaults:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        vendor = (
+            await VendorRepository.get_by_id(db, vendor_id, current_user.tenant_id) if vendor_id else None
+        )
+        cat_default = (
+            await CategoryDefaultRepository.get_by_category(db, current_user.tenant_id, category)
+            if category else None
+        )
+        store_default = await TenantBillingDefaultsRepository.get_by_tenant(db, current_user.tenant_id)
+
+        tiers = [("VENDOR", vendor), ("CATEGORY", cat_default), ("STORE", store_default)]
+
+        def resolve_pair(type_attr: str, value_attr: str):
+            for source, tier in tiers:
+                if tier is None:
+                    continue
+                t, v = getattr(tier, type_attr, None), getattr(tier, value_attr, None)
+                if t is not None and v is not None:
+                    return t, v, source
+            return None, None, "NONE"
+
+        def resolve_single(attr: str):
+            for source, tier in tiers:
+                if tier is None:
+                    continue
+                v = getattr(tier, attr, None)
+                if v is not None:
+                    return v, source
+            return None, "NONE"
+
+        making_type, making_value, making_src = resolve_pair("making_charge_type", "making_charge_value")
+        wastage_type, wastage_value, wastage_src = resolve_pair("wastage_type", "wastage_value")
+        stone, stone_src = resolve_single("stone_charge_amount")
+        other, other_src = resolve_single("other_charges_amount")
+        tax, tax_src = resolve_single("tax_rate_percent")
+        mode, mode_src = resolve_single("default_pricing_mode")
+
+        return ResolvedInventoryDefaults(
+            making_charge_type=making_type,
+            making_charge_value=making_value,
+            wastage_type=wastage_type,
+            wastage_value=wastage_value,
+            stone_charge_amount=stone,
+            other_charges_amount=other,
+            tax_rate_percent=tax,
+            pricing_mode=mode,
+            sources={
+                "making_charge": making_src,
+                "wastage": wastage_src,
+                "stone_charge_amount": stone_src,
+                "other_charges_amount": other_src,
+                "tax_rate_percent": tax_src,
+                "pricing_mode": mode_src,
+            },
+        )
 
 
 class InventoryService:
@@ -228,6 +386,7 @@ class InventoryService:
             stone_charge_amount=item.stone_charge_amount,
             other_charges_amount=item.other_charges_amount,
             tax_rate_percent=item.tax_rate_percent,
+            pricing_mode=item.pricing_mode,
             created_by=item.created_by,
             created_at=item.created_at,
             updated_at=item.updated_at,
@@ -317,6 +476,7 @@ class InventoryService:
             stone_charge_amount=req.stone_charge_amount,
             other_charges_amount=req.other_charges_amount,
             tax_rate_percent=req.tax_rate_percent,
+            pricing_mode=req.pricing_mode,
             created_by=current_user.id,
         )
         await InventoryRepository.create(db, item)
@@ -363,6 +523,7 @@ class InventoryService:
             "purchase_date", "purchase_invoice_ref", "purchase_cost",
             "making_charge_type", "making_charge_value", "wastage_type", "wastage_value",
             "stone_charge_amount", "other_charges_amount", "tax_rate_percent", "stock_status",
+            "pricing_mode",
         ]
         for field in fields:
             val = getattr(req, field, None)
@@ -435,6 +596,7 @@ class InventoryService:
                 stone_charge_amount=line.stone_charge_amount,
                 other_charges_amount=line.other_charges_amount,
                 tax_rate_percent=line.tax_rate_percent,
+                pricing_mode=line.pricing_mode,
                 created_by=current_user.id,
             )
             await InventoryRepository.create(db, item)
@@ -464,6 +626,44 @@ class InventoryService:
             fresh = await InventoryRepository.get_by_id(db, item.id, current_user.tenant_id)
             responses.append(InventoryService._build_response(fresh, current_user))
         return BulkPurchaseResponse(items=responses)
+
+    @staticmethod
+    async def preview_price(
+        db: AsyncSession, current_user: User, req: PriceLinePreviewRequest
+    ) -> PriceLinePreviewResponse:
+        """Bulk Inventory's live Suggested Price / Profit preview — reuses
+        BillingCalculationEngine.calculate() against a transient, unsaved
+        InventoryItem built purely to carry the row's current field values
+        (never added to the session). Same engine Selling uses; no financial
+        math is duplicated in the frontend."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        rate = await GoldRateService.get_customer_today_rate(db, current_user)
+        if not rate:
+            raise ResourceNotFoundException(
+                "No live gold rate is available for today. Set today's gold rate first."
+            )
+        transient = InventoryItem(
+            purity=req.purity,
+            net_gold_weight_grams=req.net_gold_weight_grams,
+            making_charge_type=req.making_charge_type,
+            making_charge_value=req.making_charge_value,
+            wastage_type=req.wastage_type,
+            wastage_value=req.wastage_value,
+            stone_charge_amount=req.stone_charge_amount,
+            other_charges_amount=req.other_charges_amount,
+            tax_rate_percent=req.tax_rate_percent,
+        )
+        breakdown = BillingCalculationEngine.calculate(
+            transient, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
+            0, req.gst_applied, req.customer_price,
+        )
+        profit_or_loss = (
+            _round2(breakdown.final_amount - req.purchase_cost) if req.purchase_cost is not None else None
+        )
+        return PriceLinePreviewResponse(
+            breakdown=breakdown, purchase_cost=req.purchase_cost, profit_or_loss=profit_or_loss
+        )
 
     @staticmethod
     async def upload_image(
@@ -545,6 +745,7 @@ class SaleService:
             final_amount=sale.final_amount,
             payment_method=sale.payment_method,
             payment_status=sale.payment_status,
+            pricing_mode=sale.pricing_mode,
             purchase_cost_snapshot=sale.purchase_cost_snapshot if privileged else None,
             estimated_gross_margin=sale.estimated_gross_margin if privileged else None,
             sale_timestamp=sale.sale_timestamp,
@@ -672,6 +873,7 @@ class SaleService:
             final_amount=breakdown.final_amount,
             payment_method=req.payment_method,
             payment_status=req.payment_status,
+            pricing_mode=req.pricing_mode or ("MANUAL" if req.customer_price is not None else "AUTO"),
             purchase_cost_snapshot=purchase_cost_snapshot,
             estimated_gross_margin=estimated_gross_margin,
             sale_timestamp=datetime.now(timezone.utc),

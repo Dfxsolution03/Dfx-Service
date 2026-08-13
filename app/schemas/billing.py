@@ -7,13 +7,31 @@ ChargeType = Literal["FIXED", "PER_GRAM", "PERCENTAGE"]
 StockStatus = Literal["IN_STOCK", "SOLD", "INACTIVE"]
 PaymentMethod = Literal["CASH", "CARD", "UPI", "BANK_TRANSFER", "OTHER"]
 PaymentStatus = Literal["PAID", "PENDING", "PARTIAL"]
+PricingMode = Literal["AUTO", "HYBRID", "MANUAL"]
+DefaultSource = Literal["VENDOR", "CATEGORY", "STORE", "NONE"]
+
+
+class BillingDefaultFields(BaseModel):
+    """Shared shape for the pre-fill-only default rules — Vendor, Category,
+    and Store defaults all carry exactly this set of nullable fields.
+    Unset (None) means "this tier has no opinion," letting the resolver fall
+    through to the next tier. Never linked from a saved InventoryItem/Sale;
+    only the resolved value is ever persisted there."""
+    making_charge_type: Optional[ChargeType] = None
+    making_charge_value: Optional[float] = Field(None, ge=0)
+    wastage_type: Optional[ChargeType] = None
+    wastage_value: Optional[float] = Field(None, ge=0)
+    stone_charge_amount: Optional[float] = Field(None, ge=0)
+    other_charges_amount: Optional[float] = Field(None, ge=0)
+    tax_rate_percent: Optional[float] = Field(None, ge=0, le=100)
+    default_pricing_mode: Optional[PricingMode] = None
 
 
 # =============================================================================
 # Vendor
 # =============================================================================
 
-class VendorCreateRequest(BaseModel):
+class VendorCreateRequest(BillingDefaultFields):
     name: str = Field(..., min_length=2, max_length=200)
     contact_person: Optional[str] = Field(None, max_length=150)
     phone: Optional[str] = Field(None, max_length=20)
@@ -22,7 +40,7 @@ class VendorCreateRequest(BaseModel):
     gst_number: Optional[str] = Field(None, max_length=20)
 
 
-class VendorUpdateRequest(BaseModel):
+class VendorUpdateRequest(BillingDefaultFields):
     name: Optional[str] = Field(None, min_length=2, max_length=200)
     contact_person: Optional[str] = Field(None, max_length=150)
     phone: Optional[str] = Field(None, max_length=20)
@@ -32,7 +50,7 @@ class VendorUpdateRequest(BaseModel):
     is_active: Optional[bool] = None
 
 
-class VendorResponse(BaseModel):
+class VendorResponse(BillingDefaultFields):
     id: str
     tenant_id: str
     name: str
@@ -46,6 +64,56 @@ class VendorResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# =============================================================================
+# Category Pricing Default
+# =============================================================================
+
+class CategoryDefaultUpsertRequest(BillingDefaultFields):
+    category: str = Field(..., min_length=1, max_length=100)
+
+
+class CategoryDefaultResponse(BillingDefaultFields):
+    id: str
+    category: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# =============================================================================
+# Store (Tenant) Billing Defaults — bottom of the resolution chain
+# =============================================================================
+
+class StoreDefaultsUpdateRequest(BillingDefaultFields):
+    pass
+
+
+class StoreDefaultsResponse(BillingDefaultFields):
+    class Config:
+        from_attributes = True
+
+
+# =============================================================================
+# Default Resolution — read-only, used to pre-fill Inventory/Bulk forms
+# =============================================================================
+
+class ResolvedInventoryDefaults(BaseModel):
+    """Field-by-field resolution result: each field's value comes from
+    whichever tier (Vendor -> Category -> Store) set it first, independent
+    of the others — never one tier winning wholesale. `sources` maps each
+    field name to where its value came from, for UI badges only."""
+    making_charge_type: Optional[ChargeType] = None
+    making_charge_value: Optional[float] = None
+    wastage_type: Optional[ChargeType] = None
+    wastage_value: Optional[float] = None
+    stone_charge_amount: Optional[float] = None
+    other_charges_amount: Optional[float] = None
+    tax_rate_percent: Optional[float] = None
+    pricing_mode: Optional[PricingMode] = None
+    sources: dict[str, DefaultSource] = Field(default_factory=dict)
 
 
 # =============================================================================
@@ -77,6 +145,7 @@ class InventoryItemCreateRequest(BaseModel):
     # Required, no default — a GST/tax rate must be a conscious choice per
     # item, never silently assumed (see app/models/billing.py).
     tax_rate_percent: float = Field(..., ge=0, le=100)
+    pricing_mode: Optional[PricingMode] = None
 
     @model_validator(mode="after")
     def _net_not_more_than_gross(self) -> "InventoryItemCreateRequest":
@@ -110,6 +179,7 @@ class InventoryItemUpdateRequest(BaseModel):
     stone_charge_amount: Optional[float] = Field(None, ge=0)
     other_charges_amount: Optional[float] = Field(None, ge=0)
     tax_rate_percent: Optional[float] = Field(None, ge=0, le=100)
+    pricing_mode: Optional[PricingMode] = None
 
     stock_status: Optional[Literal["IN_STOCK", "INACTIVE"]] = None
 
@@ -143,6 +213,7 @@ class InventoryItemResponse(BaseModel):
     stone_charge_amount: float
     other_charges_amount: float
     tax_rate_percent: float
+    pricing_mode: Optional[PricingMode] = None
     created_by: str
     created_at: datetime
     updated_at: datetime
@@ -180,6 +251,7 @@ class BulkPurchaseLineItem(BaseModel):
     stone_charge_amount: float = Field(0, ge=0)
     other_charges_amount: float = Field(0, ge=0)
     tax_rate_percent: float = Field(..., ge=0, le=100)
+    pricing_mode: Optional[PricingMode] = None
 
     @model_validator(mode="after")
     def _net_not_more_than_gross(self) -> "BulkPurchaseLineItem":
@@ -260,6 +332,10 @@ class SaleCreateRequest(BaseModel):
     # record-keeping. The reference total itself is never client-supplied.
     customer_price: Optional[float] = Field(None, ge=0)
     gst_applied: bool = True
+    # Informational only — if omitted, inferred as MANUAL when customer_price
+    # is given, AUTO otherwise (see SaleService.create_sale). Never changes
+    # how the amount is actually computed.
+    pricing_mode: Optional[PricingMode] = None
     payment_method: PaymentMethod = "CASH"
     payment_status: PaymentStatus = "PAID"
 
@@ -311,6 +387,7 @@ class SaleResponse(BaseModel):
     final_amount: float
     payment_method: str
     payment_status: str
+    pricing_mode: Optional[PricingMode] = None
 
     # Internal-only fields — see this module's own note on InventoryItemResponse.purchase_cost.
     # Omitted for Staff-role callers.
@@ -363,3 +440,32 @@ class BillingDashboardSummaryResponse(BaseModel):
     this_month: BillingPeriodSummary
     today_gold_rate_24k: Optional[float] = None
     recent_sales: List[RecentSaleSummary]
+
+
+# =============================================================================
+# Bulk Inventory — live price preview (purchase-time, not a sale)
+# =============================================================================
+
+class PriceLinePreviewRequest(BaseModel):
+    """Reuses BillingCalculationEngine.calculate() against a not-yet-saved
+    row's current field values, so Bulk Inventory can show a live Suggested
+    Price / Profit preview without duplicating any financial math in the
+    frontend. purchase_cost is optional purely for the profit figure."""
+    purity: Purity
+    net_gold_weight_grams: float = Field(..., gt=0)
+    making_charge_type: ChargeType = "PERCENTAGE"
+    making_charge_value: float = Field(0, ge=0)
+    wastage_type: ChargeType = "PERCENTAGE"
+    wastage_value: float = Field(0, ge=0)
+    stone_charge_amount: float = Field(0, ge=0)
+    other_charges_amount: float = Field(0, ge=0)
+    tax_rate_percent: float = Field(0, ge=0, le=100)
+    gst_applied: bool = True
+    customer_price: Optional[float] = Field(None, ge=0)
+    purchase_cost: Optional[float] = Field(None, ge=0)
+
+
+class PriceLinePreviewResponse(BaseModel):
+    breakdown: PriceBreakdown
+    purchase_cost: Optional[float] = None
+    profit_or_loss: Optional[float] = None

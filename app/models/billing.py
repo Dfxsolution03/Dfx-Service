@@ -24,6 +24,81 @@ class Vendor(Base, TimestampMixin):
     address: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     gst_number: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
+
+    # Billing defaults — pre-fill sources only (see BillingDefaultsService's
+    # field-by-field resolver). All nullable: an unset field here simply
+    # means "this vendor has no opinion," falling through to Category then
+    # Store defaults. Never referenced from a saved InventoryItem/Sale —
+    # those always snapshot the resolved value, never a link back here.
+    default_making_charge_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    default_making_charge_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    default_wastage_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    default_wastage_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    default_stone_charge_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    default_other_charges_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    default_tax_rate_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    default_pricing_mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
+    created_by: Mapped[str] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+
+    tenant: Mapped["Tenant"] = relationship("Tenant")
+
+
+class CategoryPricingDefault(Base, TimestampMixin):
+    """One row per (tenant, category) — category stays the same free-text
+    value already used on InventoryItem.category (no enum introduced, so
+    existing data is unaffected). Same pre-fill-only, nullable-field
+    convention as Vendor's default_* columns above."""
+    __tablename__ = "category_pricing_defaults"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "category", name="uq_category_pricing_defaults_tenant_category"),
+    )
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    category: Mapped[str] = mapped_column(String(100), nullable=False)
+
+    making_charge_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    making_charge_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    wastage_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    wastage_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    stone_charge_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    other_charges_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    tax_rate_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    default_pricing_mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
+    created_by: Mapped[str] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+
+    tenant: Mapped["Tenant"] = relationship("Tenant")
+
+
+class TenantBillingDefaults(Base, TimestampMixin):
+    """Store-level fallback — one row per tenant (same one-row-per-tenant
+    shape as TenantPricingConfig, but that table is exclusively about
+    gold-rate markup mode; this is the bottom of the making/wastage/GST
+    resolution chain, kept separate rather than overloading it)."""
+    __tablename__ = "tenant_billing_defaults"
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, unique=True
+    )
+
+    making_charge_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    making_charge_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    wastage_type: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    wastage_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    stone_charge_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    other_charges_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    tax_rate_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    default_pricing_mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
     created_by: Mapped[str] = mapped_column(
         String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
@@ -108,6 +183,12 @@ class InventoryItem(Base, TimestampMixin):
     # GST/tax — required, no default, so a rate is never silently assumed
     # for a real sale (see schemas/billing.py's InventoryItemCreateRequest).
     tax_rate_percent: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+
+    # AUTO/HYBRID/MANUAL — a label carried onto the item so Selling knows
+    # whether to expect a customer_price override. NULL on pre-existing rows
+    # is treated as AUTO everywhere (see schemas/billing.py), so old
+    # inventory needs no backfill.
+    pricing_mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
 
     created_by: Mapped[str] = mapped_column(
         String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
@@ -195,6 +276,10 @@ class Sale(Base, TimestampMixin):
     # feed back into the deterministic price calculation itself.
     payment_method: Mapped[str] = mapped_column(String(30), nullable=False, default="CASH")
     payment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="PAID")
+
+    # Snapshot of which pricing mode produced this sale's final_amount — see
+    # InventoryItem.pricing_mode's docstring for what the label means.
+    pricing_mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
 
     # Internal only (see schemas/billing.py — never labeled "net profit",
     # never returned to a Staff-role caller). NULL when the source item had

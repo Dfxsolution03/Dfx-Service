@@ -3,7 +3,44 @@ from typing import List, Optional, Tuple
 from sqlalchemy import select, update, func, or_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.billing import Vendor, InventoryItem, Sale
+from app.models.billing import Vendor, CategoryPricingDefault, TenantBillingDefaults, InventoryItem, Sale
+
+
+class CategoryDefaultRepository:
+    @staticmethod
+    async def get_by_category(
+        db: AsyncSession, tenant_id: str, category: str
+    ) -> Optional[CategoryPricingDefault]:
+        stmt = select(CategoryPricingDefault).where(
+            CategoryPricingDefault.tenant_id == tenant_id, CategoryPricingDefault.category == category
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def list_by_tenant(db: AsyncSession, tenant_id: str) -> List[CategoryPricingDefault]:
+        stmt = (
+            select(CategoryPricingDefault)
+            .where(CategoryPricingDefault.tenant_id == tenant_id)
+            .order_by(CategoryPricingDefault.category)
+        )
+        return list((await db.execute(stmt)).scalars().all())
+
+    @staticmethod
+    async def create(db: AsyncSession, row: CategoryPricingDefault) -> CategoryPricingDefault:
+        db.add(row)
+        return row
+
+
+class TenantBillingDefaultsRepository:
+    @staticmethod
+    async def get_by_tenant(db: AsyncSession, tenant_id: str) -> Optional[TenantBillingDefaults]:
+        stmt = select(TenantBillingDefaults).where(TenantBillingDefaults.tenant_id == tenant_id)
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def create(db: AsyncSession, row: TenantBillingDefaults) -> TenantBillingDefaults:
+        db.add(row)
+        return row
 
 
 class VendorRepository:
