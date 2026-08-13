@@ -418,8 +418,8 @@ class BillingPeriodSummary(BaseModel):
     identical (one item per sale in this data model) but reported
     separately since that's a data-model detail, not a guarantee."""
     total_sales: float
-    total_profit: float
-    total_loss: float
+    total_profit: Optional[float] = None
+    total_loss: Optional[float] = None
     bill_count: int
     items_sold: int
 

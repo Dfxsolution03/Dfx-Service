@@ -519,8 +519,8 @@ class InventoryService:
         before_state = {"stock_status": item.stock_status}
         fields = [
             "product_name", "category", "subcategory", "huid", "purity",
-            "gross_weight_grams", "net_gold_weight_grams", "vendor_name",
-            "purchase_date", "purchase_invoice_ref", "purchase_cost",
+            "gross_weight_grams", "net_gold_weight_grams",
+            "purchase_date", "purchase_invoice_ref", "purchase_rate_per_gram", "purchase_cost",
             "making_charge_type", "making_charge_value", "wastage_type", "wastage_value",
             "stone_charge_amount", "other_charges_amount", "tax_rate_percent", "stock_status",
             "pricing_mode",
@@ -529,6 +529,13 @@ class InventoryService:
             val = getattr(req, field, None)
             if val is not None:
                 setattr(item, field, val)
+
+        if req.vendor_id is not None:
+            item.vendor_id, item.vendor_name = await InventoryService._resolve_vendor_snapshot(
+                db, current_user, req.vendor_id, req.vendor_name
+            )
+        elif req.vendor_name is not None:
+            item.vendor_name = req.vendor_name
 
         if item.net_gold_weight_grams > item.gross_weight_grams:
             raise ValidationException("net_gold_weight_grams cannot exceed gross_weight_grams")
@@ -935,6 +942,7 @@ class SaleService:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
 
+        privileged = _is_privileged(current_user)
         now_ist = datetime.now(IST)
         today_start = datetime.combine(now_ist.date(), datetime.min.time(), tzinfo=IST)
         today_end = datetime.combine(now_ist.date(), datetime.max.time(), tzinfo=IST)
@@ -944,6 +952,10 @@ class SaleService:
         month_raw = await SaleRepository.get_period_summary(db, current_user.tenant_id, month_start, today_end)
         recent = await SaleRepository.get_recent(db, current_user.tenant_id, limit=5)
         rate = await GoldRateService.get_customer_today_rate(db, current_user)
+
+        if not privileged:
+            today_raw = {**today_raw, "total_profit": None, "total_loss": None}
+            month_raw = {**month_raw, "total_profit": None, "total_loss": None}
 
         return BillingDashboardSummaryResponse(
             today=BillingPeriodSummary(**today_raw),
@@ -957,7 +969,7 @@ class SaleService:
                     product_code=s.product_code,
                     product_name=s.product_name,
                     final_amount=s.final_amount,
-                    profit_or_loss=s.estimated_gross_margin,
+                    profit_or_loss=s.estimated_gross_margin if privileged else None,
                     sale_timestamp=s.sale_timestamp,
                 )
                 for s in recent
