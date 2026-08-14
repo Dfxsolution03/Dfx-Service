@@ -1,7 +1,9 @@
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, File, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.core.database import get_async_db
+from app.exceptions.base import ValidationException
 from app.models.auth import User
 from app.permissions.dependencies import get_current_user, require_admin
 from app.schemas.auth import StandardSuccessResponse
@@ -88,6 +90,37 @@ async def update_promotion(
     return StandardSuccessResponse(
         success=True,
         message="Promotion updated successfully",
+        data={"promotion": promotion.model_dump(mode="json")},
+    )
+
+
+@router.post(
+    "/admin/promotions/{promotion_id}/image",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Upload Promotion Banner Image (Admin)",
+    description="Uploads a banner image to the configured storage provider and stores the resulting public URL on the promotion.",
+)
+async def upload_promotion_image(
+    promotion_id: str,
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_admin),
+    db: AsyncSession = Depends(get_async_db),
+):
+    content_type = file.content_type or ""
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise ValidationException("Uploaded file is empty.")
+    if len(file_bytes) > settings.MAX_UPLOAD_SIZE_BYTES:
+        max_mb = settings.MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)
+        raise ValidationException(f"Image exceeds the {max_mb}MB upload limit.")
+
+    promotion = await PromotionService.upload_image(
+        db, current_user, promotion_id, file_bytes, file.filename or "upload", content_type
+    )
+    return StandardSuccessResponse(
+        success=True,
+        message="Image uploaded successfully",
         data={"promotion": promotion.model_dump(mode="json")},
     )
 

@@ -49,6 +49,7 @@ from app.schemas.billing import (
     BillingPeriodSummary,
     RecentSaleSummary,
     BillingDashboardSummaryResponse,
+    BusinessSummaryResponse,
 )
 
 _DEFAULT_FIELD_NAMES = [
@@ -86,6 +87,35 @@ class BillingCalculationEngine:
     breakdown."""
 
     @staticmethod
+    def realized_profit_or_loss(
+        final_amount: float,
+        tax_rate_percent: float,
+        gst_applied: bool,
+        purchase_cost: Optional[float],
+    ) -> Optional[float]:
+        """The ONE definition of profit/loss, used by the quote preview, the
+        line preview, and the persisted Sale alike.
+
+        Profit = what the business actually keeps (the realized customer
+        price with GST backed out, since GST is collected for the government
+        and was never revenue) MINUS the item's frozen historical
+        acquisition cost. Deliberately NOT `subtotal_before_tax - cost`:
+        that reference subtotal ignores a negotiated customer_price, so a
+        deeply discounted bill still looked profitable.
+
+        The historical cost is whatever was snapshotted at purchase time and
+        is never re-derived from today's gold rate.
+        """
+        if purchase_cost is None:
+            return None
+        net_revenue = (
+            final_amount / (1 + tax_rate_percent / 100)
+            if gst_applied and tax_rate_percent
+            else final_amount
+        )
+        return _round2(net_revenue - purchase_cost)
+
+    @staticmethod
     def calculate(
         item: InventoryItem,
         rate_24k: float,
@@ -94,7 +124,13 @@ class BillingCalculationEngine:
         discount_amount: float,
         gst_applied: bool = True,
         customer_price: Optional[float] = None,
+        making_charge_value: Optional[float] = None,
+        wastage_value: Optional[float] = None,
+        gold_profit_percent: Optional[float] = None,
     ) -> PriceBreakdown:
+        """The three *_value/percent overrides let the Admin adjust the bill
+        in the Selling screen before confirming it, without mutating the
+        InventoryItem. Omitted (None) means "use the item's own value"."""
         karat = PURITY_KARATS.get(item.purity)
         if karat is None:
             raise ValidationException(f"Unsupported purity '{item.purity}'")
@@ -102,15 +138,21 @@ class BillingCalculationEngine:
         gold_rate_applied = rate_24k * purity_factor
         gold_value_amount = item.net_gold_weight_grams * gold_rate_applied
 
+        eff_making_value = item.making_charge_value if making_charge_value is None else making_charge_value
+        eff_wastage_value = item.wastage_value if wastage_value is None else wastage_value
+        eff_gold_profit_percent = (
+            item.gold_profit_percent if gold_profit_percent is None else gold_profit_percent
+        )
+
         making_charge_amount = _charge_amount(
-            item.making_charge_type, item.making_charge_value, item.net_gold_weight_grams, gold_value_amount
+            item.making_charge_type, eff_making_value, item.net_gold_weight_grams, gold_value_amount
         )
         wastage_amount = _charge_amount(
-            item.wastage_type, item.wastage_value, item.net_gold_weight_grams, gold_value_amount
+            item.wastage_type, eff_wastage_value, item.net_gold_weight_grams, gold_value_amount
         )
         # Store margin on the GOLD VALUE portion only — never applied to
         # making/wastage/stone/other or the whole invoice.
-        gold_profit_amount = gold_value_amount * (item.gold_profit_percent / 100)
+        gold_profit_amount = gold_value_amount * (eff_gold_profit_percent / 100)
 
         subtotal_before_tax = (
             gold_value_amount
@@ -149,12 +191,12 @@ class BillingCalculationEngine:
             gold_rate_effective_date=rate_effective_date,
             gold_value_amount=_round2(gold_value_amount),
             making_charge_type=item.making_charge_type,
-            making_charge_value=item.making_charge_value,
+            making_charge_value=eff_making_value,
             making_charge_amount=_round2(making_charge_amount),
             wastage_type=item.wastage_type,
-            wastage_value=item.wastage_value,
+            wastage_value=eff_wastage_value,
             wastage_amount=_round2(wastage_amount),
-            gold_profit_percent=item.gold_profit_percent,
+            gold_profit_percent=eff_gold_profit_percent,
             gold_profit_amount=_round2(gold_profit_amount),
             stone_charge_amount=_round2(item.stone_charge_amount),
             other_charges_amount=_round2(item.other_charges_amount),
@@ -672,8 +714,8 @@ class InventoryService:
             transient, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
             0, req.gst_applied, req.customer_price,
         )
-        profit_or_loss = (
-            _round2(breakdown.final_amount - req.purchase_cost) if req.purchase_cost is not None else None
+        profit_or_loss = BillingCalculationEngine.realized_profit_or_loss(
+            breakdown.final_amount, breakdown.tax_rate_percent, breakdown.gst_applied, req.purchase_cost
         )
         return PriceLinePreviewResponse(
             breakdown=breakdown, purchase_cost=req.purchase_cost, profit_or_loss=profit_or_loss
@@ -797,16 +839,22 @@ class SaleService:
         discount_amount: float = 0,
         gst_applied: bool = True,
         customer_price: Optional[float] = None,
+        making_charge_value: Optional[float] = None,
+        wastage_value: Optional[float] = None,
+        gold_profit_percent: Optional[float] = None,
     ) -> SaleQuoteResponse:
         item, rate = await SaleService._get_sellable_item_and_rate(db, current_user, product_code)
         breakdown = BillingCalculationEngine.calculate(
             item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
             discount_amount, gst_applied, customer_price,
+            making_charge_value, wastage_value, gold_profit_percent,
         )
         privileged = _is_privileged(current_user)
         profit_or_loss = (
-            _round2(breakdown.subtotal_before_tax - item.purchase_cost)
-            if privileged and item.purchase_cost is not None else None
+            BillingCalculationEngine.realized_profit_or_loss(
+                breakdown.final_amount, breakdown.tax_rate_percent, breakdown.gst_applied, item.purchase_cost
+            )
+            if privileged else None
         )
         return SaleQuoteResponse(
             inventory_item=InventoryService._build_response(item, current_user),
@@ -841,6 +889,7 @@ class SaleService:
         breakdown = BillingCalculationEngine.calculate(
             item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
             req.discount_amount, req.gst_applied, req.customer_price,
+            req.making_charge_value, req.wastage_value, req.gold_profit_percent,
         )
 
         sold = await InventoryRepository.mark_sold_if_in_stock(db, item.id, current_user.tenant_id)
@@ -851,10 +900,8 @@ class SaleService:
             )
 
         purchase_cost_snapshot = item.purchase_cost
-        estimated_gross_margin = (
-            _round2(breakdown.subtotal_before_tax - purchase_cost_snapshot)
-            if purchase_cost_snapshot is not None
-            else None
+        estimated_gross_margin = BillingCalculationEngine.realized_profit_or_loss(
+            breakdown.final_amount, breakdown.tax_rate_percent, breakdown.gst_applied, purchase_cost_snapshot
         )
 
         sale_id = f"sl_{uuid.uuid4().hex[:12]}"
@@ -982,6 +1029,39 @@ class SaleService:
         if p == "last_12_months":
             return today - timedelta(days=365), today, "Last 12 Months"
         return today, today, "Today"
+
+    @staticmethod
+    async def get_business_summary(
+        db: AsyncSession, current_user: User,
+        period: Optional[str] = None, date_from: Optional[date] = None, date_to: Optional[date] = None,
+    ) -> BusinessSummaryResponse:
+        """Business History — same frozen-snapshot aggregation as the
+        dashboard, scoped to one caller-selected period or custom range."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        now_ist = datetime.now(IST)
+        sel_from, sel_to, sel_label = SaleService._resolve_period_range(
+            now_ist.date(), period, date_from, date_to
+        )
+        raw = await SaleRepository.get_period_summary(
+            db, current_user.tenant_id,
+            datetime.combine(sel_from, datetime.min.time(), tzinfo=IST),
+            datetime.combine(sel_to, datetime.max.time(), tzinfo=IST),
+        )
+        privileged = _is_privileged(current_user)
+        return BusinessSummaryResponse(
+            period=sel_label,
+            date_from=sel_from,
+            date_to=sel_to,
+            total_sales=raw["total_sales"],
+            total_profit=raw["total_profit"] if privileged else None,
+            total_loss=raw["total_loss"] if privileged else None,
+            bill_count=raw["bill_count"],
+            items_sold=raw["items_sold"],
+            total_tax=raw["total_tax"],
+            average_bill_value=raw["avg_bill_value"],
+        )
 
     @staticmethod
     async def get_dashboard_summary(

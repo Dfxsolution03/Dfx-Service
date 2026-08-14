@@ -142,8 +142,6 @@ class InventoryItemCreateRequest(BaseModel):
     wastage_type: ChargeType = "PERCENTAGE"
     wastage_value: float = Field(0, ge=0)
     gold_profit_percent: float = Field(0, ge=0, le=100)
-    stone_charge_amount: float = Field(0, ge=0)
-    other_charges_amount: float = Field(0, ge=0)
     # Required, no default — a GST/tax rate must be a conscious choice per
     # item, never silently assumed (see app/models/billing.py).
     tax_rate_percent: float = Field(..., ge=0, le=100)
@@ -179,8 +177,6 @@ class InventoryItemUpdateRequest(BaseModel):
     wastage_type: Optional[ChargeType] = None
     wastage_value: Optional[float] = Field(None, ge=0)
     gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
-    stone_charge_amount: Optional[float] = Field(None, ge=0)
-    other_charges_amount: Optional[float] = Field(None, ge=0)
     tax_rate_percent: Optional[float] = Field(None, ge=0, le=100)
     pricing_mode: Optional[PricingMode] = None
 
@@ -253,8 +249,6 @@ class BulkPurchaseLineItem(BaseModel):
     wastage_type: ChargeType = "PERCENTAGE"
     wastage_value: float = Field(0, ge=0)
     gold_profit_percent: float = Field(0, ge=0, le=100)
-    stone_charge_amount: float = Field(0, ge=0)
-    other_charges_amount: float = Field(0, ge=0)
     tax_rate_percent: float = Field(..., ge=0, le=100)
     pricing_mode: Optional[PricingMode] = None
 
@@ -342,6 +336,12 @@ class SaleCreateRequest(BaseModel):
     # as the gap below the backend-computed reference total, purely for
     # record-keeping. The reference total itself is never client-supplied.
     customer_price: Optional[float] = Field(None, ge=0)
+    # Per-bill overrides — let the Admin adjust the bill in the Selling
+    # screen before confirming. Omitted means "use the item's own value";
+    # the InventoryItem row itself is never mutated by a sale.
+    making_charge_value: Optional[float] = Field(None, ge=0)
+    wastage_value: Optional[float] = Field(None, ge=0)
+    gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
     gst_applied: bool = True
     # Informational only — if omitted, inferred as MANUAL when customer_price
     # is given, AUTO otherwise (see SaleService.create_sale). Never changes
@@ -423,6 +423,22 @@ class SaleListResponse(BaseModel):
 # =============================================================================
 # Dashboard Billing Summary
 # =============================================================================
+
+class BusinessSummaryResponse(BaseModel):
+    """Backs the Dashboard's Business History block — one real backend
+    aggregation per selected period/custom range, never a client-side
+    filter of a today-scoped payload."""
+    period: str
+    date_from: date
+    date_to: date
+    total_sales: float
+    total_profit: Optional[float] = None
+    total_loss: Optional[float] = None
+    bill_count: int
+    items_sold: int
+    total_tax: float
+    average_bill_value: float
+
 
 class BillingPeriodSummary(BaseModel):
     """total_sales/total_profit/total_loss come straight from finalized Sale

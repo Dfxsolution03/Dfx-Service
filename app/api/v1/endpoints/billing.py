@@ -331,10 +331,16 @@ async def get_sale_quote(
     discount_amount: float = Query(0, ge=0),
     gst_applied: bool = Query(True),
     customer_price: Optional[float] = Query(None, ge=0),
+    making_charge_value: Optional[float] = Query(None, ge=0),
+    wastage_value: Optional[float] = Query(None, ge=0),
+    gold_profit_percent: Optional[float] = Query(None, ge=0, le=100),
     current_user: User = Depends(require_admin_or_staff_module("billing")),
     db: AsyncSession = Depends(get_async_db),
 ):
-    quote = await SaleService.get_quote(db, current_user, product_code, discount_amount, gst_applied, customer_price)
+    quote = await SaleService.get_quote(
+        db, current_user, product_code, discount_amount, gst_applied, customer_price,
+        making_charge_value, wastage_value, gold_profit_percent,
+    )
     return StandardSuccessResponse(
         success=True, message="Quote calculated successfully", data=quote.model_dump(mode="json")
     )
@@ -378,6 +384,26 @@ async def get_billing_dashboard_summary(
     summary = await SaleService.get_dashboard_summary(db, current_user, period, date_from, date_to)
     return StandardSuccessResponse(
         success=True, message="Billing summary retrieved successfully", data=summary.model_dump(mode="json")
+    )
+
+
+@router.get(
+    "/billing/business-summary",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Business History Summary (Admin)",
+    description="Sales/profit/loss/bills/items/tax/average-bill aggregated over a named `period` or an explicit date_from+date_to range, straight off finalized sale snapshots.",
+)
+async def get_business_summary(
+    period: Optional[str] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    summary = await SaleService.get_business_summary(db, current_user, period, date_from, date_to)
+    return StandardSuccessResponse(
+        success=True, message="Business summary retrieved successfully", data=summary.model_dump(mode="json")
     )
 
 

@@ -7,7 +7,12 @@ from app.models.promotion import Promotion
 from app.repositories.promotion_repository import PromotionRepository
 from app.repositories.customer_repository import CustomerRepository
 from app.repositories.audit_repository import AuditRepository
-from app.exceptions.base import ResourceNotFoundException, ForbiddenException
+from app.exceptions.base import (
+    ResourceNotFoundException,
+    ForbiddenException,
+    ValidationException,
+)
+from app.services.storage_service import get_storage_provider
 from app.schemas.promotion import (
     PromotionCreateRequest,
     PromotionUpdateRequest,
@@ -76,6 +81,13 @@ class PromotionService:
             **req.model_dump(),
         )
         await PromotionRepository.create(db, promotion)
+        await db.flush()
+
+        # At most one active banner per tenant: the exclusivity UPDATE runs in
+        # the same transaction as the insert, so a racing activation cannot
+        # slip a second active row past it.
+        if promotion.is_active:
+            await PromotionRepository.deactivate_others(db, current_user.tenant_id, promotion_id)
 
         await AuditRepository.create_log(
             db,
@@ -115,6 +127,12 @@ class PromotionService:
 
         after_state = {k: getattr(promotion, k) for k in updates}
 
+        await db.flush()
+        # Same single-active-banner rule as create — enforced backend-side in
+        # this transaction rather than trusted to the admin UI.
+        if promotion.is_active:
+            await PromotionRepository.deactivate_others(db, current_user.tenant_id, promotion_id)
+
         await AuditRepository.create_log(
             db,
             tenant_id=current_user.tenant_id,
@@ -126,6 +144,59 @@ class PromotionService:
             target_id=promotion_id,
             before_state=_jsonable(before_state),
             after_state=_jsonable(after_state),
+        )
+
+        await db.commit()
+        await db.refresh(promotion)
+        return _to_response(promotion)
+
+    @staticmethod
+    async def upload_image(
+        db: AsyncSession,
+        current_user: User,
+        promotion_id: str,
+        file_bytes: bytes,
+        file_name: str,
+        content_type: str,
+    ) -> PromotionResponse:
+        """Mirrors the inventory item image upload: same content-type guard,
+        same storage provider, and the resolved public URL is persisted on the
+        promotion's existing image_url field so records saved with a manually
+        typed URL keep working unchanged."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        promotion = await PromotionRepository.get_by_id_for_tenant(
+            db, promotion_id, current_user.tenant_id
+        )
+        if not promotion:
+            raise ResourceNotFoundException(f"Promotion ID '{promotion_id}' not found")
+        if content_type not in ("image/jpeg", "image/png", "image/webp"):
+            raise ValidationException(
+                f"Unsupported image type '{content_type}'. Allowed: JPEG, PNG, WebP."
+            )
+
+        provider = get_storage_provider()
+        storage_path = await provider.upload(
+            tenant_id=current_user.tenant_id,
+            file_name=file_name,
+            content_type=content_type,
+            file_bytes=file_bytes,
+        )
+        image_url = provider.get_public_url(storage_path)
+        promotion.image_url = image_url
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="PROMOTION_IMAGE_UPLOAD",
+            target_entity="promotions",
+            target_id=promotion_id,
+            before_state=None,
+            after_state={"image_url": image_url},
         )
 
         await db.commit()

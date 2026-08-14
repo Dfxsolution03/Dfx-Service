@@ -213,8 +213,24 @@ class SaleRepository:
     async def get_period_summary(db: AsyncSession, tenant_id: str, start_dt: datetime, end_dt: datetime) -> dict:
         """Aggregates directly off the immutable Sale snapshot rows — never
         touches InventoryItem or the live gold rate, so this can never drift
-        from what was actually recorded at sale time."""
-        margin = Sale.estimated_gross_margin
+        from what was actually recorded at sale time.
+
+        Margin is re-derived here from the frozen snapshot columns
+        (final_amount / tax_rate_percent / gst_applied / purchase_cost_snapshot)
+        rather than read from the stored estimated_gross_margin, because rows
+        written before the profit definition was corrected hold a margin that
+        ignored a negotiated customer_price. Same formula as
+        BillingCalculationEngine.realized_profit_or_loss — no historical row
+        is rewritten, the arithmetic just always matches today's definition.
+        """
+        net_revenue = case(
+            (Sale.gst_applied.is_(True), Sale.final_amount / (1 + Sale.tax_rate_percent / 100.0)),
+            else_=Sale.final_amount,
+        )
+        margin = case(
+            (Sale.purchase_cost_snapshot.is_(None), 0.0),
+            else_=net_revenue - Sale.purchase_cost_snapshot,
+        )
         stmt = select(
             func.coalesce(func.sum(Sale.final_amount), 0.0),
             func.coalesce(func.sum(case((margin > 0, margin), else_=0.0)), 0.0),
