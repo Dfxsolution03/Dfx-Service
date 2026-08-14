@@ -19,8 +19,15 @@ from app.schemas.billing import (
     BulkPurchaseRequest,
     PriceLinePreviewRequest,
     SaleCreateRequest,
+    SalePaymentCreateRequest,
 )
-from app.services.billing_service import VendorService, BillingDefaultsService, InventoryService, SaleService
+from app.services.billing_service import (
+    VendorService,
+    BillingDefaultsService,
+    InventoryService,
+    SaleService,
+    SalePaymentService,
+)
 from app.services import billing_export_service
 from app.exceptions.base import ValidationException
 
@@ -423,14 +430,106 @@ async def list_sales(
     search: Optional[str] = Query(None, description="Matches invoice number, product code, or customer name"),
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
+    payment_status: Optional[str] = Query(
+        None,
+        pattern="^(PAID|PARTIAL|PENDING)$",
+        description="Omit for ALL. Filters on the ledger-derived status, never a client-set label.",
+    ),
     current_user: User = Depends(require_admin_or_staff_module("billing")),
     db: AsyncSession = Depends(get_async_db),
 ):
-    result = await SaleService.list_sales(db, current_user, page, limit, search, date_from, date_to)
+    result = await SaleService.list_sales(
+        db, current_user, page, limit, search, date_from, date_to, payment_status
+    )
     return StandardSuccessResponse(
         success=True,
         message="Sales retrieved successfully",
         data={"sales": [s.model_dump(mode="json") for s in result.sales], "total": result.total},
+    )
+
+
+@router.get(
+    "/billing/sales/export.xlsx",
+    status_code=status.HTTP_200_OK,
+    summary="Download Sales History Excel (Admin)",
+    description=(
+        "Exports the sales history for the selected period and payment-status filter as one Excel "
+        "workbook. Declared before /billing/sales/{sale_id} on purpose — otherwise 'export.xlsx' "
+        "would match that path parameter."
+    ),
+)
+async def download_sales_history_excel(
+    period: Optional[str] = Query(
+        None,
+        description=(
+            "today | yesterday | this_week | last_week | this_month | last_month | "
+            "last_3_months | last_6_months | last_12_months. Ignored when both dates are given."
+        ),
+    ),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    search: Optional[str] = Query(None),
+    payment_status: Optional[str] = Query(None, pattern="^(PAID|PARTIAL|PENDING)$"),
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    sales, payments_by_sale, period_label, sel_from, sel_to = await SaleService.list_for_export(
+        db, current_user, period, date_from, date_to, search, payment_status
+    )
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))).scalar_one_or_none()
+    xlsx_bytes = billing_export_service.build_sales_history_excel(
+        sales, payments_by_sale, tenant, period_label, payment_status or "ALL"
+    )
+    filename = f"sales-history-{sel_from.isoformat()}-to-{sel_to.isoformat()}.xlsx"
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get(
+    "/billing/sales/{sale_id}/payments",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Invoice Payment History (Admin)",
+)
+async def list_sale_payments(
+    sale_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    history = await SalePaymentService.get_history(db, current_user, sale_id)
+    return StandardSuccessResponse(
+        success=True,
+        message="Payment history retrieved successfully",
+        data={"paymentHistory": history.model_dump(mode="json")},
+    )
+
+
+@router.post(
+    "/billing/sales/{sale_id}/payments",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Record Payment Against Invoice (Admin)",
+    description=(
+        "Appends one collection to the invoice's permanent payment ledger and recomputes the "
+        "derived paid/outstanding/status figures in the same transaction. Never overwrites an "
+        "earlier payment. Rejects a zero/negative amount, and rejects any amount above the "
+        "outstanding balance (overpayments are not supported)."
+    ),
+)
+async def record_sale_payment(
+    sale_id: str,
+    req: SalePaymentCreateRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    history = await SalePaymentService.record_payment(db, current_user, sale_id, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Payment recorded successfully",
+        data={"paymentHistory": history.model_dump(mode="json")},
     )
 
 

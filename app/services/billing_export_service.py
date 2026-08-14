@@ -131,3 +131,100 @@ def build_invoice_excel(sale: Sale, tenant: Optional[Tenant]) -> bytes:
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def _payment_history_text(payments: list) -> str:
+    """Condenses a sale's ledger into one readable cell, e.g.
+    "10-Aug-2026 Rs.10000.00 CASH; 14-Aug-2026 Rs.5000.00 UPI". The Admin
+    reading the sheet needs the collection story per invoice without a second
+    sheet to cross-reference."""
+    return "; ".join(
+        f"{p.payment_date.strftime('%d-%b-%Y')} Rs.{p.amount:.2f} {p.payment_method}"
+        + (f" ({p.reference_no})" if p.reference_no else "")
+        for p in payments
+    )
+
+
+def build_sales_history_excel(
+    sales: list,
+    payments_by_sale: dict,
+    tenant: Optional[Tenant],
+    period_label: str,
+    status_label: str,
+) -> bytes:
+    """Sales History export — one row per invoice, rendered off the immutable
+    Sale snapshots plus the sale_payments ledger. Same openpyxl path as
+    build_invoice_excel above (no second export framework), just a list shape
+    instead of a single invoice.
+
+    Internal identifiers (sale id, tenant id, inventory item id, customer id,
+    created_by) are deliberately omitted — they are meaningless to the Admin
+    and needlessly expose internal structure. Purchase cost and profit/loss
+    ARE included: this is an owner/Admin financial export, and the caller is
+    responsible for only offering it to a privileged role.
+    """
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Sales History"
+
+    ws.append([f"{tenant.name if tenant else ''} — Sales History"])
+    ws.append(["Period", period_label])
+    ws.append(["Payment Status Filter", status_label])
+    ws.append(["Invoices", len(sales)])
+    ws.append([])
+
+    headers = [
+        "Invoice No", "Sale Date", "Customer", "Phone",
+        "Product Code", "Product", "Vendor", "Purity",
+        "Gross Weight (g)", "Net Gold Weight (g)", "Gold Rate Applied (Rs/g)",
+        "Purchase Cost (Rs)", "Gold Value (Rs)", "Making (Rs)", "Wastage (Rs)",
+        "Stone (Rs)", "Other (Rs)", "Subtotal (Rs)", "GST %", "GST (Rs)",
+        "Discount (Rs)", "Invoice Total (Rs)", "Amount Paid (Rs)",
+        "Outstanding (Rs)", "Payment Status", "Payment History", "Profit/Loss (Rs)",
+    ]
+    ws.append(headers)
+
+    total_invoiced = total_collected = total_outstanding = 0.0
+    for s in sales:
+        paid = float(s.amount_paid or 0)
+        outstanding = max(0.0, float(s.final_amount or 0) - paid)
+        total_invoiced += float(s.final_amount or 0)
+        total_collected += paid
+        total_outstanding += outstanding
+        ws.append([
+            s.invoice_number,
+            s.sale_timestamp.strftime("%d-%b-%Y %H:%M"),
+            s.customer_name or "Walk-in",
+            s.customer_phone or "",
+            s.product_code,
+            s.product_name,
+            s.vendor_name or "",
+            s.purity,
+            s.gross_weight_grams,
+            s.net_gold_weight_grams,
+            s.gold_rate_applied,
+            s.purchase_cost_snapshot if s.purchase_cost_snapshot is not None else "",
+            s.gold_value_amount,
+            s.making_charge_amount,
+            s.wastage_amount,
+            s.stone_charge_amount,
+            s.other_charges_amount,
+            s.subtotal_before_tax,
+            s.tax_rate_percent if s.gst_applied else 0,
+            s.tax_amount,
+            s.discount_amount,
+            s.final_amount,
+            round(paid, 2),
+            round(outstanding, 2),
+            s.payment_status,
+            _payment_history_text(payments_by_sale.get(s.id, [])),
+            s.estimated_gross_margin if s.estimated_gross_margin is not None else "",
+        ])
+
+    ws.append([])
+    ws.append(["TOTALS", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
+               round(total_invoiced, 2), round(total_collected, 2), round(total_outstanding, 2)])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()

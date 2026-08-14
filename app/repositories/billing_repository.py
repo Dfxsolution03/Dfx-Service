@@ -3,7 +3,14 @@ from typing import List, Optional, Tuple
 from sqlalchemy import select, update, func, or_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.billing import Vendor, CategoryPricingDefault, TenantBillingDefaults, InventoryItem, Sale
+from app.models.billing import (
+    Vendor,
+    CategoryPricingDefault,
+    TenantBillingDefaults,
+    InventoryItem,
+    Sale,
+    SalePayment,
+)
 
 
 class CategoryDefaultRepository:
@@ -178,8 +185,11 @@ class SaleRepository:
         search: Optional[str] = None,
         date_from: Optional[date] = None,
         date_to: Optional[date] = None,
+        payment_status: Optional[str] = None,
     ) -> Tuple[List[Sale], int]:
         conditions = [Sale.tenant_id == tenant_id]
+        if payment_status:
+            conditions.append(Sale.payment_status == payment_status)
         if search:
             like = f"%{search}%"
             conditions.append(
@@ -256,5 +266,101 @@ class SaleRepository:
             .where(Sale.tenant_id == tenant_id)
             .order_by(Sale.sale_timestamp.desc())
             .limit(limit)
+        )
+        return list((await db.execute(stmt)).scalars().all())
+
+    @staticmethod
+    async def get_by_id_for_update(db: AsyncSession, sale_id: str, tenant_id: str) -> Optional[Sale]:
+        """Tenant-scoped fetch that holds a row lock for the rest of the
+        transaction. Used only by the payment-recording path: two Admins
+        collecting against the same invoice at the same moment must serialise
+        here, or both could pass the "amount <= outstanding" check against the
+        same stale outstanding figure and together collect more than the
+        invoice total."""
+        stmt = (
+            select(Sale)
+            .where(Sale.id == sale_id, Sale.tenant_id == tenant_id)
+            .with_for_update()
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def list_all_filtered(
+        db: AsyncSession,
+        tenant_id: str,
+        search: Optional[str] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        payment_status: Optional[str] = None,
+        cap: int = 20000,
+    ) -> List[Sale]:
+        """Unpaginated, same filter semantics as list_by_tenant — used by the
+        Sales History export so the downloaded file matches exactly what the
+        Admin has filtered on screen. `cap` is a memory backstop, not a
+        business limit; the caller reports when it is hit rather than silently
+        truncating (see SaleService.export_sales_history)."""
+        conditions = [Sale.tenant_id == tenant_id]
+        if payment_status:
+            conditions.append(Sale.payment_status == payment_status)
+        if search:
+            like = f"%{search}%"
+            conditions.append(
+                or_(
+                    Sale.invoice_number.ilike(like),
+                    Sale.product_code.ilike(like),
+                    Sale.customer_name.ilike(like),
+                )
+            )
+        if date_from:
+            conditions.append(Sale.sale_timestamp >= datetime.combine(date_from, datetime.min.time()))
+        if date_to:
+            conditions.append(Sale.sale_timestamp <= datetime.combine(date_to, datetime.max.time()))
+
+        stmt = select(Sale)
+        for cond in conditions:
+            stmt = stmt.where(cond)
+        stmt = stmt.order_by(Sale.sale_timestamp.desc()).limit(cap)
+        return list((await db.execute(stmt)).scalars().all())
+
+
+class SalePaymentRepository:
+    """Append-only ledger access. There is deliberately no update() or
+    delete() here — a recorded collection is permanent financial history."""
+
+    @staticmethod
+    async def create(db: AsyncSession, payment: SalePayment) -> SalePayment:
+        db.add(payment)
+        return payment
+
+    @staticmethod
+    async def list_by_sale(db: AsyncSession, sale_id: str, tenant_id: str) -> List[SalePayment]:
+        stmt = (
+            select(SalePayment)
+            .where(SalePayment.sale_id == sale_id, SalePayment.tenant_id == tenant_id)
+            .order_by(SalePayment.payment_date.asc(), SalePayment.created_at.asc())
+        )
+        return list((await db.execute(stmt)).scalars().all())
+
+    @staticmethod
+    async def sum_for_sale(db: AsyncSession, sale_id: str, tenant_id: str) -> float:
+        """Authoritative amount-paid figure, read straight off the ledger —
+        never off Sale.amount_paid, which is only a cache of this."""
+        stmt = select(func.coalesce(func.sum(SalePayment.amount), 0.0)).where(
+            SalePayment.sale_id == sale_id, SalePayment.tenant_id == tenant_id
+        )
+        return float((await db.execute(stmt)).scalar_one())
+
+    @staticmethod
+    async def list_by_sale_ids(
+        db: AsyncSession, sale_ids: List[str], tenant_id: str
+    ) -> List[SalePayment]:
+        """Batch fetch for the export, so building N rows does not issue N
+        ledger queries."""
+        if not sale_ids:
+            return []
+        stmt = (
+            select(SalePayment)
+            .where(SalePayment.sale_id.in_(sale_ids), SalePayment.tenant_id == tenant_id)
+            .order_by(SalePayment.payment_date.asc(), SalePayment.created_at.asc())
         )
         return list((await db.execute(stmt)).scalars().all())

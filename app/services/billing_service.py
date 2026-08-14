@@ -7,13 +7,22 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import PURITY_KARATS, ROLE_ADMIN, ROLE_SUPERADMIN
 from app.models.auth import User
-from app.models.billing import Vendor, CategoryPricingDefault, TenantBillingDefaults, InventoryItem, Sale
+from app.models.billing import (
+    Vendor,
+    CategoryPricingDefault,
+    TenantBillingDefaults,
+    InventoryItem,
+    Sale,
+    SalePayment,
+    PAYMENT_SOURCE_COUNTER,
+)
 from app.repositories.billing_repository import (
     VendorRepository,
     CategoryDefaultRepository,
     TenantBillingDefaultsRepository,
     InventoryRepository,
     SaleRepository,
+    SalePaymentRepository,
 )
 from app.repositories.audit_repository import AuditRepository
 from app.services.storage_service import get_storage_provider
@@ -46,6 +55,9 @@ from app.schemas.billing import (
     SaleCreateRequest,
     SaleResponse,
     SaleListResponse,
+    SalePaymentCreateRequest,
+    SalePaymentResponse,
+    SalePaymentHistoryResponse,
     BillingPeriodSummary,
     RecentSaleSummary,
     BillingDashboardSummaryResponse,
@@ -76,6 +88,35 @@ def _charge_amount(charge_type: str, value: float, net_gold_weight_grams: float,
 
 def _round2(value: float) -> float:
     return round(value, 2)
+
+
+# Money tolerance for float comparisons. Amounts are stored as Float and
+# rounded to paise, so an invoice settled by several collections can land a
+# fraction of a paise away from its total; treating anything within half a
+# paise as equal keeps a genuinely settled invoice from being stuck PARTIAL.
+_MONEY_EPSILON = 0.005
+
+
+def _derive_payment_status(final_amount: float, amount_paid: float) -> str:
+    """The ONLY place a sale's payment status is decided. Driven purely by the
+    ledger total vs. the invoice total — a client-supplied status is never
+    trusted (see SalePaymentService.record_payment / SaleService.create_sale).
+
+    paid == 0            -> PENDING
+    0 < paid < total     -> PARTIAL
+    paid >= total        -> PAID
+    """
+    if amount_paid <= _MONEY_EPSILON:
+        return "PENDING"
+    if amount_paid >= final_amount - _MONEY_EPSILON:
+        return "PAID"
+    return "PARTIAL"
+
+
+def _outstanding_of(sale: Sale) -> float:
+    """Never negative — overpayment is rejected at the point of collection, so
+    a negative figure here would mean corrupt data, not a refund owed."""
+    return _round2(max(0.0, (sale.final_amount or 0) - (sale.amount_paid or 0)))
 
 
 class BillingCalculationEngine:
@@ -803,6 +844,8 @@ class SaleService:
             final_amount=sale.final_amount,
             payment_method=sale.payment_method,
             payment_status=sale.payment_status,
+            amount_paid=_round2(sale.amount_paid or 0),
+            amount_outstanding=_outstanding_of(sale),
             pricing_mode=sale.pricing_mode,
             purchase_cost_snapshot=sale.purchase_cost_snapshot if privileged else None,
             estimated_gross_margin=sale.estimated_gross_margin if privileged else None,
@@ -899,6 +942,23 @@ class SaleService:
                 f"Product '{req.product_code}' was just sold in another transaction. Please rescan."
             )
 
+        # Resolve the opening collection from the Admin's selected intent.
+        # PAID collects the whole invoice, PARTIAL collects exactly what was
+        # handed over, PENDING collects nothing — and a PENDING/PAID sale never
+        # gets a fabricated ₹0 ledger row.
+        if req.payment_status == "PAID":
+            initial_payment = breakdown.final_amount
+        elif req.payment_status == "PARTIAL":
+            initial_payment = _round2(req.initial_payment_amount)
+            if initial_payment >= breakdown.final_amount - _MONEY_EPSILON:
+                await db.rollback()
+                raise ValidationException(
+                    f"A partial payment must be less than the invoice total of {breakdown.final_amount}. "
+                    "Mark the sale as PAID to collect the full amount."
+                )
+        else:
+            initial_payment = 0.0
+
         purchase_cost_snapshot = item.purchase_cost
         estimated_gross_margin = BillingCalculationEngine.realized_profit_or_loss(
             breakdown.final_amount, breakdown.tax_rate_percent, breakdown.gst_applied, purchase_cost_snapshot
@@ -943,7 +1003,10 @@ class SaleService:
             discount_amount=breakdown.discount_amount,
             final_amount=breakdown.final_amount,
             payment_method=req.payment_method,
-            payment_status=req.payment_status,
+            # Both set from the ledger seeded just below, never from the
+            # request — req.payment_status is only the Admin's intent.
+            payment_status=_derive_payment_status(breakdown.final_amount, initial_payment),
+            amount_paid=initial_payment,
             pricing_mode=req.pricing_mode or ("MANUAL" if req.customer_price is not None else "AUTO"),
             purchase_cost_snapshot=purchase_cost_snapshot,
             estimated_gross_margin=estimated_gross_margin,
@@ -951,6 +1014,25 @@ class SaleService:
             created_by=current_user.id,
         )
         await SaleRepository.create(db, sale)
+
+        # Opening ledger row — same transaction as the Sale itself, so a
+        # finalized invoice and its first collection are never out of step.
+        if initial_payment > 0:
+            await SalePaymentRepository.create(
+                db,
+                SalePayment(
+                    id=f"sp_{uuid.uuid4().hex[:12]}",
+                    tenant_id=current_user.tenant_id,
+                    sale_id=sale_id,
+                    amount=initial_payment,
+                    payment_date=datetime.now(IST).date(),
+                    payment_method=req.payment_method,
+                    source=PAYMENT_SOURCE_COUNTER,
+                    reference_no=req.payment_reference_no,
+                    remarks="Collected at sale",
+                    recorded_by=current_user.id,
+                ),
+            )
 
         await AuditRepository.create_log(
             db,
@@ -966,6 +1048,8 @@ class SaleService:
                 "product_code": item.product_code,
                 "invoice_number": sale.invoice_number,
                 "final_amount": breakdown.final_amount,
+                "amount_paid": initial_payment,
+                "payment_status": sale.payment_status,
             },
         )
 
@@ -987,11 +1071,12 @@ class SaleService:
         search: Optional[str],
         date_from: Optional[date],
         date_to: Optional[date],
+        payment_status: Optional[str] = None,
     ) -> SaleListResponse:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
         sales, total = await SaleRepository.list_by_tenant(
-            db, current_user.tenant_id, page, limit, search, date_from, date_to
+            db, current_user.tenant_id, page, limit, search, date_from, date_to, payment_status
         )
         return SaleListResponse(
             sales=[SaleService._build_response(s, current_user) for s in sales], total=total
@@ -1138,3 +1223,177 @@ class SaleService:
         if not sale:
             raise ResourceNotFoundException(f"Sale '{sale_id}' not found")
         return sale
+
+    @staticmethod
+    async def list_for_export(
+        db: AsyncSession,
+        current_user: User,
+        period: Optional[str] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        search: Optional[str] = None,
+        payment_status: Optional[str] = None,
+    ) -> tuple[list, dict, str, date, date]:
+        """Gathers exactly the filtered Sales History set for the Excel export,
+        plus each sale's ledger rows. Same period vocabulary as Business
+        History (see _resolve_period_range) so a period label means the same
+        thing everywhere in the product."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        sel_from, sel_to, sel_label = SaleService._resolve_period_range(
+            datetime.now(IST).date(), period, date_from, date_to
+        )
+        sales = await SaleRepository.list_all_filtered(
+            db, current_user.tenant_id, search, sel_from, sel_to, payment_status
+        )
+        ledger = await SalePaymentRepository.list_by_sale_ids(
+            db, [s.id for s in sales], current_user.tenant_id
+        )
+        by_sale: dict = {}
+        for p in ledger:
+            by_sale.setdefault(p.sale_id, []).append(p)
+        return sales, by_sale, sel_label, sel_from, sel_to
+
+
+class SalePaymentService:
+    """Recording and reading collections against a finalized invoice.
+
+    Every write here is append-only: a new SalePayment row plus a
+    transactional refresh of the Sale's derived amount_paid/payment_status
+    cache. No code path updates or deletes an existing ledger row, so a
+    collection history can never be rewritten or erased.
+    """
+
+    @staticmethod
+    def _build_response(payment: SalePayment, actor_names: dict) -> SalePaymentResponse:
+        return SalePaymentResponse(
+            id=payment.id,
+            sale_id=payment.sale_id,
+            amount=_round2(payment.amount),
+            payment_date=payment.payment_date,
+            payment_method=payment.payment_method,
+            source=payment.source,
+            reference_no=payment.reference_no,
+            remarks=payment.remarks,
+            recorded_by=payment.recorded_by,
+            recorded_by_name=actor_names.get(payment.recorded_by),
+            created_at=payment.created_at,
+        )
+
+    @staticmethod
+    async def _actor_names(db: AsyncSession, payments: list) -> dict:
+        ids = {p.recorded_by for p in payments}
+        if not ids:
+            return {}
+        rows = (await db.execute(select(User.id, User.name).where(User.id.in_(ids)))).all()
+        return {row[0]: row[1] for row in rows}
+
+    @staticmethod
+    async def get_history(
+        db: AsyncSession, current_user: User, sale_id: str
+    ) -> SalePaymentHistoryResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        sale = await SaleRepository.get_by_id(db, sale_id, current_user.tenant_id)
+        if not sale:
+            raise ResourceNotFoundException(f"Sale '{sale_id}' not found")
+
+        payments = await SalePaymentRepository.list_by_sale(db, sale_id, current_user.tenant_id)
+        names = await SalePaymentService._actor_names(db, payments)
+        return SalePaymentHistoryResponse(
+            sale_id=sale.id,
+            invoice_number=sale.invoice_number,
+            final_amount=_round2(sale.final_amount),
+            amount_paid=_round2(sale.amount_paid or 0),
+            amount_outstanding=_outstanding_of(sale),
+            payment_status=sale.payment_status,
+            payments=[SalePaymentService._build_response(p, names) for p in payments],
+        )
+
+    @staticmethod
+    async def record_payment(
+        db: AsyncSession, current_user: User, sale_id: str, req: SalePaymentCreateRequest
+    ) -> SalePaymentHistoryResponse:
+        """Collect money against an existing invoice.
+
+        Ordering matters and is deliberate:
+          1. lock the Sale row (tenant-scoped) for the rest of the transaction
+          2. compute outstanding from the LEDGER, not the cached column
+          3. reject amount <= 0 and any amount above outstanding
+          4. insert the ledger row
+          5. refresh the derived cache from the ledger
+          6. commit once
+
+        Step 1 is what stops two Admins collecting simultaneously from both
+        validating against the same stale outstanding figure and together
+        over-collecting on one invoice. Frontend validation is a convenience
+        only; this is the guard that actually holds.
+        """
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        sale = await SaleRepository.get_by_id_for_update(db, sale_id, current_user.tenant_id)
+        if not sale:
+            raise ResourceNotFoundException(f"Sale '{sale_id}' not found")
+
+        amount = _round2(req.amount)
+        if amount <= 0:
+            raise ValidationException("Payment amount must be greater than zero")
+
+        already_paid = await SalePaymentRepository.sum_for_sale(db, sale_id, current_user.tenant_id)
+        outstanding = _round2(sale.final_amount - already_paid)
+
+        if outstanding <= _MONEY_EPSILON:
+            raise ConflictException(
+                f"Invoice {sale.invoice_number} is already fully paid — nothing is outstanding."
+            )
+        # Overpayment is rejected outright, never silently clamped to the
+        # outstanding amount: no refund/credit-note model exists yet, so
+        # accepting more than is owed would create money the system cannot
+        # account for. The Admin is told the exact collectable figure.
+        if amount > outstanding + _MONEY_EPSILON:
+            raise ValidationException(
+                f"Payment of {amount} exceeds the outstanding amount of {outstanding} on invoice "
+                f"{sale.invoice_number}. Overpayments are not supported — collect {outstanding} or less."
+            )
+
+        payment = SalePayment(
+            id=f"sp_{uuid.uuid4().hex[:12]}",
+            tenant_id=current_user.tenant_id,
+            sale_id=sale.id,
+            amount=amount,
+            payment_date=req.payment_date,
+            payment_method=req.payment_method,
+            source=PAYMENT_SOURCE_COUNTER,
+            reference_no=req.reference_no,
+            remarks=req.remarks,
+            recorded_by=current_user.id,
+        )
+        await SalePaymentRepository.create(db, payment)
+
+        new_paid = _round2(already_paid + amount)
+        sale.amount_paid = new_paid
+        sale.payment_status = _derive_payment_status(sale.final_amount, new_paid)
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="SALE_PAYMENT_RECORD",
+            target_entity="sale_payments",
+            target_id=payment.id,
+            before_state={"amount_paid": _round2(already_paid)},
+            after_state={
+                "invoice_number": sale.invoice_number,
+                "amount": amount,
+                "payment_method": payment.payment_method,
+                "amount_paid": new_paid,
+                "payment_status": sale.payment_status,
+            },
+        )
+
+        await db.commit()
+        return await SalePaymentService.get_history(db, current_user, sale_id)

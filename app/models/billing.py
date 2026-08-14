@@ -292,8 +292,19 @@ class Sale(Base, TimestampMixin):
 
     # Editable commercial fields — recorded on the finalized bill, never
     # feed back into the deterministic price calculation itself.
+    # payment_method is the method of the FIRST collection only (kept for
+    # backward compatibility and single-payment invoices); the authoritative
+    # per-collection method lives on each SalePayment row.
     payment_method: Mapped[str] = mapped_column(String(30), nullable=False, default="CASH")
-    payment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="PAID")
+    # DERIVED, never client-supplied — recomputed from the SalePayment ledger
+    # inside the same transaction as every payment insert (see
+    # SalePaymentService._recompute). Denormalised purely so Sales History can
+    # filter/sort by status without aggregating the ledger per row. The ledger
+    # is always the source of truth; this column is a cache of it.
+    payment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="PAID", index=True)
+    # Same derived/denormalised contract as payment_status: SUM of this sale's
+    # SalePayment rows. Outstanding is always final_amount - amount_paid.
+    amount_paid: Mapped[float] = mapped_column(Float, nullable=False, default=0)
 
     # Snapshot of which pricing mode produced this sale's final_amount — see
     # InventoryItem.pricing_mode's docstring for what the label means.
@@ -312,3 +323,60 @@ class Sale(Base, TimestampMixin):
 
     tenant: Mapped["Tenant"] = relationship("Tenant")
     inventory_item: Mapped["InventoryItem"] = relationship("InventoryItem")
+
+
+# Where the money for a collection came from. COUNTER covers every manual
+# Admin-recorded collection (cash/card/UPI/bank/cheque at the counter).
+# SCHEME_REDEMPTION and GATEWAY are reserved for later phases — a scheme
+# redemption settles an invoice without being fresh cash, and a gateway
+# payment originates externally; both must stay distinguishable from counter
+# cash so the dashboard can report collections correctly.
+PAYMENT_SOURCE_COUNTER = "COUNTER"
+PAYMENT_SOURCE_SCHEME_REDEMPTION = "SCHEME_REDEMPTION"
+PAYMENT_SOURCE_GATEWAY = "GATEWAY"
+
+
+class SalePayment(Base, TimestampMixin):
+    """
+    Billing System — the authoritative payment ledger for jewellery sales.
+    One row per collection event against one Sale/invoice.
+
+    APPEND-ONLY. Nothing in the Admin workflow updates or deletes a row here:
+    a ₹10,000 collection followed by a ₹5,000 collection is two permanent
+    rows, never one mutated row. Sale.amount_paid/payment_status are derived
+    caches of this table, recomputed transactionally on every insert.
+
+    Deliberately separate from payment.Payment, which is the scheme-
+    contribution ledger (enrollment_id NOT NULL). The two are different
+    financial concepts — money paid INTO a savings scheme vs. money collected
+    AGAINST an invoice — and are kept as distinct tables rather than one
+    polymorphic table.
+    """
+    __tablename__ = "sale_payments"
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sale_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("sales.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+
+    amount: Mapped[float] = mapped_column(Float, nullable=False)
+    # Business date of the collection (what the Admin reports on), distinct
+    # from created_at (when the row was keyed in). Dashboard collections in
+    # the next phase aggregate on this column, never on Sale.sale_timestamp.
+    payment_date: Mapped[date] = mapped_column(Date, nullable=False, index=True)
+    payment_method: Mapped[str] = mapped_column(String(30), nullable=False)
+    source: Mapped[str] = mapped_column(String(30), nullable=False, default=PAYMENT_SOURCE_COUNTER)
+    # Cheque number, UPI txn id, bank reference — free text, optional.
+    reference_no: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    remarks: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
+    # Who collected it — never nullable, this is an audited financial record.
+    recorded_by: Mapped[str] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+
+    tenant: Mapped["Tenant"] = relationship("Tenant")
+    sale: Mapped["Sale"] = relationship("Sale")

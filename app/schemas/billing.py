@@ -348,12 +348,35 @@ class SaleCreateRequest(BaseModel):
     # how the amount is actually computed.
     pricing_mode: Optional[PricingMode] = None
     payment_method: PaymentMethod = "CASH"
+    # The Admin's INTENT for this bill, not the stored status. The stored
+    # Sale.payment_status is always derived from the ledger the backend writes
+    # (see SaleService.create_sale):
+    #   PAID    -> one ledger row for the full invoice amount
+    #   PARTIAL -> one ledger row for initial_payment_amount (required)
+    #   PENDING -> no ledger row at all
     payment_status: PaymentStatus = "PAID"
+    # Required for PARTIAL, forbidden otherwise — a PARTIAL bill must record
+    # the amount actually collected at the counter, never just wear the label.
+    initial_payment_amount: Optional[float] = Field(None, gt=0)
+    payment_reference_no: Optional[str] = Field(None, max_length=100)
 
     @model_validator(mode="after")
     def _customer_identified(self) -> "SaleCreateRequest":
         if not self.customer_id and not self.customer_name:
             raise ValueError("Provide either customer_id or customer_name to identify the buyer")
+        return self
+
+    @model_validator(mode="after")
+    def _initial_payment_matches_status(self) -> "SaleCreateRequest":
+        if self.payment_status == "PARTIAL" and self.initial_payment_amount is None:
+            raise ValueError(
+                "initial_payment_amount is required for a PARTIAL sale — record the amount actually collected"
+            )
+        if self.payment_status != "PARTIAL" and self.initial_payment_amount is not None:
+            raise ValueError(
+                "initial_payment_amount applies only to a PARTIAL sale "
+                "(PAID collects the full amount, PENDING collects nothing)"
+            )
         return self
 
 
@@ -399,7 +422,11 @@ class SaleResponse(BaseModel):
     discount_amount: float
     final_amount: float
     payment_method: str
+    # Derived from the sale_payments ledger, never client-set — see
+    # models/billing.py Sale.payment_status / SalePayment.
     payment_status: str
+    amount_paid: float = 0
+    amount_outstanding: float = 0
     pricing_mode: Optional[PricingMode] = None
 
     # Internal-only fields — see this module's own note on InventoryItemResponse.purchase_cost.
@@ -418,6 +445,51 @@ class SaleResponse(BaseModel):
 class SaleListResponse(BaseModel):
     sales: List[SaleResponse]
     total: int
+
+
+# =============================================================================
+# Sale Payment Ledger
+# =============================================================================
+
+PaymentSource = Literal["COUNTER", "SCHEME_REDEMPTION", "GATEWAY"]
+
+
+class SalePaymentCreateRequest(BaseModel):
+    """One collection event against an existing invoice. There is no update or
+    delete counterpart — the ledger is append-only."""
+    amount: float = Field(..., gt=0, description="Must be > 0 and must not exceed the outstanding amount")
+    payment_date: date
+    payment_method: PaymentMethod
+    reference_no: Optional[str] = Field(None, max_length=100)
+    remarks: Optional[str] = Field(None, max_length=500)
+
+
+class SalePaymentResponse(BaseModel):
+    id: str
+    sale_id: str
+    amount: float
+    payment_date: date
+    payment_method: str
+    source: str
+    reference_no: Optional[str] = None
+    remarks: Optional[str] = None
+    recorded_by: str
+    recorded_by_name: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class SalePaymentHistoryResponse(BaseModel):
+    """Invoice payment position plus its full, permanent collection history."""
+    sale_id: str
+    invoice_number: str
+    final_amount: float
+    amount_paid: float
+    amount_outstanding: float
+    payment_status: str
+    payments: List[SalePaymentResponse]
 
 
 # =============================================================================
