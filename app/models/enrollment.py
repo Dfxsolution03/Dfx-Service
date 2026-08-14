@@ -58,7 +58,11 @@ class SchemeEnrollment(Base, TimestampMixin):
 
     # Relationships
     tenant: Mapped["Tenant"] = relationship("Tenant")
-    customer: Mapped["User"] = relationship("User")
+    # Explicit foreign_keys: this table now has TWO foreign keys into users
+    # (customer_id and closed_by), so SQLAlchemy cannot infer which one the
+    # customer relationship follows. closed_by is audit-only and deliberately
+    # has no relationship of its own.
+    customer: Mapped["User"] = relationship("User", foreign_keys=[customer_id])
     scheme: Mapped["Scheme"] = relationship("Scheme")
 
 
