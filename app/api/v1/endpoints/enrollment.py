@@ -5,8 +5,12 @@ from app.core.database import get_async_db
 from app.models.auth import User
 from app.permissions.dependencies import require_admin_or_staff_module, get_current_user
 from app.schemas.auth import StandardSuccessResponse
-from app.schemas.enrollment import EnrollmentCreateRequest
-from app.services.enrollment_service import EnrollmentService
+from app.schemas.enrollment import (
+    EnrollmentCreateRequest,
+    EnrollmentCloseRequest,
+    SchemeRedeemRequest,
+)
+from app.services.enrollment_service import EnrollmentService, SchemeBalanceService
 
 router = APIRouter()
 
@@ -108,4 +112,87 @@ async def get_customer_enrollment(
         success=True,
         message="Enrollment retrieved successfully",
         data={"enrollment": enrollment.model_dump(mode="json")},
+    )
+
+
+# 3. Scheme balance / closure / redemption (Admin)
+@router.get(
+    "/enrollments/{enrollment_id}/balance",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Scheme Balance And Redemption History (Admin)",
+    description=(
+        "Authoritative scheme-credit position of one enrollment: successful contributions, "
+        "amount already redeemed, available balance, closure details, and the full redemption "
+        "history with the sale each redemption settled. Every figure is derived from the "
+        "contribution and redemption ledgers — nothing is cached, and no bonus is applied "
+        "(the product has no numeric bonus rule)."
+    ),
+)
+async def get_enrollment_balance(
+    enrollment_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("enrollments")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    balance = await SchemeBalanceService.get_balance(db, current_user, enrollment_id)
+    return StandardSuccessResponse(
+        success=True,
+        message="Scheme balance retrieved successfully",
+        data={"balance": balance.model_dump(mode="json")},
+    )
+
+
+@router.post(
+    "/enrollments/{enrollment_id}/close",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Close A Scheme Enrollment (Admin)",
+    description=(
+        "Stops future contributions and records who closed it, when, and why. Nothing is "
+        "deleted and no contribution is rewritten: the balance already paid in is preserved and "
+        "stays redeemable against a future jewellery purchase. Closing never refunds and never "
+        "forfeits. Requires a reason."
+    ),
+)
+async def close_enrollment(
+    enrollment_id: str,
+    req: EnrollmentCloseRequest,
+    current_user: User = Depends(require_admin_or_staff_module("enrollments")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    balance = await SchemeBalanceService.close_enrollment(db, current_user, enrollment_id, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Scheme closed successfully",
+        data={"balance": balance.model_dump(mode="json")},
+    )
+
+
+@router.post(
+    "/enrollments/{enrollment_id}/redeem",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Redeem Scheme Balance Against An Invoice (Admin)",
+    description=(
+        "Applies the customer's accumulated scheme balance to an existing jewellery invoice in "
+        "one transaction: writes an immutable redemption record and appends a "
+        "source=SCHEME_REDEMPTION row to the invoice's existing payment ledger, so the invoice "
+        "settles without the amount ever being counted as cash collected. Several partial "
+        "redemptions against one enrollment are allowed; leftover balance stays available for a "
+        "future purchase. Rejects an amount above the available balance or above the invoice's "
+        "outstanding, and refuses a returned or cancelled sale. The enrollment becomes REDEEMED "
+        "once its balance reaches zero."
+    ),
+)
+async def redeem_scheme_balance(
+    enrollment_id: str,
+    req: SchemeRedeemRequest,
+    current_user: User = Depends(require_admin_or_staff_module("enrollments")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    balance = await SchemeBalanceService.redeem_against_sale(db, current_user, enrollment_id, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Scheme balance redeemed successfully",
+        data={"balance": balance.model_dump(mode="json")},
     )

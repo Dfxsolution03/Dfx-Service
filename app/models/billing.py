@@ -387,6 +387,14 @@ class SalePayment(Base, TimestampMixin):
     reference_no: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     remarks: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
 
+    # Which scheme enrollment funded this row. Set ONLY on
+    # source=SCHEME_REDEMPTION rows, so a redemption can never be mistaken for
+    # counter cash and the enrollment's remaining balance stays derivable from
+    # this ledger. NULL on every ordinary collection and on refunds.
+    enrollment_id: Mapped[Optional[str]] = mapped_column(
+        String(50), ForeignKey("scheme_enrollments.id", ondelete="RESTRICT"), nullable=True, index=True
+    )
+
     # Who collected it — never nullable, this is an audited financial record.
     recorded_by: Mapped[str] = mapped_column(
         String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False

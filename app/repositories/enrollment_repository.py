@@ -1,9 +1,10 @@
 from typing import List, Optional
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
-from app.models.enrollment import SchemeEnrollment
+from app.models.payment import Payment, STATUS_SUCCESS as PAYMENT_STATUS_SUCCESS
+from app.models.enrollment import SchemeRedemption, SchemeEnrollment
 
 
 class EnrollmentRepository:
@@ -89,3 +90,80 @@ class EnrollmentRepository:
     async def create_enrollment(db: AsyncSession, enrollment: SchemeEnrollment) -> SchemeEnrollment:
         db.add(enrollment)
         return enrollment
+
+    @staticmethod
+    async def get_enrollment_by_id_for_update(
+        db: AsyncSession, enrollment_id: str, tenant_id: str
+    ):
+        """Tenant-scoped fetch holding a row lock for the rest of the transaction.
+
+        Used only by the closure and redemption paths: two Admins redeeming the
+        same enrollment at the same moment must serialise here, or both could
+        validate against the same stale available balance and together spend
+        more scheme credit than the customer ever paid in."""
+        stmt = (
+            select(SchemeEnrollment)
+            .where(SchemeEnrollment.id == enrollment_id, SchemeEnrollment.tenant_id == tenant_id)
+            .with_for_update()
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+
+class SchemeRedemptionRepository:
+    """Append-only. No update or delete counterpart by design."""
+
+    @staticmethod
+    async def create(db: AsyncSession, row: SchemeRedemption) -> SchemeRedemption:
+        db.add(row)
+        await db.flush()
+        return row
+
+    @staticmethod
+    async def sum_for_enrollment(db: AsyncSession, enrollment_id: str, tenant_id: str) -> float:
+        """Total scheme credit already spent against jewellery sales."""
+        stmt = select(func.coalesce(func.sum(SchemeRedemption.amount), 0.0)).where(
+            SchemeRedemption.enrollment_id == enrollment_id,
+            SchemeRedemption.tenant_id == tenant_id,
+        )
+        return float((await db.execute(stmt)).scalar_one())
+
+    @staticmethod
+    async def list_for_enrollment(db: AsyncSession, enrollment_id: str, tenant_id: str):
+        stmt = (
+            select(SchemeRedemption)
+            .where(
+                SchemeRedemption.enrollment_id == enrollment_id,
+                SchemeRedemption.tenant_id == tenant_id,
+            )
+            .order_by(SchemeRedemption.redeemed_at.asc())
+        )
+        return list((await db.execute(stmt)).scalars().all())
+
+    @staticmethod
+    async def sum_successful_contributions(
+        db: AsyncSession, enrollment_id: str, tenant_id: str
+    ) -> float:
+        """Eligible balance numerator: SUM of SUCCESSFUL scheme contributions.
+
+        No bonus is applied — Scheme.bonus_description is free text and there is
+        no numeric bonus engine in the product, so inventing one here would
+        fabricate money. Failed/pending contributions are excluded."""
+        stmt = select(func.coalesce(func.sum(Payment.amount), 0.0)).where(
+            Payment.enrollment_id == enrollment_id,
+            Payment.tenant_id == tenant_id,
+            Payment.payment_status == PAYMENT_STATUS_SUCCESS,
+        )
+        return float((await db.execute(stmt)).scalar_one())
+
+    @staticmethod
+    async def count_successful_contributions(
+        db: AsyncSession, enrollment_id: str, tenant_id: str
+    ) -> int:
+        """How many monthly contributions actually succeeded — shown to the Admin
+        beside the balance, never used to compute money."""
+        stmt = select(func.count(Payment.id)).where(
+            Payment.enrollment_id == enrollment_id,
+            Payment.tenant_id == tenant_id,
+            Payment.payment_status == PAYMENT_STATUS_SUCCESS,
+        )
+        return int((await db.execute(stmt)).scalar_one())

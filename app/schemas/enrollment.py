@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import Optional
+from typing import List, Optional
 from pydantic import BaseModel, Field
 
 
@@ -38,3 +38,65 @@ class CustomerEnrollmentResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# =============================================================================
+# Scheme closure and redemption
+# =============================================================================
+
+class SchemeRedemptionResponse(BaseModel):
+    id: str
+    enrollment_id: str
+    customer_id: str
+    sale_id: str
+    invoice_number: str
+    amount: float
+    redeemed_at: datetime
+    recorded_by: str
+    recorded_by_name: Optional[str] = None
+
+    class Config:
+        from_attributes = True
+
+
+class EnrollmentBalanceResponse(BaseModel):
+    """Authoritative scheme-credit position of one enrollment.
+
+    Every figure is derived, never cached: total_paid comes from the SUCCESSFUL
+    scheme payment ledger, total_redeemed from the redemption ledger, and
+    available_balance is the difference. No bonus is included — the product has
+    no numeric bonus rule.
+    """
+    enrollment_id: str
+    enrollment_number: str
+    customer_id: str
+    customer_name: str
+    scheme_name: str
+    monthly_amount: float
+    duration_months: int
+    successful_payment_count: int
+    total_paid: float
+    total_redeemed: float
+    available_balance: float
+    status: str
+    joined_date: date
+    maturity_date: date
+    closed_at: Optional[datetime] = None
+    closed_by: Optional[str] = None
+    closed_by_name: Optional[str] = None
+    closure_reason: Optional[str] = None
+    can_contribute: bool
+    can_redeem: bool
+    redemptions: List[SchemeRedemptionResponse] = []
+
+
+class EnrollmentCloseRequest(BaseModel):
+    """Stop future contributions. The balance already paid in is preserved and
+    stays redeemable — closing never refunds or forfeits it."""
+    reason: str = Field(..., min_length=3, max_length=500)
+
+
+class SchemeRedeemRequest(BaseModel):
+    """Apply scheme credit to an existing jewellery invoice."""
+    sale_id: str
+    amount: float = Field(..., gt=0, description="Never above the available balance or the sale's outstanding")

@@ -6,9 +6,10 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.models.auth import User
 from app.models.payment import Payment, STATUS_SUCCESS
 from app.repositories.payment_repository import PaymentRepository
+from app.models.enrollment import CONTRIBUTABLE_STATUSES
 from app.repositories.enrollment_repository import EnrollmentRepository
 from app.repositories.audit_repository import AuditRepository
-from app.exceptions.base import ResourceNotFoundException, ForbiddenException
+from app.exceptions.base import ResourceNotFoundException, ForbiddenException, ConflictException
 from app.schemas.payment import PaymentManualCreateRequest, PaymentUpdateRequest, PaymentResponse, CustomerPaymentResponse
 
 
@@ -88,6 +89,14 @@ class PaymentService:
         )
         if not enrollment:
             raise ResourceNotFoundException(f"Enrollment ID '{req.enrollment_id}' not found")
+        # Only an ACTIVE enrollment accepts new contributions. A closed, redeemed,
+        # cancelled or matured scheme must not grow: its balance is already fixed
+        # and may only be spent through redemption.
+        if enrollment.status not in CONTRIBUTABLE_STATUSES:
+            raise ConflictException(
+                f"Enrollment {enrollment.enrollment_number} is {enrollment.status.lower()} and no "
+                f"longer accepts contributions."
+            )
 
         payment_id = f"pay_{uuid.uuid4().hex[:12]}"
         payment = Payment(
