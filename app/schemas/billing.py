@@ -4,9 +4,16 @@ from pydantic import BaseModel, Field, model_validator
 
 Purity = Literal["9K", "14K", "18K", "20K", "22K", "24K"]
 ChargeType = Literal["FIXED", "PER_GRAM", "PERCENTAGE"]
-StockStatus = Literal["IN_STOCK", "SOLD", "INACTIVE"]
+StockStatus = Literal["IN_STOCK", "SOLD", "INACTIVE", "RETURNED_PENDING_INSPECTION", "DAMAGED"]
 PaymentMethod = Literal["CASH", "CARD", "UPI", "BANK_TRANSFER", "OTHER"]
 PaymentStatus = Literal["PAID", "PENDING", "PARTIAL"]
+# The full stored vocabulary of Sale.payment_status: the three collection
+# states above plus the two a return can produce. PaymentStatus stays as-is
+# because sale CREATION can still only ask for one of the original three.
+SalePaymentStatus = Literal["PAID", "PENDING", "PARTIAL", "REFUNDED", "PARTIALLY_REFUNDED"]
+SaleStatus = Literal["COMPLETED", "RETURNED", "CANCELLED"]
+ReturnType = Literal["RETURN", "CANCELLATION"]
+InspectionOutcome = Literal["RESALABLE", "DAMAGED"]
 PricingMode = Literal["AUTO", "HYBRID", "MANUAL"]
 DefaultSource = Literal["VENDOR", "CATEGORY", "STORE", "NONE"]
 
@@ -434,6 +441,11 @@ class SaleResponse(BaseModel):
     purchase_cost_snapshot: Optional[float] = None
     estimated_gross_margin: Optional[float] = None
 
+    sale_status: str = "COMPLETED"
+    amount_refunded: float = 0.0
+    # Present only when this sale has been reversed; None on a normal sale.
+    sale_return: Optional["SaleReturnResponse"] = None
+
     sale_timestamp: datetime
     created_by: str
     created_at: datetime
@@ -451,7 +463,7 @@ class SaleListResponse(BaseModel):
 # Sale Payment Ledger
 # =============================================================================
 
-PaymentSource = Literal["COUNTER", "SCHEME_REDEMPTION", "GATEWAY"]
+PaymentSource = Literal["COUNTER", "SCHEME_REDEMPTION", "GATEWAY", "REFUND"]
 
 
 class SalePaymentCreateRequest(BaseModel):
@@ -493,6 +505,87 @@ class SalePaymentHistoryResponse(BaseModel):
 
 
 # =============================================================================
+# Sale Return / Cancellation
+# =============================================================================
+
+class SaleReturnPreviewResponse(BaseModel):
+    """Read-only financial impact of reversing one sale, so the Admin confirms
+    against real backend figures instead of a number the browser computed.
+    Every value here is derived from the immutable sale snapshot and its
+    ledger; nothing is stored by asking for a preview."""
+    sale_id: str
+    invoice_number: str
+    product_code: str
+    product_name: str
+    sale_status: str
+    payment_status: str
+    original_sale_amount: float
+    amount_collected: float
+    outstanding: float
+    # What would be handed back if the Admin refunds in full: exactly what was
+    # collected, never more. The outstanding balance is written off, not
+    # refunded, because it was never collected.
+    max_refundable: float
+    outstanding_to_write_off: float
+    current_stock_status: str
+    resulting_stock_status: str
+    can_return: bool
+    blocked_reason: Optional[str] = None
+
+
+class SaleReturnCreateRequest(BaseModel):
+    """Reverse one sale. The refund amount is optional: omitted means refund
+    everything that was actually collected (the normal case). A smaller value
+    is allowed for a negotiated partial refund; a larger one is rejected
+    backend-side, since the store cannot hand back money it never took."""
+    return_type: ReturnType = "RETURN"
+    reason: str = Field(..., min_length=3, max_length=500)
+    refund_amount: Optional[float] = Field(
+        None, ge=0, description="Omit to refund the full collected amount. Never exceeds it."
+    )
+    refund_method: Optional[PaymentMethod] = None
+    refund_reference_no: Optional[str] = Field(None, max_length=100)
+    refund_date: Optional[date] = Field(None, description="Business date of the refund; defaults to today (IST)")
+
+
+class SaleReturnInspectionRequest(BaseModel):
+    """The explicit second step: an item does NOT become sellable just because
+    it came back. RESALABLE returns it to IN_STOCK; DAMAGED keeps it
+    permanently out of sellable stock."""
+    outcome: InspectionOutcome
+    notes: Optional[str] = Field(None, max_length=500)
+
+
+class SaleReturnResponse(BaseModel):
+    id: str
+    sale_id: str
+    invoice_number: str
+    inventory_item_id: str
+    product_code: str
+    return_type: str
+    reason: str
+    original_sale_amount: float
+    amount_collected_at_return: float
+    refund_amount: float
+    outstanding_written_off: float
+    refund_method: Optional[str] = None
+    refund_reference_no: Optional[str] = None
+    inspection_status: str
+    inspection_notes: Optional[str] = None
+    inspected_at: Optional[datetime] = None
+    inspected_by: Optional[str] = None
+    inspected_by_name: Optional[str] = None
+    returned_at: datetime
+    processed_by: str
+    processed_by_name: Optional[str] = None
+    current_stock_status: Optional[str] = None
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+# =============================================================================
 # Dashboard Billing Summary
 # =============================================================================
 
@@ -510,6 +603,13 @@ class BusinessSummaryResponse(BaseModel):
     items_sold: int
     total_tax: float
     average_bill_value: float
+    # Reversal-aware reporting. total_sales above is NET (reversed sales
+    # excluded); these expose the reconciliation:
+    # gross_sales - sales_returns == total_sales.
+    gross_sales: float = 0.0
+    sales_returns: float = 0.0
+    return_count: int = 0
+    total_refunded: float = 0.0
 
 
 class BillingPeriodSummary(BaseModel):
@@ -525,6 +625,10 @@ class BillingPeriodSummary(BaseModel):
     items_sold: int
     total_tax: float = 0.0
     avg_bill_value: float = 0.0
+    gross_sales: float = 0.0
+    sales_returns: float = 0.0
+    return_count: int = 0
+    total_refunded: float = 0.0
 
 
 class RecentSaleSummary(BaseModel):
@@ -580,3 +684,9 @@ class PriceLinePreviewResponse(BaseModel):
     breakdown: PriceBreakdown
     purchase_cost: Optional[float] = None
     profit_or_loss: Optional[float] = None
+
+
+# SaleResponse.sale_return forward-references SaleReturnResponse, which is
+# declared after it; resolve it once at import time so the first request never
+# pays for (or trips over) a lazy rebuild.
+SaleResponse.model_rebuild()

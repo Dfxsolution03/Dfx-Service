@@ -3,6 +3,7 @@ from typing import List, Optional, Tuple
 from sqlalchemy import select, update, func, or_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.constants import SALE_STATUS_COMPLETED
 from app.models.billing import (
     Vendor,
     CategoryPricingDefault,
@@ -10,6 +11,8 @@ from app.models.billing import (
     InventoryItem,
     Sale,
     SalePayment,
+    SaleReturn,
+    PAYMENT_SOURCE_REFUND,
 )
 
 
@@ -155,6 +158,29 @@ class InventoryRepository:
         result = await db.execute(stmt)
         return result.rowcount == 1
 
+    @staticmethod
+    async def transition_stock_status(
+        db: AsyncSession, item_id: str, tenant_id: str, expected_from: str, to_status: str
+    ) -> bool:
+        """Guarded status transition in a single UPDATE, same concurrency
+        contract as mark_sold_if_in_stock: the expected current status is part
+        of the WHERE clause, so two callers cannot both believe they made the
+        move. Returns True iff this call performed the transition.
+
+        Used for SOLD -> RETURNED_PENDING_INSPECTION (return accepted) and
+        RETURNED_PENDING_INSPECTION -> IN_STOCK / DAMAGED (inspection decided)."""
+        stmt = (
+            update(InventoryItem)
+            .where(
+                InventoryItem.id == item_id,
+                InventoryItem.tenant_id == tenant_id,
+                InventoryItem.stock_status == expected_from,
+            )
+            .values(stock_status=to_status)
+        )
+        result = await db.execute(stmt)
+        return result.rowcount == 1
+
 
 class SaleRepository:
     @staticmethod
@@ -186,10 +212,13 @@ class SaleRepository:
         date_from: Optional[date] = None,
         date_to: Optional[date] = None,
         payment_status: Optional[str] = None,
+        sale_status: Optional[str] = None,
     ) -> Tuple[List[Sale], int]:
         conditions = [Sale.tenant_id == tenant_id]
         if payment_status:
             conditions.append(Sale.payment_status == payment_status)
+        if sale_status:
+            conditions.append(Sale.sale_status == sale_status)
         if search:
             like = f"%{search}%"
             conditions.append(
@@ -241,14 +270,28 @@ class SaleRepository:
             (Sale.purchase_cost_snapshot.is_(None), 0.0),
             else_=net_revenue - Sale.purchase_cost_snapshot,
         )
+        # A reversed sale is excluded from every NET figure (net sales, profit,
+        # loss, tax, bill count, items sold) but is still reported on its own as
+        # gross + returns, so the period reconciles as
+        # gross_sales - sales_returns = total_sales and nothing is silently
+        # deleted from history. The Sale row itself is never touched.
+        intact = Sale.sale_status == SALE_STATUS_COMPLETED
+        reversed_ = Sale.sale_status != SALE_STATUS_COMPLETED
         stmt = select(
+            func.coalesce(func.sum(case((intact, Sale.final_amount), else_=0.0)), 0.0),
+            func.coalesce(func.sum(case((intact & (margin > 0), margin), else_=0.0)), 0.0),
+            func.coalesce(func.sum(case((intact & (margin < 0), -margin), else_=0.0)), 0.0),
+            func.coalesce(func.sum(case((intact, 1), else_=0)), 0),
+            func.coalesce(func.sum(case((intact, Sale.tax_amount), else_=0.0)), 0.0),
             func.coalesce(func.sum(Sale.final_amount), 0.0),
-            func.coalesce(func.sum(case((margin > 0, margin), else_=0.0)), 0.0),
-            func.coalesce(func.sum(case((margin < 0, -margin), else_=0.0)), 0.0),
-            func.count(Sale.id),
-            func.coalesce(func.sum(Sale.tax_amount), 0.0),
+            func.coalesce(func.sum(case((reversed_, Sale.final_amount), else_=0.0)), 0.0),
+            func.coalesce(func.sum(case((reversed_, 1), else_=0)), 0),
+            func.coalesce(func.sum(Sale.amount_refunded), 0.0),
         ).where(Sale.tenant_id == tenant_id, Sale.sale_timestamp >= start_dt, Sale.sale_timestamp <= end_dt)
-        total_sales, total_profit, total_loss, bill_count, total_tax = (await db.execute(stmt)).one()
+        (
+            total_sales, total_profit, total_loss, bill_count, total_tax,
+            gross_sales, sales_returns, return_count, total_refunded,
+        ) = (await db.execute(stmt)).one()
         return {
             "total_sales": float(total_sales),
             "total_profit": float(total_profit),
@@ -257,6 +300,10 @@ class SaleRepository:
             "items_sold": int(bill_count),  # one item per sale in this data model
             "total_tax": float(total_tax),
             "avg_bill_value": float(total_sales) / bill_count if bill_count else 0.0,
+            "gross_sales": float(gross_sales),
+            "sales_returns": float(sales_returns),
+            "return_count": int(return_count),
+            "total_refunded": float(total_refunded),
         }
 
     @staticmethod
@@ -292,6 +339,7 @@ class SaleRepository:
         date_from: Optional[date] = None,
         date_to: Optional[date] = None,
         payment_status: Optional[str] = None,
+        sale_status: Optional[str] = None,
         cap: int = 20000,
     ) -> List[Sale]:
         """Unpaginated, same filter semantics as list_by_tenant — used by the
@@ -302,6 +350,8 @@ class SaleRepository:
         conditions = [Sale.tenant_id == tenant_id]
         if payment_status:
             conditions.append(Sale.payment_status == payment_status)
+        if sale_status:
+            conditions.append(Sale.sale_status == sale_status)
         if search:
             like = f"%{search}%"
             conditions.append(
@@ -343,10 +393,15 @@ class SalePaymentRepository:
 
     @staticmethod
     async def sum_for_sale(db: AsyncSession, sale_id: str, tenant_id: str) -> float:
-        """Authoritative amount-paid figure, read straight off the ledger —
-        never off Sale.amount_paid, which is only a cache of this."""
+        """Total COLLECTED against one invoice. Refund rows (source=REFUND, stored
+        negative) are deliberately excluded: "collected" and "refunded" are two
+        separate figures on the invoice, and netting them here would understate
+        what was actually taken at the counter and silently reopen an
+        outstanding balance on a refunded sale. See sum_refunds_for_sale."""
         stmt = select(func.coalesce(func.sum(SalePayment.amount), 0.0)).where(
-            SalePayment.sale_id == sale_id, SalePayment.tenant_id == tenant_id
+            SalePayment.sale_id == sale_id,
+            SalePayment.tenant_id == tenant_id,
+            SalePayment.source != PAYMENT_SOURCE_REFUND,
         )
         return float((await db.execute(stmt)).scalar_one())
 
@@ -362,5 +417,49 @@ class SalePaymentRepository:
             select(SalePayment)
             .where(SalePayment.sale_id.in_(sale_ids), SalePayment.tenant_id == tenant_id)
             .order_by(SalePayment.payment_date.asc(), SalePayment.created_at.asc())
+        )
+        return list((await db.execute(stmt)).scalars().all())
+
+    @staticmethod
+    async def sum_refunds_for_sale(db: AsyncSession, sale_id: str, tenant_id: str) -> float:
+        """Total refunded against one invoice, as a POSITIVE figure. Refund rows
+        are stored negative on the shared ledger, so this negates the sum."""
+        stmt = select(func.coalesce(func.sum(SalePayment.amount), 0.0)).where(
+            SalePayment.sale_id == sale_id,
+            SalePayment.tenant_id == tenant_id,
+            SalePayment.source == PAYMENT_SOURCE_REFUND,
+        )
+        return -float((await db.execute(stmt)).scalar_one())
+
+
+class SaleReturnRepository:
+    @staticmethod
+    async def create(db: AsyncSession, row: SaleReturn) -> SaleReturn:
+        db.add(row)
+        await db.flush()
+        return row
+
+    @staticmethod
+    async def get_by_sale(db: AsyncSession, sale_id: str, tenant_id: str) -> Optional[SaleReturn]:
+        stmt = select(SaleReturn).where(
+            SaleReturn.sale_id == sale_id, SaleReturn.tenant_id == tenant_id
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def get_by_sale_for_update(db: AsyncSession, sale_id: str, tenant_id: str) -> Optional[SaleReturn]:
+        stmt = (
+            select(SaleReturn)
+            .where(SaleReturn.sale_id == sale_id, SaleReturn.tenant_id == tenant_id)
+            .with_for_update()
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def list_by_sale_ids(db: AsyncSession, sale_ids: List[str], tenant_id: str) -> List[SaleReturn]:
+        if not sale_ids:
+            return []
+        stmt = select(SaleReturn).where(
+            SaleReturn.sale_id.in_(sale_ids), SaleReturn.tenant_id == tenant_id
         )
         return list((await db.execute(stmt)).scalars().all())

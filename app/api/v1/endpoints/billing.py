@@ -20,6 +20,8 @@ from app.schemas.billing import (
     PriceLinePreviewRequest,
     SaleCreateRequest,
     SalePaymentCreateRequest,
+    SaleReturnCreateRequest,
+    SaleReturnInspectionRequest,
 )
 from app.services.billing_service import (
     VendorService,
@@ -27,6 +29,7 @@ from app.services.billing_service import (
     InventoryService,
     SaleService,
     SalePaymentService,
+    SaleReturnService,
 )
 from app.services import billing_export_service
 from app.exceptions.base import ValidationException
@@ -432,14 +435,19 @@ async def list_sales(
     date_to: Optional[date] = Query(None),
     payment_status: Optional[str] = Query(
         None,
-        pattern="^(PAID|PARTIAL|PENDING)$",
+        pattern="^(PAID|PARTIAL|PENDING|REFUNDED|PARTIALLY_REFUNDED)$",
         description="Omit for ALL. Filters on the ledger-derived status, never a client-set label.",
+    ),
+    sale_status: Optional[str] = Query(
+        None,
+        pattern="^(COMPLETED|RETURNED|CANCELLED)$",
+        description="Omit for ALL. The sale lifecycle, independent of the payment status.",
     ),
     current_user: User = Depends(require_admin_or_staff_module("billing")),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await SaleService.list_sales(
-        db, current_user, page, limit, search, date_from, date_to, payment_status
+        db, current_user, page, limit, search, date_from, date_to, payment_status, sale_status
     )
     return StandardSuccessResponse(
         success=True,
@@ -469,12 +477,15 @@ async def download_sales_history_excel(
     date_from: Optional[date] = Query(None),
     date_to: Optional[date] = Query(None),
     search: Optional[str] = Query(None),
-    payment_status: Optional[str] = Query(None, pattern="^(PAID|PARTIAL|PENDING)$"),
+    payment_status: Optional[str] = Query(
+        None, pattern="^(PAID|PARTIAL|PENDING|REFUNDED|PARTIALLY_REFUNDED)$"
+    ),
+    sale_status: Optional[str] = Query(None, pattern="^(COMPLETED|RETURNED|CANCELLED)$"),
     current_user: User = Depends(require_admin_or_staff_module("billing")),
     db: AsyncSession = Depends(get_async_db),
 ):
     sales, payments_by_sale, period_label, sel_from, sel_to = await SaleService.list_for_export(
-        db, current_user, period, date_from, date_to, search, payment_status
+        db, current_user, period, date_from, date_to, search, payment_status, sale_status
     )
     tenant = (await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))).scalar_one_or_none()
     xlsx_bytes = billing_export_service.build_sales_history_excel(
@@ -530,6 +541,110 @@ async def record_sale_payment(
         success=True,
         message="Payment recorded successfully",
         data={"paymentHistory": history.model_dump(mode="json")},
+    )
+
+
+# =============================================================================
+# 3b. Sale Return / Cancellation
+# =============================================================================
+
+@router.get(
+    "/billing/sales/{sale_id}/return/preview",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Preview Financial Impact Of Reversing A Sale (Admin)",
+    description=(
+        "Backend-computed impact of returning/cancelling this invoice: what was actually "
+        "collected, the maximum refundable amount, the outstanding balance that would be written "
+        "off, and the resulting inventory status. Read-only — nothing is stored or locked. The "
+        "confirmation dialog must show these figures rather than any number computed in the "
+        "browser."
+    ),
+)
+async def preview_sale_return(
+    sale_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    preview = await SaleReturnService.preview(db, current_user, sale_id)
+    return StandardSuccessResponse(
+        success=True,
+        message="Return preview generated successfully",
+        data={"preview": preview.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/billing/sales/{sale_id}/return",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Sale Return Record (Admin)",
+)
+async def get_sale_return(
+    sale_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    record = await SaleReturnService.get_for_sale(db, current_user, sale_id)
+    return StandardSuccessResponse(
+        success=True,
+        message="Sale return retrieved successfully",
+        data={"saleReturn": record.model_dump(mode="json") if record else None},
+    )
+
+
+@router.post(
+    "/billing/sales/{sale_id}/return",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Return / Cancel A Sale (Admin)",
+    description=(
+        "Reverses one sale in a single transaction: takes the original inventory item back as "
+        "RETURNED_PENDING_INSPECTION (never straight into sellable stock), appends the refund to "
+        "the invoice's permanent payment ledger as a negative REFUND row, writes an immutable "
+        "return record, and closes the customer's outstanding balance. The original invoice is "
+        "never edited — its product snapshot, gold rate, charges, GST, customer price, cost "
+        "snapshot and every earlier payment row stay exactly as recorded. Refunding more than was "
+        "actually collected is rejected; the unpaid balance is written off, not refunded. A sale "
+        "can only be reversed once."
+    ),
+)
+async def return_sale(
+    sale_id: str,
+    req: SaleReturnCreateRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    record = await SaleReturnService.process_return(db, current_user, sale_id, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Sale returned successfully",
+        data={"saleReturn": record.model_dump(mode="json")},
+    )
+
+
+@router.post(
+    "/billing/sales/{sale_id}/return/inspection",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Record Return Inspection Outcome (Admin)",
+    description=(
+        "The explicit second step of the inventory lifecycle: RESALABLE puts the same original "
+        "item back into IN_STOCK, DAMAGED keeps it permanently out of sellable stock. A returned "
+        "item never becomes sellable without this decision. Can only be recorded once."
+    ),
+)
+async def inspect_sale_return(
+    sale_id: str,
+    req: SaleReturnInspectionRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    record = await SaleReturnService.record_inspection(db, current_user, sale_id, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Return inspection recorded successfully",
+        data={"saleReturn": record.model_dump(mode="json")},
     )
 
 

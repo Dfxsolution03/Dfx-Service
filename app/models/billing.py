@@ -305,6 +305,16 @@ class Sale(Base, TimestampMixin):
     # Same derived/denormalised contract as payment_status: SUM of this sale's
     # SalePayment rows. Outstanding is always final_amount - amount_paid.
     amount_paid: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    # Same derived/denormalised contract as amount_paid, for the refund side:
+    # SUM of this sale's REFUND ledger rows. Only a return writes it.
+    amount_refunded: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    # The SALE lifecycle (SALE_STATUSES), strictly separate from payment_status.
+    # COMPLETED until a return/cancellation reverses the sale; every other
+    # column on this row stays exactly as it was written at sale time — the
+    # snapshot is never rewritten to hide a reversed sale.
+    sale_status: Mapped[str] = mapped_column(
+        String(20), nullable=False, default="COMPLETED", index=True
+    )
 
     # Snapshot of which pricing mode produced this sale's final_amount — see
     # InventoryItem.pricing_mode's docstring for what the label means.
@@ -334,6 +344,10 @@ class Sale(Base, TimestampMixin):
 PAYMENT_SOURCE_COUNTER = "COUNTER"
 PAYMENT_SOURCE_SCHEME_REDEMPTION = "SCHEME_REDEMPTION"
 PAYMENT_SOURCE_GATEWAY = "GATEWAY"
+# A refund paid back to the customer. Stored on the SAME append-only ledger as
+# collections, with a NEGATIVE amount, so the ledger sums to the net cash
+# position of the invoice and no collection row is ever mutated or deleted.
+PAYMENT_SOURCE_REFUND = "REFUND"
 
 
 class SalePayment(Base, TimestampMixin):
@@ -375,6 +389,80 @@ class SalePayment(Base, TimestampMixin):
 
     # Who collected it — never nullable, this is an audited financial record.
     recorded_by: Mapped[str] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+
+    tenant: Mapped["Tenant"] = relationship("Tenant")
+    sale: Mapped["Sale"] = relationship("Sale")
+
+
+class SaleReturn(Base, TimestampMixin):
+    """
+    Billing System — the immutable reversal record for one Sale.
+
+    A return NEVER edits the original invoice. The Sale row keeps its invoice
+    number, product snapshot, gold rate, gold-rate effective date, making and
+    wastage charges, gold profit, GST, customer price, purchase-cost snapshot
+    and original margin untouched; only its derived sale_status/payment_status/
+    amount_refunded caches move. The financial and inventory consequences of
+    the reversal live here, in a separate row, so the original transaction
+    stays auditable exactly as it was recorded.
+
+    One sale carries one inventory item in this data model, so at most ONE
+    SaleReturn can exist per sale — enforced by a unique constraint on sale_id,
+    which is also the hard stop against double-returning the same invoice.
+
+    Money: the refund itself is a negative row on sale_payments (the existing
+    collection ledger, source=REFUND). This table records the reversal's
+    reasoning and its frozen financial impact — what the invoice was, what had
+    actually been collected, what was handed back, and what outstanding
+    balance was written off. Nothing here is recomputed later.
+    """
+    __tablename__ = "sale_returns"
+    __table_args__ = (
+        UniqueConstraint("sale_id", name="uq_sale_returns_sale_id"),
+    )
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    sale_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("sales.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Denormalised from the Sale at return time purely so an audit/report never
+    # has to join back to prove which invoice and item were reversed.
+    invoice_number: Mapped[str] = mapped_column(String(30), nullable=False, index=True)
+    inventory_item_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("inventory_items.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    product_code: Mapped[str] = mapped_column(String(50), nullable=False)
+
+    return_type: Mapped[str] = mapped_column(String(20), nullable=False, default="RETURN")
+    reason: Mapped[str] = mapped_column(String(500), nullable=False)
+
+    # Frozen financial impact of THIS reversal.
+    original_sale_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    amount_collected_at_return: Mapped[float] = mapped_column(Float, nullable=False)
+    refund_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    # Balance the customer still owed and is no longer liable for. Never
+    # refunded — it was never collected.
+    outstanding_written_off: Mapped[float] = mapped_column(Float, nullable=False)
+    refund_method: Mapped[Optional[str]] = mapped_column(String(30), nullable=True)
+    refund_reference_no: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+
+    # Inspection outcome. PENDING while the item sits in
+    # RETURNED_PENDING_INSPECTION; RESALABLE once an Admin puts it back into
+    # IN_STOCK; DAMAGED if it is kept permanently out of sellable stock.
+    inspection_status: Mapped[str] = mapped_column(String(30), nullable=False, default="PENDING")
+    inspection_notes: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    inspected_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    inspected_by: Mapped[Optional[str]] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+
+    returned_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    processed_by: Mapped[str] = mapped_column(
         String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )
 

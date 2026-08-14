@@ -5,7 +5,24 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.constants import PURITY_KARATS, ROLE_ADMIN, ROLE_SUPERADMIN
+from app.core.constants import (
+    PURITY_KARATS,
+    ROLE_ADMIN,
+    ROLE_SUPERADMIN,
+    SALE_STATUS_COMPLETED,
+    SALE_STATUS_RETURNED,
+    SALE_STATUS_CANCELLED,
+    PAYMENT_STATUS_REFUNDED,
+    PAYMENT_STATUS_PARTIALLY_REFUNDED,
+    RETURN_TYPE_CANCELLATION,
+    STOCK_STATUS_IN_STOCK,
+    STOCK_STATUS_SOLD,
+    STOCK_STATUS_DAMAGED,
+    STOCK_STATUS_RETURNED_PENDING_INSPECTION,
+    INSPECTION_PENDING,
+    INSPECTION_RESALABLE,
+    INSPECTION_DAMAGED,
+)
 from app.models.auth import User
 from app.models.billing import (
     Vendor,
@@ -14,7 +31,9 @@ from app.models.billing import (
     InventoryItem,
     Sale,
     SalePayment,
+    SaleReturn,
     PAYMENT_SOURCE_COUNTER,
+    PAYMENT_SOURCE_REFUND,
 )
 from app.repositories.billing_repository import (
     VendorRepository,
@@ -23,6 +42,7 @@ from app.repositories.billing_repository import (
     InventoryRepository,
     SaleRepository,
     SalePaymentRepository,
+    SaleReturnRepository,
 )
 from app.repositories.audit_repository import AuditRepository
 from app.services.storage_service import get_storage_provider
@@ -58,6 +78,10 @@ from app.schemas.billing import (
     SalePaymentCreateRequest,
     SalePaymentResponse,
     SalePaymentHistoryResponse,
+    SaleReturnCreateRequest,
+    SaleReturnInspectionRequest,
+    SaleReturnPreviewResponse,
+    SaleReturnResponse,
     BillingPeriodSummary,
     RecentSaleSummary,
     BillingDashboardSummaryResponse,
@@ -115,7 +139,14 @@ def _derive_payment_status(final_amount: float, amount_paid: float) -> str:
 
 def _outstanding_of(sale: Sale) -> float:
     """Never negative — overpayment is rejected at the point of collection, so
-    a negative figure here would mean corrupt data, not a refund owed."""
+    a negative figure here would mean corrupt data, not a refund owed.
+
+    A reversed sale outstands nothing: on a return the unpaid balance is
+    written off (recorded on the SaleReturn row), so the customer is no longer
+    liable for it. The sale's own final_amount/amount_paid columns are left
+    untouched — only this derivation knows the balance is closed."""
+    if (sale.sale_status or SALE_STATUS_COMPLETED) != SALE_STATUS_COMPLETED:
+        return 0.0
     return _round2(max(0.0, (sale.final_amount or 0) - (sale.amount_paid or 0)))
 
 
@@ -846,6 +877,8 @@ class SaleService:
             payment_status=sale.payment_status,
             amount_paid=_round2(sale.amount_paid or 0),
             amount_outstanding=_outstanding_of(sale),
+            sale_status=sale.sale_status or SALE_STATUS_COMPLETED,
+            amount_refunded=_round2(sale.amount_refunded or 0),
             pricing_mode=sale.pricing_mode,
             purchase_cost_snapshot=sale.purchase_cost_snapshot if privileged else None,
             estimated_gross_margin=sale.estimated_gross_margin if privileged else None,
@@ -1072,11 +1105,13 @@ class SaleService:
         date_from: Optional[date],
         date_to: Optional[date],
         payment_status: Optional[str] = None,
+        sale_status: Optional[str] = None,
     ) -> SaleListResponse:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
         sales, total = await SaleRepository.list_by_tenant(
-            db, current_user.tenant_id, page, limit, search, date_from, date_to, payment_status
+            db, current_user.tenant_id, page, limit, search, date_from, date_to,
+            payment_status, sale_status,
         )
         return SaleListResponse(
             sales=[SaleService._build_response(s, current_user) for s in sales], total=total
@@ -1211,7 +1246,11 @@ class SaleService:
         sale = await SaleRepository.get_by_id(db, sale_id, current_user.tenant_id)
         if not sale:
             raise ResourceNotFoundException(f"Sale '{sale_id}' not found")
-        return SaleService._build_response(sale, current_user)
+        response = SaleService._build_response(sale, current_user)
+        # Attached on the single-sale read only: the invoice detail view needs
+        # the full reversal record, the paginated list does not.
+        response.sale_return = await SaleReturnService.get_for_sale(db, current_user, sale_id)
+        return response
 
     @staticmethod
     async def get_sale_orm(db: AsyncSession, current_user: User, sale_id: str) -> Sale:
@@ -1233,6 +1272,7 @@ class SaleService:
         date_to: Optional[date] = None,
         search: Optional[str] = None,
         payment_status: Optional[str] = None,
+        sale_status: Optional[str] = None,
     ) -> tuple[list, dict, str, date, date]:
         """Gathers exactly the filtered Sales History set for the Excel export,
         plus each sale's ledger rows. Same period vocabulary as Business
@@ -1245,7 +1285,7 @@ class SaleService:
             datetime.now(IST).date(), period, date_from, date_to
         )
         sales = await SaleRepository.list_all_filtered(
-            db, current_user.tenant_id, search, sel_from, sel_to, payment_status
+            db, current_user.tenant_id, search, sel_from, sel_to, payment_status, sale_status
         )
         ledger = await SalePaymentRepository.list_by_sale_ids(
             db, [s.id for s in sales], current_user.tenant_id
@@ -1337,6 +1377,14 @@ class SalePaymentService:
         if not sale:
             raise ResourceNotFoundException(f"Sale '{sale_id}' not found")
 
+        # Money can never be collected against a reversed sale: the customer's
+        # liability was closed by the return.
+        if (sale.sale_status or SALE_STATUS_COMPLETED) != SALE_STATUS_COMPLETED:
+            raise ConflictException(
+                f"Invoice {sale.invoice_number} is {sale.sale_status.lower()} — no further payment "
+                f"can be collected against it."
+            )
+
         amount = _round2(req.amount)
         if amount <= 0:
             raise ValidationException("Payment amount must be greater than zero")
@@ -1397,3 +1445,396 @@ class SalePaymentService:
 
         await db.commit()
         return await SalePaymentService.get_history(db, current_user, sale_id)
+
+
+
+def _derive_refund_status(amount_collected: float, amount_refunded: float) -> str:
+    """Payment status of a REVERSED sale. Driven purely by refunded-vs-collected
+    on the ledger.
+
+    refunded >= collected    -> REFUNDED             every rupee taken is back
+                                                     with the customer; a sale
+                                                     where nothing was ever
+                                                     collected is vacuously
+                                                     fully refunded
+    0 < refunded < collected -> PARTIALLY_REFUNDED   negotiated partial refund
+
+    The unpaid balance is never part of this: it is written off by the return,
+    not refunded, because the store never received it.
+    """
+    if amount_refunded >= amount_collected - _MONEY_EPSILON:
+        return PAYMENT_STATUS_REFUNDED
+    return PAYMENT_STATUS_PARTIALLY_REFUNDED
+
+
+class SaleReturnService:
+    """Sale-level return / cancellation.
+
+    The original invoice is never edited to hide a sale. Reversing a sale writes
+    a new SaleReturn row, appends a negative REFUND row to the existing
+    sale_payments ledger, and moves the sale's derived status columns — the
+    product snapshot, gold rate, gold-rate effective date, charges, GST,
+    customer price, purchase-cost snapshot, original margin, invoice number and
+    every earlier payment row stay exactly as recorded.
+
+    One sale carries one inventory item here, so a return is all-or-nothing;
+    there is no partial-return state, because the schema cannot represent one
+    line of a multi-line invoice coming back.
+    """
+
+    @staticmethod
+    def _build_response(
+        row: SaleReturn, actor_names: dict, current_stock_status: Optional[str] = None
+    ) -> SaleReturnResponse:
+        return SaleReturnResponse(
+            id=row.id,
+            sale_id=row.sale_id,
+            invoice_number=row.invoice_number,
+            inventory_item_id=row.inventory_item_id,
+            product_code=row.product_code,
+            return_type=row.return_type,
+            reason=row.reason,
+            original_sale_amount=_round2(row.original_sale_amount),
+            amount_collected_at_return=_round2(row.amount_collected_at_return),
+            refund_amount=_round2(row.refund_amount),
+            outstanding_written_off=_round2(row.outstanding_written_off),
+            refund_method=row.refund_method,
+            refund_reference_no=row.refund_reference_no,
+            inspection_status=row.inspection_status,
+            inspection_notes=row.inspection_notes,
+            inspected_at=row.inspected_at,
+            inspected_by=row.inspected_by,
+            inspected_by_name=actor_names.get(row.inspected_by) if row.inspected_by else None,
+            returned_at=row.returned_at,
+            processed_by=row.processed_by,
+            processed_by_name=actor_names.get(row.processed_by),
+            current_stock_status=current_stock_status,
+            created_at=row.created_at,
+        )
+
+    @staticmethod
+    async def _actor_names(db: AsyncSession, ids: list) -> dict:
+        wanted = {i for i in ids if i}
+        if not wanted:
+            return {}
+        rows = (await db.execute(select(User.id, User.name).where(User.id.in_(wanted)))).all()
+        return {r[0]: r[1] for r in rows}
+
+    @staticmethod
+    async def get_for_sale(
+        db: AsyncSession, current_user: User, sale_id: str
+    ) -> Optional[SaleReturnResponse]:
+        """The reversal record for one sale, or None if the sale is intact."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        row = await SaleReturnRepository.get_by_sale(db, sale_id, current_user.tenant_id)
+        if not row:
+            return None
+        item = await InventoryRepository.get_by_id(db, row.inventory_item_id, current_user.tenant_id)
+        names = await SaleReturnService._actor_names(db, [row.processed_by, row.inspected_by])
+        return SaleReturnService._build_response(row, names, item.stock_status if item else None)
+
+    @staticmethod
+    async def preview(
+        db: AsyncSession, current_user: User, sale_id: str
+    ) -> SaleReturnPreviewResponse:
+        """Backend-computed financial impact for the Admin confirmation dialog.
+        Read-only — asking for a preview stores nothing and locks nothing."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        sale = await SaleRepository.get_by_id(db, sale_id, current_user.tenant_id)
+        if not sale:
+            raise ResourceNotFoundException(f"Sale '{sale_id}' not found")
+
+        collected = _round2(
+            await SalePaymentRepository.sum_for_sale(db, sale_id, current_user.tenant_id)
+        )
+        current_status = sale.sale_status or SALE_STATUS_COMPLETED
+        item = await InventoryRepository.get_by_id(db, sale.inventory_item_id, current_user.tenant_id)
+        outstanding = _round2(max(0.0, sale.final_amount - collected))
+
+        blocked = None
+        if current_status != SALE_STATUS_COMPLETED:
+            blocked = (
+                f"Invoice {sale.invoice_number} is already {current_status.lower()} and cannot be "
+                f"reversed again."
+            )
+        elif item is None:
+            blocked = "The inventory item for this sale no longer exists and cannot be taken back."
+        elif item.stock_status != STOCK_STATUS_SOLD:
+            blocked = (
+                f"Inventory item {sale.product_code} is not in SOLD state "
+                f"(current: {item.stock_status})."
+            )
+
+        return SaleReturnPreviewResponse(
+            sale_id=sale.id,
+            invoice_number=sale.invoice_number,
+            product_code=sale.product_code,
+            product_name=sale.product_name,
+            sale_status=current_status,
+            payment_status=sale.payment_status,
+            original_sale_amount=_round2(sale.final_amount),
+            amount_collected=collected,
+            outstanding=outstanding,
+            max_refundable=collected,
+            outstanding_to_write_off=outstanding,
+            current_stock_status=item.stock_status if item else "MISSING",
+            resulting_stock_status=STOCK_STATUS_RETURNED_PENDING_INSPECTION,
+            can_return=blocked is None,
+            blocked_reason=blocked,
+        )
+
+    @staticmethod
+    async def process_return(
+        db: AsyncSession, current_user: User, sale_id: str, req: SaleReturnCreateRequest
+    ) -> SaleReturnResponse:
+        """Reverse one sale, in a single transaction.
+
+        Ordering is deliberate and mirrors SalePaymentService.record_payment:
+          1. lock the Sale row (tenant-scoped) for the rest of the transaction
+          2. reject an already-reversed sale
+          3. compute what was actually COLLECTED from the ledger, not the cache
+          4. reject a refund above that figure
+          5. take the inventory item back with a guarded status transition
+          6. append the negative REFUND row to the existing ledger
+          7. write the immutable SaleReturn row
+          8. move the sale's derived caches only
+          9. audit, then commit once
+
+        Step 1 serialises this against a concurrent collection on the same
+        invoice, so an Admin cannot take a payment against a sale another Admin
+        is reversing (record_payment additionally refuses a reversed sale).
+        Step 5's guarded UPDATE and the unique constraint on
+        sale_returns.sale_id are the two hard stops against a double return.
+        """
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        sale = await SaleRepository.get_by_id_for_update(db, sale_id, current_user.tenant_id)
+        if not sale:
+            raise ResourceNotFoundException(f"Sale '{sale_id}' not found")
+
+        current_status = sale.sale_status or SALE_STATUS_COMPLETED
+        if current_status != SALE_STATUS_COMPLETED:
+            raise ConflictException(
+                f"Invoice {sale.invoice_number} is already {current_status.lower()} and cannot be "
+                f"reversed again."
+            )
+        if await SaleReturnRepository.get_by_sale(db, sale_id, current_user.tenant_id):
+            raise ConflictException(
+                f"A return has already been processed against invoice {sale.invoice_number}."
+            )
+
+        collected = _round2(
+            await SalePaymentRepository.sum_for_sale(db, sale_id, current_user.tenant_id)
+        )
+        already_refunded = _round2(
+            await SalePaymentRepository.sum_refunds_for_sale(db, sale_id, current_user.tenant_id)
+        )
+        refundable = _round2(max(0.0, collected - already_refunded))
+
+        # Default: hand back exactly what was collected. Never the invoice
+        # total — the outstanding balance was never received, so refunding it
+        # would create money the store never took.
+        refund_amount = refundable if req.refund_amount is None else _round2(req.refund_amount)
+        if refund_amount < 0:
+            raise ValidationException("Refund amount cannot be negative")
+        if refund_amount > refundable + _MONEY_EPSILON:
+            raise ValidationException(
+                f"Refund of {refund_amount} exceeds the {refundable} actually collected on invoice "
+                f"{sale.invoice_number}. The store cannot refund money it never received — the "
+                f"unpaid balance is written off by the return, not refunded."
+            )
+        if refund_amount > 0 and not req.refund_method:
+            raise ValidationException("A refund method is required when money is being refunded")
+
+        outstanding_written_off = _round2(max(0.0, sale.final_amount - collected))
+
+        # Inventory comes back as the SAME original item — never a new row, and
+        # never straight into sellable stock.
+        moved = await InventoryRepository.transition_stock_status(
+            db,
+            sale.inventory_item_id,
+            current_user.tenant_id,
+            expected_from=STOCK_STATUS_SOLD,
+            to_status=STOCK_STATUS_RETURNED_PENDING_INSPECTION,
+        )
+        if not moved:
+            item = await InventoryRepository.get_by_id(
+                db, sale.inventory_item_id, current_user.tenant_id
+            )
+            found = item.stock_status if item else "MISSING"
+            raise ConflictException(
+                f"Inventory item {sale.product_code} is not in SOLD state (current: {found}) and "
+                f"cannot be taken back against invoice {sale.invoice_number}."
+            )
+
+        now = datetime.now(timezone.utc)
+        if refund_amount > 0:
+            refund_row = SalePayment(
+                id=f"sp_{uuid.uuid4().hex[:12]}",
+                tenant_id=current_user.tenant_id,
+                sale_id=sale.id,
+                # Negative on purpose: the ledger stays append-only and sums to
+                # the invoice's net cash position. No collection row is touched.
+                amount=-refund_amount,
+                payment_date=req.refund_date or datetime.now(IST).date(),
+                payment_method=req.refund_method,
+                source=PAYMENT_SOURCE_REFUND,
+                reference_no=req.refund_reference_no,
+                remarks=f"Refund on {req.return_type.lower()}: {req.reason}"[:500],
+                recorded_by=current_user.id,
+            )
+            await SalePaymentRepository.create(db, refund_row)
+
+        sale_return = SaleReturn(
+            id=f"sr_{uuid.uuid4().hex[:12]}",
+            tenant_id=current_user.tenant_id,
+            sale_id=sale.id,
+            invoice_number=sale.invoice_number,
+            inventory_item_id=sale.inventory_item_id,
+            product_code=sale.product_code,
+            return_type=req.return_type,
+            reason=req.reason,
+            original_sale_amount=_round2(sale.final_amount),
+            amount_collected_at_return=collected,
+            refund_amount=refund_amount,
+            outstanding_written_off=outstanding_written_off,
+            refund_method=req.refund_method,
+            refund_reference_no=req.refund_reference_no,
+            inspection_status=INSPECTION_PENDING,
+            returned_at=now,
+            processed_by=current_user.id,
+        )
+        await SaleReturnRepository.create(db, sale_return)
+
+        # Derived caches only. Every historical/financial column on the Sale —
+        # including final_amount and amount_paid — is left exactly as recorded.
+        total_refunded = _round2(already_refunded + refund_amount)
+        sale.amount_refunded = total_refunded
+        sale.sale_status = (
+            SALE_STATUS_CANCELLED
+            if req.return_type == RETURN_TYPE_CANCELLATION
+            else SALE_STATUS_RETURNED
+        )
+        previous_payment_status = sale.payment_status
+        sale.payment_status = _derive_refund_status(collected, total_refunded)
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="SALE_RETURN_PROCESS",
+            target_entity="sale_returns",
+            target_id=sale_return.id,
+            before_state={
+                "sale_status": current_status,
+                "payment_status": previous_payment_status,
+                "amount_paid": _round2(sale.amount_paid or 0),
+                "stock_status": STOCK_STATUS_SOLD,
+            },
+            after_state={
+                "sale_id": sale.id,
+                "invoice_number": sale.invoice_number,
+                "inventory_item_id": sale.inventory_item_id,
+                "product_code": sale.product_code,
+                "return_type": sale_return.return_type,
+                "reason": sale_return.reason,
+                "original_sale_amount": sale_return.original_sale_amount,
+                "amount_collected": collected,
+                "refund_amount": refund_amount,
+                "outstanding_written_off": outstanding_written_off,
+                "refund_method": sale_return.refund_method,
+                "stock_status": STOCK_STATUS_RETURNED_PENDING_INSPECTION,
+                "sale_status": sale.sale_status,
+                "payment_status": sale.payment_status,
+                "returned_at": now.isoformat(),
+                "processed_by": current_user.id,
+            },
+        )
+
+        await db.commit()
+        return await SaleReturnService.get_for_sale(db, current_user, sale_id)
+
+    @staticmethod
+    async def record_inspection(
+        db: AsyncSession, current_user: User, sale_id: str, req: SaleReturnInspectionRequest
+    ) -> SaleReturnResponse:
+        """The explicit second step of the inventory lifecycle:
+
+            SOLD -> RETURNED_PENDING_INSPECTION -> IN_STOCK | DAMAGED
+
+        A returned jewellery item is never silently resellable. RESALABLE puts
+        the SAME original item back into IN_STOCK; DAMAGED keeps it out of
+        sellable stock permanently. Guarded transition, so two Admins cannot
+        both decide the same item's fate.
+        """
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        row = await SaleReturnRepository.get_by_sale_for_update(db, sale_id, current_user.tenant_id)
+        if not row:
+            raise ResourceNotFoundException(f"No return recorded against sale '{sale_id}'")
+        if row.inspection_status != INSPECTION_PENDING:
+            raise ConflictException(
+                f"The return on invoice {row.invoice_number} was already inspected "
+                f"({row.inspection_status})."
+            )
+
+        to_status = (
+            STOCK_STATUS_IN_STOCK if req.outcome == INSPECTION_RESALABLE else STOCK_STATUS_DAMAGED
+        )
+        moved = await InventoryRepository.transition_stock_status(
+            db,
+            row.inventory_item_id,
+            current_user.tenant_id,
+            expected_from=STOCK_STATUS_RETURNED_PENDING_INSPECTION,
+            to_status=to_status,
+        )
+        if not moved:
+            item = await InventoryRepository.get_by_id(
+                db, row.inventory_item_id, current_user.tenant_id
+            )
+            found = item.stock_status if item else "MISSING"
+            raise ConflictException(
+                f"Item {row.product_code} is not awaiting inspection (current: {found})."
+            )
+
+        before_status = row.inspection_status
+        row.inspection_status = (
+            INSPECTION_RESALABLE if req.outcome == INSPECTION_RESALABLE else INSPECTION_DAMAGED
+        )
+        row.inspection_notes = req.notes
+        row.inspected_at = datetime.now(timezone.utc)
+        row.inspected_by = current_user.id
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="SALE_RETURN_INSPECT",
+            target_entity="sale_returns",
+            target_id=row.id,
+            before_state={
+                "inspection_status": before_status,
+                "stock_status": STOCK_STATUS_RETURNED_PENDING_INSPECTION,
+            },
+            after_state={
+                "invoice_number": row.invoice_number,
+                "inventory_item_id": row.inventory_item_id,
+                "product_code": row.product_code,
+                "inspection_status": row.inspection_status,
+                "inspection_notes": row.inspection_notes,
+                "stock_status": to_status,
+                "inspected_by": current_user.id,
+            },
+        )
+
+        await db.commit()
+        return await SaleReturnService.get_for_sale(db, current_user, sale_id)

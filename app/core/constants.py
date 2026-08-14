@@ -129,7 +129,58 @@ CHARGE_CALCULATION_TYPES = [CHARGE_TYPE_FIXED, CHARGE_TYPE_PER_GRAM, CHARGE_TYPE
 STOCK_STATUS_IN_STOCK = "IN_STOCK"
 STOCK_STATUS_SOLD = "SOLD"
 STOCK_STATUS_INACTIVE = "INACTIVE"
-INVENTORY_STOCK_STATUSES = [STOCK_STATUS_IN_STOCK, STOCK_STATUS_SOLD, STOCK_STATUS_INACTIVE]
+# A returned item never re-enters sellable stock automatically: the return puts
+# it in RETURNED_PENDING_INSPECTION, and only an explicit Admin inspection
+# decision moves it to IN_STOCK (resalable) or DAMAGED (permanently unsellable).
+# SaleService._get_sellable_item_and_rate only ever sells IN_STOCK, so both of
+# these are non-sellable by construction.
+STOCK_STATUS_RETURNED_PENDING_INSPECTION = "RETURNED_PENDING_INSPECTION"
+STOCK_STATUS_DAMAGED = "DAMAGED"
+INVENTORY_STOCK_STATUSES = [
+    STOCK_STATUS_IN_STOCK,
+    STOCK_STATUS_SOLD,
+    STOCK_STATUS_INACTIVE,
+    STOCK_STATUS_RETURNED_PENDING_INSPECTION,
+    STOCK_STATUS_DAMAGED,
+]
+
+# Sale.sale_status — the SALE lifecycle, deliberately separate from
+# Sale.payment_status (the money lifecycle). One sale carries exactly one
+# inventory item in this data model, so a sale is either wholly intact or
+# wholly reversed; there is no PARTIALLY_RETURNED state, because the schema
+# cannot represent one item of a multi-item invoice coming back.
+SALE_STATUS_COMPLETED = "COMPLETED"
+SALE_STATUS_RETURNED = "RETURNED"
+SALE_STATUS_CANCELLED = "CANCELLED"
+SALE_STATUSES = [SALE_STATUS_COMPLETED, SALE_STATUS_RETURNED, SALE_STATUS_CANCELLED]
+
+# Sale.payment_status — money only. PENDING/PARTIAL/PAID are derived from the
+# collection ledger; REFUNDED/PARTIALLY_REFUNDED are reached only through a
+# return, and are derived from refunded-vs-collected on the same ledger.
+PAYMENT_STATUS_PENDING = "PENDING"
+PAYMENT_STATUS_PARTIAL = "PARTIAL"
+PAYMENT_STATUS_PAID = "PAID"
+PAYMENT_STATUS_REFUNDED = "REFUNDED"
+PAYMENT_STATUS_PARTIALLY_REFUNDED = "PARTIALLY_REFUNDED"
+SALE_PAYMENT_STATUSES = [
+    PAYMENT_STATUS_PENDING, PAYMENT_STATUS_PARTIAL, PAYMENT_STATUS_PAID,
+    PAYMENT_STATUS_REFUNDED, PAYMENT_STATUS_PARTIALLY_REFUNDED,
+]
+
+# SaleReturn.return_type — why the sale was reversed. Mechanically identical
+# (item comes back, money is refunded, outstanding is written off); kept as
+# distinct labels because the Admin's books and the customer conversation
+# distinguish "cancelled before it left the counter" from "brought back after
+# delivery".
+RETURN_TYPE_RETURN = "RETURN"
+RETURN_TYPE_CANCELLATION = "CANCELLATION"
+SALE_RETURN_TYPES = [RETURN_TYPE_RETURN, RETURN_TYPE_CANCELLATION]
+
+# SaleReturn.inspection_status — outcome of the post-return physical check.
+INSPECTION_PENDING = "PENDING"
+INSPECTION_RESALABLE = "RESALABLE"
+INSPECTION_DAMAGED = "DAMAGED"
+SALE_RETURN_INSPECTION_STATUSES = [INSPECTION_PENDING, INSPECTION_RESALABLE, INSPECTION_DAMAGED]
 
 # Pricing mode — a label only. AUTO: system-calculated final amount (no
 # customer_price given). HYBRID: system shows a suggested price, admin may
