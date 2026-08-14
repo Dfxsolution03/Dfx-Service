@@ -29,6 +29,25 @@ from app.core.config import settings
 from app.core.logging import logger
 
 
+_EXTENSION_BY_CONTENT_TYPE = {
+    "image/jpeg": ".jpg",
+    "image/jpg": ".jpg",
+    "image/png": ".png",
+    "image/webp": ".webp",
+    "image/gif": ".gif",
+    "application/pdf": ".pdf",
+}
+
+
+def build_object_name(content_type: str) -> str:
+    """Server-generated object name. The client-supplied filename is never
+    used as (or embedded in) a storage key — the extension is derived from
+    the already-whitelisted content type, so a hostile filename can't
+    influence the stored path or the served file's type."""
+    extension = _EXTENSION_BY_CONTENT_TYPE.get((content_type or "").split(";")[0].strip().lower(), ".bin")
+    return f"{uuid.uuid4().hex}{extension}"
+
+
 class StorageProvider(ABC):
     @abstractmethod
     async def upload(
@@ -36,8 +55,10 @@ class StorageProvider(ABC):
     ) -> str:
         """Persists the file and returns a storage_path — a stable
         identifier this same provider can later resolve back to a URL via
-        get_public_url(). Never overwrites: callers always pass a fresh,
-        unique file_name."""
+        get_public_url(). Never overwrites: the object key is generated
+        server-side per upload (see build_object_name); `file_name` is the
+        client-supplied original and is retained for logging/metadata only,
+        never used to build the storage key."""
         raise NotImplementedError
 
     @abstractmethod
@@ -76,7 +97,7 @@ class LocalDiskStorageProvider(StorageProvider):
     async def upload(
         self, *, tenant_id: str, file_name: str, content_type: str, file_bytes: bytes
     ) -> str:
-        safe_name = f"{uuid.uuid4().hex}_{Path(file_name).name}"
+        safe_name = build_object_name(content_type)
         relative_path = f"{tenant_id}/{safe_name}"
         target = self._base_dir / relative_path
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -120,7 +141,7 @@ class SupabaseStorageProvider(StorageProvider):
     async def upload(
         self, *, tenant_id: str, file_name: str, content_type: str, file_bytes: bytes
     ) -> str:
-        safe_name = f"{uuid.uuid4().hex}_{Path(file_name).name}"
+        safe_name = build_object_name(content_type)
         storage_path = f"{tenant_id}/{safe_name}"
         async with httpx.AsyncClient(timeout=30) as client:
             response = await client.post(
