@@ -1,7 +1,7 @@
 """sale payment ledger (append-only) and derived sales.amount_paid
 
 Revision ID: c7d8e9f0a1b2
-Revises: a1b2c3d4e5f6
+Revises: b2c3d4e5f6a7
 Create Date: 2026-08-16 09:00:00.000000
 
 Phase 1 of the payment-status rework. Before this, Sale carried only a
@@ -28,7 +28,7 @@ import sqlalchemy as sa
 
 
 revision: str = 'c7d8e9f0a1b2'
-down_revision: Union[str, None] = 'a1b2c3d4e5f6'
+down_revision: Union[str, None] = 'b2c3d4e5f6a7'
 branch_labels: Union[str, Sequence[str], None] = None
 depends_on: Union[str, Sequence[str], None] = None
 
