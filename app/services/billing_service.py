@@ -180,12 +180,53 @@ class BillingCalculationEngine:
         """
         if purchase_cost is None:
             return None
-        net_revenue = (
-            final_amount / (1 + tax_rate_percent / 100)
-            if gst_applied and tax_rate_percent
-            else final_amount
+        return _round2(
+            BillingCalculationEngine._net_selling_value(final_amount, tax_rate_percent, gst_applied)
+            - purchase_cost
         )
-        return _round2(net_revenue - purchase_cost)
+
+    @staticmethod
+    def _net_selling_value(final_amount: float, tax_rate_percent: float, gst_applied: bool) -> float:
+        """Customer selling value with GST backed out — the ONE basis both
+        profit views compare against. GST is collected for the government and
+        was never revenue, so both historical-cost and today's-gold-value
+        profit use this figure, never the GST-inclusive final_amount."""
+        if gst_applied and tax_rate_percent:
+            return final_amount / (1 + tax_rate_percent / 100)
+        return final_amount
+
+    @staticmethod
+    def profit_views(breakdown: "PriceBreakdown", purchase_cost: Optional[float]) -> dict:
+        """The two business profit/loss views, both off the same net selling
+        value (see _net_selling_value):
+
+          historical:      net selling value - frozen historical purchase cost
+          current-gold:    net selling value - today's gold value
+
+        "Today's gold value" is breakdown.gold_value_amount (net gold weight x
+        the applied rate) — the same current-gold figure the calculator already
+        produces, never re-derived. Margins are signed: negative is a loss.
+        Historical view is None when no cost snapshot exists.
+        """
+        net = BillingCalculationEngine._net_selling_value(
+            breakdown.final_amount, breakdown.tax_rate_percent, breakdown.gst_applied
+        )
+        gold_value = breakdown.gold_value_amount
+        current_pl = _round2(net - gold_value)
+        current_margin = _round2(current_pl / gold_value * 100) if gold_value else None
+
+        hist_pl = None
+        hist_margin = None
+        if purchase_cost is not None:
+            hist_pl = _round2(net - purchase_cost)
+            hist_margin = _round2(hist_pl / purchase_cost * 100) if purchase_cost else None
+
+        return {
+            "historical_profit_or_loss": hist_pl,
+            "historical_profit_margin_percent": hist_margin,
+            "current_gold_value_profit_or_loss": current_pl,
+            "current_gold_value_margin_percent": current_margin,
+        }
 
     @staticmethod
     def calculate(
@@ -926,16 +967,21 @@ class SaleService:
             making_charge_value, wastage_value, gold_profit_percent,
         )
         privileged = _is_privileged(current_user)
-        profit_or_loss = (
-            BillingCalculationEngine.realized_profit_or_loss(
-                breakdown.final_amount, breakdown.tax_rate_percent, breakdown.gst_applied, item.purchase_cost
-            )
-            if privileged else None
+        # Both profit views are commercially sensitive (they expose cost and
+        # metal margin), so they are gated exactly like the existing
+        # profit_or_loss — null for Staff.
+        views = (
+            BillingCalculationEngine.profit_views(breakdown, item.purchase_cost)
+            if privileged else {}
         )
         return SaleQuoteResponse(
             inventory_item=InventoryService._build_response(item, current_user),
             breakdown=breakdown,
-            profit_or_loss=profit_or_loss,
+            profit_or_loss=views.get("historical_profit_or_loss"),
+            historical_profit_or_loss=views.get("historical_profit_or_loss"),
+            historical_profit_margin_percent=views.get("historical_profit_margin_percent"),
+            current_gold_value_profit_or_loss=views.get("current_gold_value_profit_or_loss"),
+            current_gold_value_margin_percent=views.get("current_gold_value_margin_percent"),
         )
 
     @staticmethod

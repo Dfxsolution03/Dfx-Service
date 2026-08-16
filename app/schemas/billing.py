@@ -329,7 +329,17 @@ class SaleQuoteResponse(BaseModel):
     purchase_cost on inventory_item."""
     inventory_item: InventoryItemResponse
     breakdown: PriceBreakdown
+    # profit_or_loss is the historical-cost view, kept for backward
+    # compatibility; historical_profit_or_loss is the same figure under the
+    # explicit name. Both null for Staff callers.
     profit_or_loss: Optional[float] = None
+    # Two authoritative profit/loss views, both off net-of-GST selling value.
+    # Historical: vs frozen purchase cost. Current gold value: vs today's gold
+    # value (breakdown.gold_value_amount). Signed — negative is a loss.
+    historical_profit_or_loss: Optional[float] = None
+    historical_profit_margin_percent: Optional[float] = None
+    current_gold_value_profit_or_loss: Optional[float] = None
+    current_gold_value_margin_percent: Optional[float] = None
 
 
 class SaleCreateRequest(BaseModel):
