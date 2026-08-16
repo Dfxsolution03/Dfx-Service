@@ -1612,7 +1612,8 @@ class SaleReturnService:
 
     @staticmethod
     def _build_response(
-        row: SaleReturn, actor_names: dict, current_stock_status: Optional[str] = None
+        row: SaleReturn, actor_names: dict, current_stock_status: Optional[str] = None,
+        scheme_restored: float = 0.0,
     ) -> SaleReturnResponse:
         return SaleReturnResponse(
             id=row.id,
@@ -1626,6 +1627,7 @@ class SaleReturnService:
             amount_collected_at_return=_round2(row.amount_collected_at_return),
             refund_amount=_round2(row.refund_amount),
             outstanding_written_off=_round2(row.outstanding_written_off),
+            scheme_restored=_round2(scheme_restored),
             refund_method=row.refund_method,
             refund_reference_no=row.refund_reference_no,
             inspection_status=row.inspection_status,
@@ -1660,7 +1662,12 @@ class SaleReturnService:
             return None
         item = await InventoryRepository.get_by_id(db, row.inventory_item_id, current_user.tenant_id)
         names = await SaleReturnService._actor_names(db, [row.processed_by, row.inspected_by])
-        return SaleReturnService._build_response(row, names, item.stock_status if item else None)
+        scheme_restored = await SchemeRedemptionRepository.sum_restorations_for_sale(
+            db, sale_id, current_user.tenant_id
+        )
+        return SaleReturnService._build_response(
+            row, names, item.stock_status if item else None, scheme_restored
+        )
 
     @staticmethod
     async def preview(

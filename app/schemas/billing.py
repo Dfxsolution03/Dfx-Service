@@ -578,6 +578,10 @@ class SaleReturnResponse(BaseModel):
     amount_collected_at_return: float
     refund_amount: float
     outstanding_written_off: float
+    # Scheme credit restored to the customer's enrollment by this return (0 for
+    # a cash-only sale). Derived from the signed scheme_redemptions reversal
+    # rows for this sale — never a fresh calculation.
+    scheme_restored: float = 0.0
     refund_method: Optional[str] = None
     refund_reference_no: Optional[str] = None
     inspection_status: str

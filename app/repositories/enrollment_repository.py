@@ -119,6 +119,20 @@ class SchemeRedemptionRepository:
         return row
 
     @staticmethod
+    async def sum_restorations_for_sale(db: AsyncSession, sale_id: str, tenant_id: str) -> float:
+        """Scheme credit restored to enrollments by returning ONE sale, as a
+        POSITIVE figure. Restoration rows are the negative reversal rows written
+        during return processing, carrying that sale's sale_id; scoping to
+        sale_id + tenant_id means later or unrelated redemptions (different
+        sale_id) can never be included."""
+        stmt = select(func.coalesce(func.sum(SchemeRedemption.amount), 0.0)).where(
+            SchemeRedemption.sale_id == sale_id,
+            SchemeRedemption.tenant_id == tenant_id,
+            SchemeRedemption.amount < 0,
+        )
+        return -float((await db.execute(stmt)).scalar_one())
+
+    @staticmethod
     async def sum_for_enrollment(db: AsyncSession, enrollment_id: str, tenant_id: str) -> float:
         """Total scheme credit already spent against jewellery sales."""
         stmt = select(func.coalesce(func.sum(SchemeRedemption.amount), 0.0)).where(
