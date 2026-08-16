@@ -1272,6 +1272,44 @@ class SaleService:
         )
 
     @staticmethod
+    async def _period_block(
+        db: AsyncSession, tenant_id: str, start_dt: datetime, end_dt: datetime, privileged: bool
+    ) -> BillingPeriodSummary:
+        """One period's full accounting block — a composition layer over the
+        three authoritative aggregations, never a re-implementation:
+          - get_period_summary   sale-date: gross/net/returns/profit/tax
+          - get_collections_summary  payment-date: cash / scheme / refunds
+          - get_receivables_summary  active COMPLETED sales: paid/outstanding/counts
+        Each is one grouped SQL; no per-row Python, no N+1. Scheme redemption is
+        kept out of cash_collected by get_collections_summary itself."""
+        raw = await SaleRepository.get_period_summary(db, tenant_id, start_dt, end_dt)
+        coll = await SaleRepository.get_collections_summary(db, tenant_id, start_dt, end_dt)
+        rec = await SaleRepository.get_receivables_summary(db, tenant_id, start_dt, end_dt)
+        block = {
+            "total_sales": raw["total_sales"],
+            "total_profit": raw["total_profit"] if privileged else None,
+            "total_loss": raw["total_loss"] if privileged else None,
+            "bill_count": raw["bill_count"],
+            "items_sold": raw["items_sold"],
+            "total_tax": raw["total_tax"],
+            "avg_bill_value": raw["avg_bill_value"],
+            "gross_sales": raw["gross_sales"],
+            "sales_returns": raw["sales_returns"],
+            "return_count": raw["return_count"],
+            "total_refunded": raw["total_refunded"],
+            "cash_collected": coll["cash_collected"],
+            "scheme_redemption": coll["scheme_redemption"],
+            "refunds_paid": coll["refunds"],
+            "total_paid": rec["total_paid"],
+            "total_outstanding": rec["total_outstanding"],
+            "paid_count": rec["paid_count"],
+            "partial_count": rec["partial_count"],
+            "pending_count": rec["pending_count"],
+            "sale_count": rec["sale_count"],
+        }
+        return BillingPeriodSummary(**block)
+
+    @staticmethod
     async def get_dashboard_summary(
         db: AsyncSession, current_user: User,
         period: Optional[str] = None, date_from: Optional[date] = None, date_to: Optional[date] = None,
@@ -1289,26 +1327,22 @@ class SaleService:
         today_end = datetime.combine(now_ist.date(), datetime.max.time(), tzinfo=IST)
         month_start = today_start.replace(day=1)
 
-        today_raw = await SaleRepository.get_period_summary(db, current_user.tenant_id, today_start, today_end)
-        month_raw = await SaleRepository.get_period_summary(db, current_user.tenant_id, month_start, today_end)
-        recent = await SaleRepository.get_recent(db, current_user.tenant_id, limit=5)
+        tid = current_user.tenant_id
+        today_block = await SaleService._period_block(db, tid, today_start, today_end, privileged)
+        month_block = await SaleService._period_block(db, tid, month_start, today_end, privileged)
+        recent = await SaleRepository.get_recent(db, tid, limit=5)
         rate = await GoldRateService.get_customer_today_rate(db, current_user)
 
         sel_from, sel_to, sel_label = SaleService._resolve_period_range(now_ist.date(), period, date_from, date_to)
         sel_start_dt = datetime.combine(sel_from, datetime.min.time(), tzinfo=IST)
         sel_end_dt = datetime.combine(sel_to, datetime.max.time(), tzinfo=IST)
-        selected_raw = await SaleRepository.get_period_summary(db, current_user.tenant_id, sel_start_dt, sel_end_dt)
-
-        if not privileged:
-            today_raw = {**today_raw, "total_profit": None, "total_loss": None}
-            month_raw = {**month_raw, "total_profit": None, "total_loss": None}
-            selected_raw = {**selected_raw, "total_profit": None, "total_loss": None}
+        selected_block = await SaleService._period_block(db, tid, sel_start_dt, sel_end_dt, privileged)
 
         return BillingDashboardSummaryResponse(
-            today=BillingPeriodSummary(**today_raw),
-            this_month=BillingPeriodSummary(**month_raw),
+            today=today_block,
+            this_month=month_block,
             today_gold_rate_24k=rate.rate_24k if rate else None,
-            selected_period=BillingPeriodSummary(**selected_raw),
+            selected_period=selected_block,
             selected_period_label=sel_label,
             selected_date_from=sel_from,
             selected_date_to=sel_to,

@@ -663,6 +663,18 @@ class BillingPeriodSummary(BaseModel):
     sales_returns: float = 0.0
     return_count: int = 0
     total_refunded: float = 0.0
+    # Money movement (payment-ledger date axis) — same three distinct concepts
+    # as business-summary: cash in, scheme settlement (never cash), refunds out.
+    cash_collected: float = 0.0
+    scheme_redemption: float = 0.0
+    refunds_paid: float = 0.0
+    # Receivables position over the period (active COMPLETED sales only).
+    total_paid: float = 0.0
+    total_outstanding: float = 0.0
+    paid_count: int = 0
+    partial_count: int = 0
+    pending_count: int = 0
+    sale_count: int = 0
 
 
 class RecentSaleSummary(BaseModel):
