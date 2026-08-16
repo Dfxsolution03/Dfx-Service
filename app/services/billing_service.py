@@ -34,6 +34,7 @@ from app.models.billing import (
     SaleReturn,
     PAYMENT_SOURCE_COUNTER,
     PAYMENT_SOURCE_REFUND,
+    PAYMENT_SOURCE_SCHEME_REDEMPTION,
 )
 from app.repositories.billing_repository import (
     VendorRepository,
@@ -43,6 +44,13 @@ from app.repositories.billing_repository import (
     SaleRepository,
     SalePaymentRepository,
     SaleReturnRepository,
+)
+from app.repositories.enrollment_repository import EnrollmentRepository, SchemeRedemptionRepository
+from app.models.enrollment import (
+    SchemeRedemption,
+    STATUS_ACTIVE as ENR_ACTIVE,
+    STATUS_CLOSED as ENR_CLOSED,
+    STATUS_REDEEMED as ENR_REDEEMED,
 )
 from app.repositories.audit_repository import AuditRepository
 from app.services.storage_service import get_storage_provider
@@ -1699,22 +1707,30 @@ class SaleReturnService:
         collected = _round2(
             await SalePaymentRepository.sum_for_sale(db, sale_id, current_user.tenant_id)
         )
+        # sum_for_sale counts SCHEME_REDEMPTION as settlement. The scheme portion
+        # is customer credit, NOT cash — it is restored to the enrollment below,
+        # never handed back as money. Only the real cash collected is refundable.
+        scheme_rows = await SalePaymentRepository.scheme_redemption_rows_for_sale(
+            db, sale_id, current_user.tenant_id
+        )
+        scheme_settled = _round2(sum(r.amount for r in scheme_rows))
+        cash_collected = _round2(collected - scheme_settled)
         already_refunded = _round2(
             await SalePaymentRepository.sum_refunds_for_sale(db, sale_id, current_user.tenant_id)
         )
-        refundable = _round2(max(0.0, collected - already_refunded))
+        refundable = _round2(max(0.0, cash_collected - already_refunded))
 
-        # Default: hand back exactly what was collected. Never the invoice
-        # total — the outstanding balance was never received, so refunding it
-        # would create money the store never took.
+        # Default: hand back exactly the CASH collected. Never the invoice total
+        # (unpaid balance was never received) and never the scheme portion (that
+        # is restored to the enrollment, not refunded).
         refund_amount = refundable if req.refund_amount is None else _round2(req.refund_amount)
         if refund_amount < 0:
             raise ValidationException("Refund amount cannot be negative")
         if refund_amount > refundable + _MONEY_EPSILON:
             raise ValidationException(
-                f"Refund of {refund_amount} exceeds the {refundable} actually collected on invoice "
-                f"{sale.invoice_number}. The store cannot refund money it never received — the "
-                f"unpaid balance is written off by the return, not refunded."
+                f"Refund of {refund_amount} exceeds the {refundable} cash actually collected on "
+                f"invoice {sale.invoice_number}. The store cannot refund money it never received; the "
+                f"unpaid balance is written off and any scheme credit is restored, not refunded."
             )
         if refund_amount > 0 and not req.refund_method:
             raise ValidationException("A refund method is required when money is being refunded")
@@ -1779,6 +1795,45 @@ class SaleReturnService:
         )
         await SaleReturnRepository.create(db, sale_return)
 
+        # Restore scheme credit (Option 1): reverse each SCHEME_REDEMPTION that
+        # settled this sale by appending a NEGATIVE scheme_redemptions row, which
+        # nets in the derived balance (contributions - SUM(redemptions)). The
+        # original redemption row is never deleted or mutated. An enrollment that
+        # was flipped REDEEMED only because its balance hit zero is reopened —
+        # to CLOSED if it had been closed (redeemable, not contributable), else
+        # ACTIVE. Rows grouped by enrollment so a multi-enrollment sale restores
+        # each correctly. Later redemptions from the same enrollment are untouched,
+        # so the balance can never inflate past true entitlement.
+        restored_total = 0.0
+        by_enrollment: dict = {}
+        for r in scheme_rows:
+            if r.enrollment_id:
+                by_enrollment[r.enrollment_id] = _round2(by_enrollment.get(r.enrollment_id, 0.0) + r.amount)
+        for enrollment_id, amt in by_enrollment.items():
+            amt = _round2(amt)
+            if amt <= 0:
+                continue
+            enrollment = await EnrollmentRepository.get_enrollment_by_id_for_update(
+                db, enrollment_id, current_user.tenant_id
+            )
+            if not enrollment:
+                continue
+            reversal = SchemeRedemption(
+                id=f"srd_{uuid.uuid4().hex[:12]}",
+                tenant_id=current_user.tenant_id,
+                enrollment_id=enrollment_id,
+                customer_id=enrollment.customer_id,
+                sale_id=sale.id,
+                invoice_number=sale.invoice_number,
+                amount=-amt,
+                redeemed_at=now,
+                recorded_by=current_user.id,
+            )
+            await SchemeRedemptionRepository.create(db, reversal)
+            if enrollment.status == ENR_REDEEMED:
+                enrollment.status = ENR_CLOSED if enrollment.closed_at else ENR_ACTIVE
+            restored_total = _round2(restored_total + amt)
+
         # Derived caches only. Every historical/financial column on the Sale —
         # including final_amount and amount_paid — is left exactly as recorded.
         total_refunded = _round2(already_refunded + refund_amount)
@@ -1789,7 +1844,10 @@ class SaleReturnService:
             else SALE_STATUS_RETURNED
         )
         previous_payment_status = sale.payment_status
-        sale.payment_status = _derive_refund_status(collected, total_refunded)
+        # Refund completeness is measured against CASH collected: the scheme
+        # portion was restored to the enrollment, not refunded, so it must not
+        # drag the status to PARTIALLY_REFUNDED.
+        sale.payment_status = _derive_refund_status(cash_collected, total_refunded)
 
         await AuditRepository.create_log(
             db,
@@ -1816,6 +1874,8 @@ class SaleReturnService:
                 "original_sale_amount": sale_return.original_sale_amount,
                 "amount_collected": collected,
                 "refund_amount": refund_amount,
+                "cash_collected": cash_collected,
+                "scheme_restored": restored_total,
                 "outstanding_written_off": outstanding_written_off,
                 "refund_method": sale_return.refund_method,
                 "stock_status": STOCK_STATUS_RETURNED_PENDING_INSPECTION,

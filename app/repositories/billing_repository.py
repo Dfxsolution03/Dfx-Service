@@ -5,6 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.constants import SALE_STATUS_COMPLETED
 from app.models.billing import (
+    PAYMENT_SOURCE_SCHEME_REDEMPTION,
     Vendor,
     CategoryPricingDefault,
     TenantBillingDefaults,
@@ -446,6 +447,18 @@ class SalePaymentRepository:
             SalePayment.source != PAYMENT_SOURCE_REFUND,
         )
         return float((await db.execute(stmt)).scalar_one())
+
+    @staticmethod
+    async def scheme_redemption_rows_for_sale(db: AsyncSession, sale_id: str, tenant_id: str):
+        """The SCHEME_REDEMPTION ledger rows that settled one sale, carrying the
+        funding enrollment_id. Used by the return path to restore scheme credit
+        rather than refunding it as cash."""
+        stmt = select(SalePayment).where(
+            SalePayment.sale_id == sale_id,
+            SalePayment.tenant_id == tenant_id,
+            SalePayment.source == PAYMENT_SOURCE_SCHEME_REDEMPTION,
+        )
+        return list((await db.execute(stmt)).scalars().all())
 
     @staticmethod
     async def list_by_sale_ids(
