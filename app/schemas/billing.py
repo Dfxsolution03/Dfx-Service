@@ -637,6 +637,13 @@ class BusinessSummaryResponse(BaseModel):
     sales_returns: float = 0.0
     return_count: int = 0
     total_refunded: float = 0.0
+    # Money-movement over the SAME period but on the payment-ledger date axis
+    # (collection date, not sale date). Three distinct concepts, never merged:
+    # cash actually collected, scheme-credit settlements, and refunds paid out.
+    # Scheme redemption settles invoices but is never cash.
+    cash_collected: float = 0.0
+    scheme_redemption: float = 0.0
+    refunds_paid: float = 0.0
 
 
 class BillingPeriodSummary(BaseModel):

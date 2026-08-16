@@ -1219,10 +1219,14 @@ class SaleService:
         sel_from, sel_to, sel_label = SaleService._resolve_period_range(
             now_ist.date(), period, date_from, date_to
         )
+        period_start = datetime.combine(sel_from, datetime.min.time(), tzinfo=IST)
+        period_end = datetime.combine(sel_to, datetime.max.time(), tzinfo=IST)
         raw = await SaleRepository.get_period_summary(
-            db, current_user.tenant_id,
-            datetime.combine(sel_from, datetime.min.time(), tzinfo=IST),
-            datetime.combine(sel_to, datetime.max.time(), tzinfo=IST),
+            db, current_user.tenant_id, period_start, period_end,
+        )
+        # Money movement on the payment-ledger date axis for the same range.
+        coll = await SaleRepository.get_collections_summary(
+            db, current_user.tenant_id, period_start, period_end,
         )
         privileged = _is_privileged(current_user)
         return BusinessSummaryResponse(
@@ -1236,6 +1240,13 @@ class SaleService:
             items_sold=raw["items_sold"],
             total_tax=raw["total_tax"],
             average_bill_value=raw["avg_bill_value"],
+            gross_sales=raw["gross_sales"],
+            sales_returns=raw["sales_returns"],
+            return_count=raw["return_count"],
+            total_refunded=raw["total_refunded"],
+            cash_collected=coll["cash_collected"],
+            scheme_redemption=coll["scheme_redemption"],
+            refunds_paid=coll["refunds"],
         )
 
     @staticmethod

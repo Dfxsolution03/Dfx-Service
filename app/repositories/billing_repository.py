@@ -308,6 +308,44 @@ class SaleRepository:
         }
 
     @staticmethod
+    async def get_collections_summary(
+        db: AsyncSession, tenant_id: str, start_dt: datetime, end_dt: datetime
+    ) -> dict:
+        """Money-movement aggregation off the SalePayment ledger by PAYMENT_DATE
+        (the collection event date), NOT the sale date — so a payment collected
+        the day after the sale counts on the day it was taken.
+
+        Three distinct concepts, never merged:
+          - cash_collected: real positive customer collections (any source that
+            is neither a refund nor a scheme settlement). This is actual money in.
+          - scheme_redemption: SCHEME_REDEMPTION settlements. Settles an invoice
+            but is customer scheme credit, never cash — reported separately.
+          - refunds: REFUND rows (stored negative) returned as a positive figure.
+        Tenant-scoped. payment_date is a Date column; the caller passes a
+        [date, date] range via the shared period resolver.
+        """
+        from datetime import date as _date
+        start_d = start_dt.date() if hasattr(start_dt, "date") else start_dt
+        end_d = end_dt.date() if hasattr(end_dt, "date") else end_dt
+        is_refund = SalePayment.source == PAYMENT_SOURCE_REFUND
+        is_scheme = SalePayment.source == PAYMENT_SOURCE_SCHEME_REDEMPTION
+        stmt = select(
+            func.coalesce(func.sum(case((~is_refund & ~is_scheme, SalePayment.amount), else_=0.0)), 0.0),
+            func.coalesce(func.sum(case((is_scheme, SalePayment.amount), else_=0.0)), 0.0),
+            func.coalesce(func.sum(case((is_refund, SalePayment.amount), else_=0.0)), 0.0),
+        ).where(
+            SalePayment.tenant_id == tenant_id,
+            SalePayment.payment_date >= start_d,
+            SalePayment.payment_date <= end_d,
+        )
+        cash, scheme, refunds = (await db.execute(stmt)).one()
+        return {
+            "cash_collected": float(cash),
+            "scheme_redemption": float(scheme),
+            "refunds": float(-refunds),  # stored negative; report positive
+        }
+
+    @staticmethod
     async def get_receivables_summary(
         db: AsyncSession, tenant_id: str, start_dt: datetime, end_dt: datetime
     ) -> dict:
