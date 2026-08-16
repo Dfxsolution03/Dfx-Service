@@ -307,6 +307,48 @@ class SaleRepository:
         }
 
     @staticmethod
+    async def get_receivables_summary(
+        db: AsyncSession, tenant_id: str, start_dt: datetime, end_dt: datetime
+    ) -> dict:
+        """Receivables aggregation off the Sale snapshot columns, which are the
+        transactionally-synced projection of the SalePayment ledger
+        (amount_paid/payment_status are recomputed on every ledger write, see
+        SalePaymentService.record_payment). No new payment math is introduced.
+
+        Only intact sales (sale_status == COMPLETED) are active receivables: a
+        returned/cancelled sale had its balance written off, so counting its
+        outstanding would overstate what customers still owe.
+        """
+        paid = func.coalesce(Sale.amount_paid, 0.0)
+        outstanding = case((Sale.final_amount - paid > 0, Sale.final_amount - paid), else_=0.0)
+        stmt = select(
+            func.coalesce(func.sum(Sale.final_amount), 0.0),
+            func.coalesce(func.sum(paid), 0.0),
+            func.coalesce(func.sum(outstanding), 0.0),
+            func.coalesce(func.sum(case((Sale.payment_status == "PAID", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((Sale.payment_status == "PARTIAL", 1), else_=0)), 0),
+            func.coalesce(func.sum(case((Sale.payment_status == "PENDING", 1), else_=0)), 0),
+            func.count(Sale.id),
+        ).where(
+            Sale.tenant_id == tenant_id,
+            Sale.sale_status == SALE_STATUS_COMPLETED,
+            Sale.sale_timestamp >= start_dt,
+            Sale.sale_timestamp <= end_dt,
+        )
+        (invoiced, total_paid, total_outstanding, paid_c, partial_c, pending_c, cnt) = (
+            await db.execute(stmt)
+        ).one()
+        return {
+            "total_invoiced": float(invoiced),
+            "total_paid": float(total_paid),
+            "total_outstanding": float(total_outstanding),
+            "paid_count": int(paid_c),
+            "partial_count": int(partial_c),
+            "pending_count": int(pending_c),
+            "sale_count": int(cnt),
+        }
+
+    @staticmethod
     async def get_recent(db: AsyncSession, tenant_id: str, limit: int = 5) -> List[Sale]:
         stmt = (
             select(Sale)

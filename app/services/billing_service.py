@@ -86,6 +86,7 @@ from app.schemas.billing import (
     RecentSaleSummary,
     BillingDashboardSummaryResponse,
     BusinessSummaryResponse,
+    ReceivablesSummaryResponse,
 )
 
 _DEFAULT_FIELD_NAMES = [
@@ -1227,6 +1228,28 @@ class SaleService:
             items_sold=raw["items_sold"],
             total_tax=raw["total_tax"],
             average_bill_value=raw["avg_bill_value"],
+        )
+
+    @staticmethod
+    async def get_receivables_summary(
+        db: AsyncSession, current_user: User,
+        period: Optional[str] = None, date_from: Optional[date] = None, date_to: Optional[date] = None,
+    ) -> ReceivablesSummaryResponse:
+        """Authoritative receivables over a period — same date-range vocabulary
+        as Business History (see _resolve_period_range), tenant-scoped, read
+        only. Reuses the SalePayment-synced Sale columns; no new payment math."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        sel_from, sel_to, sel_label = SaleService._resolve_period_range(
+            datetime.now(IST).date(), period, date_from, date_to
+        )
+        raw = await SaleRepository.get_receivables_summary(
+            db, current_user.tenant_id,
+            datetime.combine(sel_from, datetime.min.time(), tzinfo=IST),
+            datetime.combine(sel_to, datetime.max.time(), tzinfo=IST),
+        )
+        return ReceivablesSummaryResponse(
+            period=sel_label, date_from=sel_from, date_to=sel_to, **raw
         )
 
     @staticmethod

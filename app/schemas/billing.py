@@ -599,6 +599,23 @@ class SaleReturnResponse(BaseModel):
 # Dashboard Billing Summary
 # =============================================================================
 
+class ReceivablesSummaryResponse(BaseModel):
+    """Read-only receivables position over a period. Derived from the
+    ledger-synced Sale columns; reversed sales are excluded (their balance was
+    written off). total_invoiced == total_paid + total_outstanding within
+    rounding tolerance."""
+    period: str
+    date_from: date
+    date_to: date
+    total_invoiced: float
+    total_paid: float
+    total_outstanding: float
+    paid_count: int
+    partial_count: int
+    pending_count: int
+    sale_count: int
+
+
 class BusinessSummaryResponse(BaseModel):
     """Backs the Dashboard's Business History block — one real backend
     aggregation per selected period/custom range, never a client-side

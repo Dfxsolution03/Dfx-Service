@@ -417,6 +417,31 @@ async def get_business_summary(
     )
 
 
+@router.get(
+    "/billing/receivables-summary",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Receivables Summary (Admin)",
+    description=(
+        "Read-only receivables over a named `period` or an explicit date_from+date_to range: "
+        "total invoiced, total paid, total outstanding, and PAID/PARTIAL/PENDING counts. Derived "
+        "from the SalePayment-synced sale columns; reversed sales are excluded, so this reflects "
+        "only what customers still owe."
+    ),
+)
+async def get_receivables_summary(
+    period: Optional[str] = None,
+    date_from: Optional[date] = None,
+    date_to: Optional[date] = None,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    summary = await SaleService.get_receivables_summary(db, current_user, period, date_from, date_to)
+    return StandardSuccessResponse(
+        success=True, message="Receivables summary retrieved successfully", data=summary.model_dump(mode="json")
+    )
+
+
 # =============================================================================
 # 3. Sales History
 # =============================================================================
