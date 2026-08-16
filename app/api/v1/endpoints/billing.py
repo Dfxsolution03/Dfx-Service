@@ -574,6 +574,30 @@ async def record_sale_payment(
 # =============================================================================
 
 @router.get(
+    "/billing/inventory/{inventory_item_id}/return",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Pending-Inspection Return For An Inventory Item (Admin)",
+    description=(
+        "Read-only. Returns the return record awaiting inspection for this inventory item, so the "
+        "Inventory page can drive the same inspection action as Sales History. Tenant scoped; "
+        "null when nothing is awaiting inspection."
+    ),
+)
+async def get_inventory_item_return(
+    inventory_item_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    record = await SaleReturnService.get_for_inventory_item(db, current_user, inventory_item_id)
+    return StandardSuccessResponse(
+        success=True,
+        message="Inventory return retrieved successfully",
+        data={"saleReturn": record.model_dump(mode="json") if record else None},
+    )
+
+
+@router.get(
     "/billing/sales/{sale_id}/return/preview",
     response_model=StandardSuccessResponse,
     status_code=status.HTTP_200_OK,

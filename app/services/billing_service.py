@@ -1670,6 +1670,22 @@ class SaleReturnService:
         )
 
     @staticmethod
+    async def get_for_inventory_item(
+        db: AsyncSession, current_user: User, inventory_item_id: str
+    ) -> Optional[SaleReturnResponse]:
+        """The pending-inspection return for one inventory item, so the Inventory
+        page can drive the SAME inspection action Sales History uses. Tenant
+        scoped; returns None when the item has no return awaiting inspection."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        row = await SaleReturnRepository.get_pending_by_inventory_item(
+            db, inventory_item_id, current_user.tenant_id
+        )
+        if not row:
+            return None
+        return await SaleReturnService.get_for_sale(db, current_user, row.sale_id)
+
+    @staticmethod
     async def preview(
         db: AsyncSession, current_user: User, sale_id: str
     ) -> SaleReturnPreviewResponse:

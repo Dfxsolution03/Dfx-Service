@@ -3,7 +3,7 @@ from typing import List, Optional, Tuple
 from sqlalchemy import select, update, func, or_, case
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.constants import SALE_STATUS_COMPLETED
+from app.core.constants import SALE_STATUS_COMPLETED, INSPECTION_PENDING
 from app.models.billing import (
     PAYMENT_SOURCE_SCHEME_REDEMPTION,
     Vendor,
@@ -543,6 +543,20 @@ class SaleReturnRepository:
     async def get_by_sale(db: AsyncSession, sale_id: str, tenant_id: str) -> Optional[SaleReturn]:
         stmt = select(SaleReturn).where(
             SaleReturn.sale_id == sale_id, SaleReturn.tenant_id == tenant_id
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def get_pending_by_inventory_item(
+        db: AsyncSession, inventory_item_id: str, tenant_id: str
+    ) -> Optional[SaleReturn]:
+        """The return still awaiting inspection for one inventory item, tenant
+        scoped. An item can be returned, restocked and returned again over its
+        life, so only the PENDING one is the active inspection target."""
+        stmt = select(SaleReturn).where(
+            SaleReturn.inventory_item_id == inventory_item_id,
+            SaleReturn.tenant_id == tenant_id,
+            SaleReturn.inspection_status == INSPECTION_PENDING,
         )
         return (await db.execute(stmt)).scalar_one_or_none()
 
