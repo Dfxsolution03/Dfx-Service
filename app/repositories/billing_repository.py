@@ -271,6 +271,10 @@ class SaleRepository:
             (Sale.purchase_cost_snapshot.is_(None), 0.0),
             else_=net_revenue - Sale.purchase_cost_snapshot,
         )
+        # Phase A current-gold-value profit: net selling value minus the FROZEN
+        # gold value recorded at sale time (Sale.gold_value_amount) — never
+        # re-derived from today's rate. Signed aggregate over intact sales only.
+        current_gold_pl = net_revenue - Sale.gold_value_amount
         # A reversed sale is excluded from every NET figure (net sales, profit,
         # loss, tax, bill count, items sold) but is still reported on its own as
         # gross + returns, so the period reconciles as
@@ -288,10 +292,12 @@ class SaleRepository:
             func.coalesce(func.sum(case((reversed_, Sale.final_amount), else_=0.0)), 0.0),
             func.coalesce(func.sum(case((reversed_, 1), else_=0)), 0),
             func.coalesce(func.sum(Sale.amount_refunded), 0.0),
+            func.coalesce(func.sum(case((intact, current_gold_pl), else_=0.0)), 0.0),
         ).where(Sale.tenant_id == tenant_id, Sale.sale_timestamp >= start_dt, Sale.sale_timestamp <= end_dt)
         (
             total_sales, total_profit, total_loss, bill_count, total_tax,
             gross_sales, sales_returns, return_count, total_refunded,
+            current_gold_pl_total,
         ) = (await db.execute(stmt)).one()
         return {
             "total_sales": float(total_sales),
@@ -305,6 +311,7 @@ class SaleRepository:
             "sales_returns": float(sales_returns),
             "return_count": int(return_count),
             "total_refunded": float(total_refunded),
+            "current_gold_value_profit_or_loss": float(current_gold_pl_total),
         }
 
     @staticmethod

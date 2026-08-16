@@ -1236,6 +1236,9 @@ class SaleService:
             total_sales=raw["total_sales"],
             total_profit=raw["total_profit"] if privileged else None,
             total_loss=raw["total_loss"] if privileged else None,
+            current_gold_value_profit_or_loss=(
+                raw["current_gold_value_profit_or_loss"] if privileged else None
+            ),
             bill_count=raw["bill_count"],
             items_sold=raw["items_sold"],
             total_tax=raw["total_tax"],
@@ -1289,6 +1292,9 @@ class SaleService:
             "total_sales": raw["total_sales"],
             "total_profit": raw["total_profit"] if privileged else None,
             "total_loss": raw["total_loss"] if privileged else None,
+            "current_gold_value_profit_or_loss": (
+                raw["current_gold_value_profit_or_loss"] if privileged else None
+            ),
             "bill_count": raw["bill_count"],
             "items_sold": raw["items_sold"],
             "total_tax": raw["total_tax"],

@@ -637,6 +637,7 @@ class BusinessSummaryResponse(BaseModel):
     sales_returns: float = 0.0
     return_count: int = 0
     total_refunded: float = 0.0
+    current_gold_value_profit_or_loss: Optional[float] = None
     # Money-movement over the SAME period but on the payment-ledger date axis
     # (collection date, not sale date). Three distinct concepts, never merged:
     # cash actually collected, scheme-credit settlements, and refunds paid out.
@@ -663,6 +664,10 @@ class BillingPeriodSummary(BaseModel):
     sales_returns: float = 0.0
     return_count: int = 0
     total_refunded: float = 0.0
+    # Phase A current-gold-value profit (net selling value minus frozen gold
+    # value), signed aggregate over intact sales. Historical-cost profit stays
+    # in total_profit/total_loss.
+    current_gold_value_profit_or_loss: Optional[float] = None
     # Money movement (payment-ledger date axis) — same three distinct concepts
     # as business-summary: cash in, scheme settlement (never cash), refunds out.
     cash_collected: float = 0.0
