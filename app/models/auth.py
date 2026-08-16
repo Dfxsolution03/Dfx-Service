@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional, List
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Text, func
+from sqlalchemy import String, Boolean, DateTime, ForeignKey, Text, Integer, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, TimestampMixin
 
@@ -87,6 +87,12 @@ class RolePermission(Base):
 
 class User(Base, TimestampMixin):
     __tablename__ = "users"
+    __table_args__ = (
+        # Tenant-scoped uniqueness for the human-readable customer code. NULLs
+        # are distinct in both PostgreSQL and SQLite, so Admin/Staff/SuperAdmin
+        # rows (which never carry a code) do not collide with each other.
+        UniqueConstraint("tenant_id", "customer_code", name="uq_users_tenant_customer_code"),
+    )
 
     id: Mapped[str] = mapped_column(String(50), primary_key=True)
     tenant_id: Mapped[Optional[str]] = mapped_column(
@@ -100,6 +106,15 @@ class User(Base, TimestampMixin):
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     kyc_status: Mapped[str] = mapped_column(String(20), default="Pending", nullable=False)
+    # Human-readable, tenant-scoped, immutable customer identifier —
+    # "DFX-CUST-000001". Assigned by the backend at customer creation and never
+    # accepted from a client; the numeric part is zero-padded to six digits but
+    # is not capped there (a tenant past 999999 customers simply produces a
+    # longer code). NULL for every non-Customer user, which is why the column
+    # stays nullable — the users table holds Admin/Staff/SuperAdmin rows too.
+    # User.id remains the internal key for every relationship; this code is an
+    # additional, display/search-facing identity only.
+    customer_code: Mapped[Optional[str]] = mapped_column(String(32), index=True, nullable=True)
     member_since: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     avatar_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)

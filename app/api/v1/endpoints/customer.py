@@ -391,6 +391,30 @@ async def get_customer_detail_admin(
     )
 
 
+@router.get(
+    "/admin/customers/{customer_id}/overview",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Customer 360 Overview (Admin)",
+    description=(
+        "Read-only composition of one customer's profile, derived customer type, "
+        "KYC, scheme enrollments and balances, contributions, redemptions, "
+        "purchases, collections and returns. Own-tenant only."
+    ),
+)
+async def get_customer_overview_admin(
+    customer_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("customers")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    overview = await CustomerService.get_customer_overview(db, current_user, customer_id)
+    return StandardSuccessResponse(
+        success=True,
+        message="Customer overview retrieved successfully",
+        data={"overview": overview.model_dump()},
+    )
+
+
 # 7. Vendor/Tenant Self-Service Profile (Phase 6C / Module 33)
 @router.get(
     "/admin/tenant/profile",

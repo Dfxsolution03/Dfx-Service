@@ -24,6 +24,7 @@ from app.exceptions.base import (
 )
 from app.models.auth import Tenant, Subscription, Role, User, RefreshToken, PasswordResetToken, EmailVerificationToken
 from app.repositories.audit_repository import AuditRepository
+from app.repositories.customer_repository import CustomerRepository
 from app.services.token_service import TokenService
 from app.services.email_service import get_email_provider
 from app.schemas.auth import (
@@ -122,6 +123,10 @@ class AuthService:
             raise ResourceNotFoundException("Customer role configuration missing in database")
 
         # 4. Create User Record
+        # The customer code is reserved inside this same transaction — if the
+        # insert below fails, the reservation rolls back with it. It is never
+        # taken from the request: staff and customers cannot choose a code.
+        customer_code = await CustomerRepository.allocate_customer_code(db, req.tenant_id)
         user_id = f"usr_{uuid.uuid4().hex[:12]}"
         user = User(
             id=user_id,
@@ -132,6 +137,7 @@ class AuthService:
             hashed_password=hash_password(req.password),
             name=req.name,
             kyc_status="Pending",
+            customer_code=customer_code,
             member_since=datetime.now(timezone.utc).strftime("%B %Y"),
             is_active=True,
         )

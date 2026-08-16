@@ -1,5 +1,5 @@
 import re
-from datetime import datetime
+from datetime import date, datetime
 from typing import Optional, List
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
@@ -229,6 +229,7 @@ class AdminCustomerListItem(BaseModel):
     """Admin-facing — lean list row, no address/enrollment detail (that's
     the detail endpoint's job)."""
     id: str
+    customer_code: Optional[str]
     name: str
     email: Optional[str]
     phone: Optional[str]
@@ -255,6 +256,7 @@ class AdminCustomerDetailResponse(BaseModel):
     summary, composed in the service layer (same composition pattern as
     DashboardService), not stored anywhere as a single row."""
     id: str
+    customer_code: Optional[str]
     name: str
     email: Optional[str]
     phone: Optional[str]
@@ -264,6 +266,135 @@ class AdminCustomerDetailResponse(BaseModel):
     is_active: bool
     enrollment_count: int
     total_invested: float
+
+
+# ─── Phase 1 — Customer 360 (read-only composition) ───
+
+CUSTOMER_TYPE_WALK_IN = "WALK-IN"
+CUSTOMER_TYPE_SCHEME = "SCHEME CUSTOMER"
+CUSTOMER_TYPE_HYBRID = "HYBRID"
+
+
+class CustomerOverviewProfile(BaseModel):
+    id: str
+    customer_code: Optional[str]
+    name: str
+    email: Optional[str]
+    phone: Optional[str]
+    avatar_url: Optional[str]
+    is_active: bool
+    member_since: Optional[str]
+    created_at: Optional[datetime]
+    # Derived at read time from the customer's own enrollments and sales —
+    # deliberately NOT a stored customer_type column, so a walk-in who later
+    # joins a scheme keeps the same customer record and simply reads as a
+    # different type.
+    customer_type: str
+
+
+class CustomerOverviewKyc(BaseModel):
+    status: str
+    doc_type: Optional[str] = None
+    record_status: Optional[str] = None
+    verified_at: Optional[datetime] = None
+    rejection_reason: Optional[str] = None
+    document_count: int = 0
+
+
+class CustomerOverviewEnrollment(BaseModel):
+    id: str
+    enrollment_number: str
+    scheme_name: str
+    status: str
+    joined_date: Optional[str] = None
+    maturity_date: Optional[str] = None
+    # Straight from SchemeBalanceService — this endpoint never recomputes a
+    # scheme balance of its own.
+    total_paid: float
+    total_redeemed: float
+    available_balance: float
+    can_redeem: bool
+
+
+class CustomerOverviewContribution(BaseModel):
+    id: str
+    enrollment_id: str
+    entry_number: Optional[int] = None
+    entry_date: Optional[datetime] = None
+    amount: float
+    description: Optional[str] = None
+
+
+class CustomerOverviewRedemption(BaseModel):
+    id: str
+    enrollment_id: str
+    enrollment_number: Optional[str] = None
+    invoice_number: Optional[str] = None
+    amount: float
+    redeemed_at: Optional[datetime] = None
+
+
+class CustomerOverviewPurchase(BaseModel):
+    id: str
+    invoice_number: str
+    product_name: str
+    product_code: Optional[str] = None
+    sale_timestamp: Optional[datetime] = None
+    final_amount: float
+    amount_paid: float
+    amount_refunded: float
+    outstanding: float
+    payment_status: str
+    sale_status: str
+
+
+class CustomerOverviewPayment(BaseModel):
+    id: str
+    sale_id: str
+    invoice_number: Optional[str] = None
+    amount: float
+    payment_date: Optional[date] = None
+    payment_method: Optional[str] = None
+    source: str
+    reference_no: Optional[str] = None
+
+
+class CustomerOverviewReturn(BaseModel):
+    sale_id: str
+    invoice_number: Optional[str] = None
+    reason: Optional[str] = None
+    refund_amount: float
+    written_off_amount: float
+    scheme_restored: float
+    inspection_outcome: Optional[str] = None
+    returned_at: Optional[datetime] = None
+
+
+class CustomerOverviewTotals(BaseModel):
+    """Counts and sums composed from the rows already returned above — no new
+    financial rule, no second ledger."""
+    enrollment_count: int
+    scheme_total_paid: float
+    scheme_total_redeemed: float
+    scheme_available_balance: float
+    purchase_count: int
+    purchase_total: float
+    purchase_paid: float
+    purchase_outstanding: float
+    return_count: int
+    refund_total: float
+
+
+class CustomerOverviewResponse(BaseModel):
+    profile: CustomerOverviewProfile
+    kyc: CustomerOverviewKyc
+    totals: CustomerOverviewTotals
+    enrollments: List[CustomerOverviewEnrollment]
+    contributions: List[CustomerOverviewContribution]
+    redemptions: List[CustomerOverviewRedemption]
+    purchases: List[CustomerOverviewPurchase]
+    payments: List[CustomerOverviewPayment]
+    returns: List[CustomerOverviewReturn]
 
 
 # ─── Phase 6C / Module 33 — Vendor/Tenant Self-Service Profile ───

@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import String, Boolean, DateTime, Float, Text, ForeignKey
+from sqlalchemy import String, Boolean, DateTime, Float, Integer, Text, ForeignKey
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, TimestampMixin
 
@@ -77,6 +77,33 @@ class KycDocument(Base, TimestampMixin):
 
     # Relationships
     user: Mapped["User"] = relationship("User")
+
+
+class CustomerCodeSequence(Base, TimestampMixin):
+    """One counter row per tenant, backing the DFX-CUST-NNNNNN customer code.
+
+    Deliberately NOT the "random suffix + unique constraint" convention used by
+    Sale.invoice_number and SchemeEnrollment.enrollment_number: the customer
+    code is required to be sequential and human-readable, which a random suffix
+    cannot provide.
+
+    "SELECT MAX(customer_code) + 1" is unsafe — two concurrent registrations in
+    the same tenant read the same maximum and generate the same code. Instead
+    the allocator takes a row-level lock on this tenant's counter
+    (SELECT ... FOR UPDATE) inside the caller's transaction, so a second
+    concurrent allocation for the SAME tenant blocks until the first commits
+    and therefore reads the already-incremented value. Different tenants lock
+    different rows and never contend. The unique constraint on
+    (users.tenant_id, users.customer_code) is the database-level backstop if
+    any future code path bypasses this allocator.
+    """
+    __tablename__ = "customer_code_sequences"
+
+    tenant_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    # Highest number already handed out. The next customer gets last_value + 1.
+    last_value: Mapped[int] = mapped_column(Integer, default=0, nullable=False)
 
 
 class Branch(Base, TimestampMixin):

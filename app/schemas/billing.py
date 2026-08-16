@@ -403,6 +403,10 @@ class SaleResponse(BaseModel):
     invoice_number: str
     inventory_item_id: str
     customer_id: Optional[str] = None
+    # Read from the customer record at response time, not stored on the sale —
+    # the sale keeps its own customer_name/phone snapshot, this is the live
+    # identity of the linked customer. NULL for a walk-in with no account.
+    customer_code: Optional[str] = None
     customer_name: Optional[str] = None
     customer_phone: Optional[str] = None
 

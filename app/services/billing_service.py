@@ -53,6 +53,7 @@ from app.models.enrollment import (
     STATUS_REDEEMED as ENR_REDEEMED,
 )
 from app.repositories.audit_repository import AuditRepository
+from app.repositories.customer_repository import CustomerRepository
 from app.services.storage_service import get_storage_provider
 from app.services.goldrate_service import GoldRateService, IST
 from app.exceptions.base import (
@@ -1168,9 +1169,19 @@ class SaleService:
             db, current_user.tenant_id, page, limit, search, date_from, date_to,
             payment_status, sale_status,
         )
-        return SaleListResponse(
-            sales=[SaleService._build_response(s, current_user) for s in sales], total=total
+        rows = [SaleService._build_response(s, current_user) for s in sales]
+
+        # Attach the customer code for the rows that are billed to a registered
+        # customer. One batched lookup for the whole page — never one query per
+        # sale, and never stored on the Sale row (the code belongs to the
+        # customer record, the sale keeps its own name/phone snapshot).
+        codes = await CustomerRepository.codes_for_customer_ids(
+            db, [s.customer_id for s in sales if s.customer_id], current_user.tenant_id
         )
+        for row, sale in zip(rows, sales):
+            row.customer_code = codes.get(sale.customer_id) if sale.customer_id else None
+
+        return SaleListResponse(sales=rows, total=total)
 
     @staticmethod
     def _resolve_period_range(
@@ -1375,6 +1386,11 @@ class SaleService:
         if not sale:
             raise ResourceNotFoundException(f"Sale '{sale_id}' not found")
         response = SaleService._build_response(sale, current_user)
+        if sale.customer_id:
+            codes = await CustomerRepository.codes_for_customer_ids(
+                db, [sale.customer_id], current_user.tenant_id
+            )
+            response.customer_code = codes.get(sale.customer_id)
         # Attached on the single-sale read only: the invoice detail view needs
         # the full reversal record, the paginated list does not.
         response.sale_return = await SaleReturnService.get_for_sale(db, current_user, sale_id)

@@ -1,14 +1,63 @@
 from typing import List, Optional, Tuple
 from sqlalchemy import select, update, delete, func, or_
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
 from app.core.constants import ROLE_CUSTOMER, ROLE_STAFF
 from app.models.auth import Tenant, User, Role
-from app.models.customer import KYCRecord, UserAddress, Branch, KycDocument
+from app.models.customer import (
+    KYCRecord,
+    UserAddress,
+    Branch,
+    KycDocument,
+    CustomerCodeSequence,
+)
+
+CUSTOMER_CODE_PREFIX = "DFX-CUST-"
+CUSTOMER_CODE_PAD = 6
+
+
+def format_customer_code(number: int) -> str:
+    """DFX-CUST-000001. Zero-padded to six digits; numbers beyond 999999 simply
+    render wider rather than wrapping or truncating."""
+    return f"{CUSTOMER_CODE_PREFIX}{number:0{CUSTOMER_CODE_PAD}d}"
 
 
 class CustomerRepository:
+    @staticmethod
+    async def allocate_customer_code(db: AsyncSession, tenant_id: str) -> str:
+        """Reserve the next customer code for this tenant, concurrency-safely.
+
+        Locks the tenant's counter row FOR UPDATE, so a concurrent allocation
+        for the same tenant waits for this transaction to commit and then reads
+        the incremented value — two customers can never receive the same code.
+        The caller must commit; the reservation is part of the caller's
+        transaction, so a failed registration rolls the counter back too.
+        """
+        stmt = (
+            select(CustomerCodeSequence)
+            .where(CustomerCodeSequence.tenant_id == tenant_id)
+            .with_for_update()
+        )
+        row = (await db.execute(stmt)).scalar_one_or_none()
+
+        if row is None:
+            # First customer for this tenant. Two concurrent registrations can
+            # both reach here, so the insert is attempted and a duplicate-key
+            # loser falls back to re-reading the row under the lock.
+            try:
+                async with db.begin_nested():
+                    row = CustomerCodeSequence(tenant_id=tenant_id, last_value=0)
+                    db.add(row)
+                    await db.flush()
+            except IntegrityError:
+                row = (await db.execute(stmt)).scalar_one()
+
+        row.last_value = (row.last_value or 0) + 1
+        await db.flush()
+        return format_customer_code(row.last_value)
+
     @staticmethod
     async def get_tenant_by_id(db: AsyncSession, tenant_id: str) -> Optional[Tenant]:
         stmt = select(Tenant).where(Tenant.id == tenant_id)
@@ -118,6 +167,18 @@ class CustomerRepository:
         await db.delete(address)
 
     @staticmethod
+    async def get_kyc_documents(
+        db: AsyncSession, user_id: str, tenant_id: str
+    ) -> List[KycDocument]:
+        """Uploaded KYC document metadata for one customer, newest first."""
+        stmt = (
+            select(KycDocument)
+            .where(KycDocument.user_id == user_id, KycDocument.tenant_id == tenant_id)
+            .order_by(KycDocument.created_at.desc())
+        )
+        return list((await db.execute(stmt)).scalars().all())
+
+    @staticmethod
     async def create_kyc_document(db: AsyncSession, document: KycDocument) -> KycDocument:
         db.add(document)
         return document
@@ -169,7 +230,17 @@ class CustomerRepository:
         conditions = [User.tenant_id == tenant_id, Role.name == ROLE_CUSTOMER]
         if search:
             like = f"%{search}%"
-            conditions.append(or_(User.name.ilike(like), User.email.ilike(like), User.phone.ilike(like)))
+            conditions.append(
+                or_(
+                    User.name.ilike(like),
+                    User.email.ilike(like),
+                    User.phone.ilike(like),
+                    # Staff identify a customer by the printed code during
+                    # billing, so it must be searchable here — this is the one
+                    # customer search the billing picker also uses.
+                    User.customer_code.ilike(like),
+                )
+            )
 
         count_stmt = select(func.count(User.id)).join(Role, User.role_id == Role.id)
         list_stmt = select(User).join(Role, User.role_id == Role.id).options(joinedload(User.role))
@@ -181,6 +252,20 @@ class CustomerRepository:
         list_stmt = list_stmt.order_by(User.created_at.desc()).offset((page - 1) * limit).limit(limit)
         rows = (await db.execute(list_stmt)).unique().scalars().all()
         return list(rows), total
+
+    @staticmethod
+    async def codes_for_customer_ids(
+        db: AsyncSession, customer_ids: List[str], tenant_id: str
+    ) -> dict:
+        """{user_id: customer_code} for the given customers, tenant-scoped.
+        Batched so a list screen resolves a whole page in one query."""
+        unique_ids = list({cid for cid in customer_ids if cid})
+        if not unique_ids:
+            return {}
+        stmt = select(User.id, User.customer_code).where(
+            User.id.in_(unique_ids), User.tenant_id == tenant_id
+        )
+        return {uid: code for uid, code in (await db.execute(stmt)).all() if code}
 
     @staticmethod
     async def get_customer_by_id_for_tenant(

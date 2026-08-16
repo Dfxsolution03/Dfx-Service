@@ -250,6 +250,22 @@ class SaleRepository:
         return list(rows), total
 
     @staticmethod
+    async def list_by_customer(
+        db: AsyncSession, tenant_id: str, customer_id: str, limit: int = 200
+    ) -> List[Sale]:
+        """Every sale billed to this customer, newest first — the purchase side
+        of Customer 360. Read-only; the sale rows are returned exactly as the
+        billing module wrote them, including their derived amount_paid /
+        payment_status / sale_status caches."""
+        stmt = (
+            select(Sale)
+            .where(Sale.tenant_id == tenant_id, Sale.customer_id == customer_id)
+            .order_by(Sale.sale_timestamp.desc())
+            .limit(limit)
+        )
+        return list((await db.execute(stmt)).scalars().all())
+
+    @staticmethod
     async def get_period_summary(db: AsyncSession, tenant_id: str, start_dt: datetime, end_dt: datetime) -> dict:
         """Aggregates directly off the immutable Sale snapshot rows — never
         touches InventoryItem or the live gold rate, so this can never drift

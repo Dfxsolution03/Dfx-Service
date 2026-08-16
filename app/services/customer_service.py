@@ -9,10 +9,23 @@ from app.core.security import hash_password, verify_password
 from app.models.auth import User, Tenant, RefreshToken
 from app.models.customer import KYCRecord, UserAddress, Branch, KycDocument
 from app.models.payment import STATUS_SUCCESS as PAYMENT_SUCCESS
+from app.core.constants import SALE_STATUS_COMPLETED
 from app.repositories.customer_repository import CustomerRepository
 from app.repositories.audit_repository import AuditRepository
-from app.repositories.enrollment_repository import EnrollmentRepository
+from app.repositories.enrollment_repository import EnrollmentRepository, SchemeRedemptionRepository
+from app.repositories.passbook_repository import PassbookRepository
 from app.repositories.payment_repository import PaymentRepository
+from app.repositories.billing_repository import (
+    SaleRepository,
+    SalePaymentRepository,
+    SaleReturnRepository,
+)
+from app.services.enrollment_service import SchemeBalanceService
+
+# Upper bound on how many contribution / purchase rows one Customer 360 read
+# returns. A memory backstop for an unusually long-lived customer, not a
+# business rule — the underlying ledgers stay complete.
+OVERVIEW_ROW_CAP = 500
 from app.exceptions.base import (
     ResourceNotFoundException,
     ConflictException,
@@ -37,6 +50,19 @@ from app.schemas.customer import (
     AdminCustomerListItem,
     AdminCustomerDetailResponse,
     AdminCustomerPaginationInfo,
+    CustomerOverviewResponse,
+    CustomerOverviewProfile,
+    CustomerOverviewKyc,
+    CustomerOverviewEnrollment,
+    CustomerOverviewContribution,
+    CustomerOverviewRedemption,
+    CustomerOverviewPurchase,
+    CustomerOverviewPayment,
+    CustomerOverviewReturn,
+    CustomerOverviewTotals,
+    CUSTOMER_TYPE_WALK_IN,
+    CUSTOMER_TYPE_SCHEME,
+    CUSTOMER_TYPE_HYBRID,
     TenantProfileResponse,
     TenantProfileUpdateRequest,
     BranchCreateRequest,
@@ -660,6 +686,7 @@ class CustomerService:
 
         return AdminCustomerDetailResponse(
             id=customer.id,
+            customer_code=customer.customer_code,
             name=customer.name,
             email=customer.email,
             phone=customer.phone,
@@ -669,6 +696,204 @@ class CustomerService:
             is_active=customer.is_active,
             enrollment_count=len(enrollments),
             total_invested=total_invested,
+        )
+
+    # ─── Phase 1 — Customer 360 (read-only composition) ───
+
+    @staticmethod
+    async def get_customer_overview(
+        db: AsyncSession, current_user: User, customer_id: str
+    ) -> CustomerOverviewResponse:
+        """One tenant-scoped read of everything the store knows about a customer.
+
+        Strictly a COMPOSITION layer. Every financial figure below is read back
+        from the module that owns it — scheme balances from SchemeBalanceService,
+        sale totals from the Sale row's own derived caches, collections from the
+        SalePayment ledger, refunds from SaleReturn. Nothing here recalculates
+        money, and nothing here writes.
+        """
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        tenant_id = current_user.tenant_id
+
+        # Tenant- AND role-scoped: this reuses the same lookup the customer
+        # detail endpoint uses, so another tenant's customer (or this tenant's
+        # Admin/Staff account) can never be opened through Customer 360.
+        customer = await CustomerRepository.get_customer_by_id_for_tenant(db, tenant_id, customer_id)
+        if not customer:
+            raise ResourceNotFoundException(f"Customer ID '{customer_id}' not found")
+
+        kyc_record = await CustomerRepository.get_kyc_record(db, customer_id, tenant_id)
+        kyc_documents = await CustomerRepository.get_kyc_documents(db, customer_id, tenant_id)
+
+        enrollments = await EnrollmentRepository.get_enrollments_by_customer(db, tenant_id, customer_id)
+
+        # Authoritative balance per enrollment. A customer holds a handful of
+        # enrollments, and this is the only service allowed to state a scheme
+        # balance — duplicating its derivation here to save queries is exactly
+        # what this phase must not do.
+        enrollment_rows: List[CustomerOverviewEnrollment] = []
+        for enrollment in enrollments:
+            balance = await SchemeBalanceService.get_balance(db, current_user, enrollment.id)
+            enrollment_rows.append(
+                CustomerOverviewEnrollment(
+                    id=enrollment.id,
+                    enrollment_number=balance.enrollment_number,
+                    scheme_name=balance.scheme_name,
+                    status=balance.status,
+                    joined_date=str(balance.joined_date) if balance.joined_date else None,
+                    maturity_date=str(balance.maturity_date) if balance.maturity_date else None,
+                    total_paid=balance.total_paid,
+                    total_redeemed=balance.total_redeemed,
+                    available_balance=balance.available_balance,
+                    can_redeem=balance.can_redeem,
+                )
+            )
+
+        # Contributions across every enrollment in one query (joins through
+        # SchemeEnrollment), not one query per enrollment.
+        entries = await PassbookRepository.get_recent_entries_for_customer(
+            db, tenant_id, customer_id, limit=OVERVIEW_ROW_CAP
+        )
+        contributions = [
+            CustomerOverviewContribution(
+                id=e.id,
+                enrollment_id=e.enrollment_id,
+                entry_number=e.entry_number,
+                entry_date=e.entry_date,
+                amount=e.amount,
+                description=e.description,
+            )
+            for e in entries
+        ]
+
+        enrollment_numbers = {e.id: e.enrollment_number for e in enrollments}
+        redemption_rows = await SchemeRedemptionRepository.list_for_customer(db, customer_id, tenant_id)
+        redemptions = [
+            CustomerOverviewRedemption(
+                id=r.id,
+                enrollment_id=r.enrollment_id,
+                enrollment_number=enrollment_numbers.get(r.enrollment_id),
+                invoice_number=r.invoice_number,
+                amount=r.amount,
+                redeemed_at=r.redeemed_at,
+            )
+            for r in redemption_rows
+        ]
+
+        sales = await SaleRepository.list_by_customer(db, tenant_id, customer_id, limit=OVERVIEW_ROW_CAP)
+        sale_ids = [s.id for s in sales]
+        invoice_by_sale = {s.id: s.invoice_number for s in sales}
+
+        purchases = [
+            CustomerOverviewPurchase(
+                id=s.id,
+                invoice_number=s.invoice_number,
+                product_name=s.product_name,
+                product_code=s.product_code,
+                sale_timestamp=s.sale_timestamp,
+                final_amount=s.final_amount,
+                amount_paid=s.amount_paid or 0.0,
+                amount_refunded=s.amount_refunded or 0.0,
+                # Same definition the billing module uses everywhere else; a
+                # reversed sale owes nothing.
+                outstanding=(
+                    0.0
+                    if (s.sale_status or SALE_STATUS_COMPLETED) != SALE_STATUS_COMPLETED
+                    else round(max(0.0, s.final_amount - (s.amount_paid or 0.0)), 2)
+                ),
+                payment_status=s.payment_status,
+                sale_status=s.sale_status or SALE_STATUS_COMPLETED,
+            )
+            for s in sales
+        ]
+
+        # Both batched by sale id — no per-sale query.
+        payment_rows = await SalePaymentRepository.list_by_sale_ids(db, sale_ids, tenant_id)
+        payments = [
+            CustomerOverviewPayment(
+                id=p.id,
+                sale_id=p.sale_id,
+                invoice_number=invoice_by_sale.get(p.sale_id),
+                amount=p.amount,
+                payment_date=p.payment_date,
+                payment_method=p.payment_method,
+                source=p.source,
+                reference_no=p.reference_no,
+            )
+            for p in payment_rows
+        ]
+
+        return_rows = await SaleReturnRepository.list_by_sale_ids(db, sale_ids, tenant_id)
+        returns: List[CustomerOverviewReturn] = []
+        for r in return_rows:
+            # Scheme credit put back by this return — read from the redemption
+            # ledger, the same source the enrollment screen shows.
+            restored = await SchemeRedemptionRepository.sum_restorations_for_sale(db, r.sale_id, tenant_id)
+            returns.append(
+                CustomerOverviewReturn(
+                    sale_id=r.sale_id,
+                    invoice_number=r.invoice_number,
+                    reason=r.reason,
+                    refund_amount=r.refund_amount,
+                    written_off_amount=r.outstanding_written_off,
+                    scheme_restored=abs(restored),
+                    inspection_outcome=r.inspection_status,
+                    returned_at=r.returned_at,
+                )
+            )
+
+        # Derived display type — never stored, so one customer record serves a
+        # walk-in who later joins a scheme.
+        if not enrollment_rows:
+            customer_type = CUSTOMER_TYPE_WALK_IN
+        elif purchases:
+            customer_type = CUSTOMER_TYPE_HYBRID
+        else:
+            customer_type = CUSTOMER_TYPE_SCHEME
+
+        totals = CustomerOverviewTotals(
+            enrollment_count=len(enrollment_rows),
+            scheme_total_paid=round(sum(e.total_paid for e in enrollment_rows), 2),
+            scheme_total_redeemed=round(sum(e.total_redeemed for e in enrollment_rows), 2),
+            scheme_available_balance=round(sum(e.available_balance for e in enrollment_rows), 2),
+            purchase_count=len(purchases),
+            purchase_total=round(sum(p.final_amount for p in purchases), 2),
+            purchase_paid=round(sum(p.amount_paid for p in purchases), 2),
+            purchase_outstanding=round(sum(p.outstanding for p in purchases), 2),
+            return_count=len(returns),
+            refund_total=round(sum(r.refund_amount for r in returns), 2),
+        )
+
+        return CustomerOverviewResponse(
+            profile=CustomerOverviewProfile(
+                id=customer.id,
+                customer_code=customer.customer_code,
+                name=customer.name,
+                email=customer.email,
+                phone=customer.phone,
+                avatar_url=customer.avatar_url,
+                is_active=customer.is_active,
+                member_since=customer.member_since,
+                created_at=customer.created_at,
+                customer_type=customer_type,
+            ),
+            kyc=CustomerOverviewKyc(
+                status=customer.kyc_status,
+                doc_type=kyc_record.doc_type if kyc_record else None,
+                record_status=kyc_record.status if kyc_record else None,
+                verified_at=kyc_record.verified_at if kyc_record else None,
+                rejection_reason=kyc_record.rejection_reason if kyc_record else None,
+                document_count=len(kyc_documents),
+            ),
+            totals=totals,
+            enrollments=enrollment_rows,
+            contributions=contributions,
+            redemptions=redemptions,
+            purchases=purchases,
+            payments=payments,
+            returns=returns,
         )
 
     # ─── Phase 6C / Module 33: Vendor/Tenant Self-Service Profile ───

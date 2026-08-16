@@ -133,6 +133,21 @@ class SchemeRedemptionRepository:
         return -float((await db.execute(stmt)).scalar_one())
 
     @staticmethod
+    async def list_for_customer(db: AsyncSession, customer_id: str, tenant_id: str):
+        """Every redemption row belonging to this customer across all of their
+        enrollments, newest first — one query instead of one per enrollment.
+        Negative amounts are restorations written by a sale return."""
+        stmt = (
+            select(SchemeRedemption)
+            .where(
+                SchemeRedemption.customer_id == customer_id,
+                SchemeRedemption.tenant_id == tenant_id,
+            )
+            .order_by(SchemeRedemption.redeemed_at.desc())
+        )
+        return list((await db.execute(stmt)).scalars().all())
+
+    @staticmethod
     async def sum_for_enrollment(db: AsyncSession, enrollment_id: str, tenant_id: str) -> float:
         """Total scheme credit already spent against jewellery sales."""
         stmt = select(func.coalesce(func.sum(SchemeRedemption.amount), 0.0)).where(
