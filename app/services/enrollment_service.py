@@ -397,6 +397,16 @@ class SchemeBalanceService:
         sale = await SaleRepository.get_by_id_for_update(db, req.sale_id, current_user.tenant_id)
         if not sale:
             raise ResourceNotFoundException(f"Sale '{req.sale_id}' not found")
+        # Customer ownership: a customer's scheme balance may only settle that
+        # same customer's invoice. Tenant is already enforced by the scoped
+        # lookup above; this stops one customer's credit paying another's bill
+        # inside the same tenant. A sale with no customer_id can never be
+        # matched to an enrollment's customer, so it is rejected too.
+        if sale.customer_id != enrollment.customer_id:
+            raise ConflictException(
+                f"Invoice {sale.invoice_number} belongs to a different customer and cannot be "
+                f"settled with this scheme balance."
+            )
         if (sale.sale_status or SALE_STATUS_COMPLETED) != SALE_STATUS_COMPLETED:
             raise ConflictException(
                 f"Invoice {sale.invoice_number} is {sale.sale_status.lower()} — scheme credit cannot "
