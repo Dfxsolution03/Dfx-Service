@@ -30,6 +30,8 @@ from app.schemas.enrollment import (
     CustomerEnrollmentResponse,
     EnrollmentBalanceResponse,
     EnrollmentCloseRequest,
+    MultiSchemeRedeemRequest,
+    MultiSchemeRedeemResponse,
     SchemeRedeemRequest,
     SchemeRedemptionResponse,
 )
@@ -515,3 +517,223 @@ class SchemeBalanceService:
 
         await db.commit()
         return await SchemeBalanceService.get_balance(db, current_user, enrollment_id)
+
+
+    @staticmethod
+    async def redeem_multiple_against_sale(
+        db: AsyncSession, current_user: User, sale_id: str, req: MultiSchemeRedeemRequest
+    ) -> MultiSchemeRedeemResponse:
+        """Settle ONE invoice from SEVERAL scheme balances in a single transaction.
+
+        All-or-nothing. Every enrollment is locked and fully validated BEFORE any
+        row is written, and there is exactly one commit at the end, so a failure
+        on the third scheme cannot leave the first two spent. This is the reason
+        the endpoint exists: chaining independent single-redemption calls from the
+        frontend would leave real money half-moved when one call fails.
+
+        Ordering is deliberate and matches redeem_against_sale (enrollments first,
+        then the sale) so a concurrent single redemption and a multi redemption
+        can never form a lock cycle. Enrollments are locked in sorted id order so
+        two concurrent multi redemptions also acquire them in the same sequence.
+
+          1. reject duplicate enrollments in the request
+          2. lock every enrollment, sorted by id (tenant-scoped)
+          3. lock the sale; refuse a reversed or already-settled invoice
+          4. per enrollment: customer ownership, redeemable status, own balance
+          5. reject the COMBINED amount above the invoice's outstanding
+          6. only now write redemptions + SCHEME_REDEMPTION ledger rows
+          7. refresh the sale's derived caches ONCE
+          8. flip each exhausted enrollment to REDEEMED
+          9. one audit row naming every scheme, then a single commit
+        """
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        # 1. Duplicates would double-spend one balance inside a single request,
+        # and the per-enrollment balance check below would not catch it.
+        seen: set = set()
+        for item in req.items:
+            if item.enrollment_id in seen:
+                raise ValidationException(
+                    f"Enrollment '{item.enrollment_id}' is listed more than once. "
+                    f"Combine it into a single line."
+                )
+            seen.add(item.enrollment_id)
+
+        # 2. Deterministic lock order across concurrent multi redemptions.
+        ordered = sorted(req.items, key=lambda i: i.enrollment_id)
+
+        locked: list = []
+        for item in ordered:
+            enrollment = await EnrollmentRepository.get_enrollment_by_id_for_update(
+                db, item.enrollment_id, current_user.tenant_id
+            )
+            if not enrollment:
+                raise ResourceNotFoundException(f"Enrollment ID '{item.enrollment_id}' not found")
+            locked.append((enrollment, _round2(item.amount)))
+
+        # 3. Sale locked after the enrollments, same direction as the single-redeem path.
+        sale = await SaleRepository.get_by_id_for_update(db, sale_id, current_user.tenant_id)
+        if not sale:
+            raise ResourceNotFoundException(f"Sale '{sale_id}' not found")
+        if (sale.sale_status or SALE_STATUS_COMPLETED) != SALE_STATUS_COMPLETED:
+            raise ConflictException(
+                f"Invoice {sale.invoice_number} is {sale.sale_status.lower()} — scheme credit cannot "
+                f"be applied to a reversed sale."
+            )
+
+        already_paid = _round2(
+            await SalePaymentRepository.sum_for_sale(db, sale.id, current_user.tenant_id)
+        )
+        outstanding = _round2(sale.final_amount - already_paid)
+        if outstanding <= _MONEY_EPSILON:
+            raise ConflictException(
+                f"Invoice {sale.invoice_number} is already fully settled — nothing is outstanding."
+            )
+
+        # 4. Validate EVERY enrollment before writing anything.
+        validated: list = []
+        combined = 0.0
+        for enrollment, amount in locked:
+            if amount <= 0:
+                raise ValidationException("Redemption amount must be greater than zero")
+            # Customer ownership: one customer's scheme credit may never settle
+            # another customer's invoice, even inside the same tenant.
+            if sale.customer_id != enrollment.customer_id:
+                raise ConflictException(
+                    f"Invoice {sale.invoice_number} belongs to a different customer and cannot be "
+                    f"settled with enrollment {enrollment.enrollment_number}."
+                )
+            if enrollment.status not in REDEEMABLE_STATUSES:
+                raise ConflictException(
+                    f"Enrollment {enrollment.enrollment_number} is {enrollment.status.lower()} and its "
+                    f"balance can no longer be redeemed."
+                )
+            total_paid, total_redeemed, available = await SchemeBalanceService._balance_of(db, enrollment)
+            if available <= _MONEY_EPSILON:
+                raise ConflictException(
+                    f"Enrollment {enrollment.enrollment_number} has no scheme balance left to redeem."
+                )
+            if amount > available + _MONEY_EPSILON:
+                raise ValidationException(
+                    f"Redemption of {amount} exceeds the {available} scheme balance available on "
+                    f"enrollment {enrollment.enrollment_number}."
+                )
+            validated.append((enrollment, amount, total_paid, total_redeemed, available))
+            combined = _round2(combined + amount)
+
+        # 5. The COMBINED amount is what the invoice can absorb. Checking only
+        # per-scheme would let three valid schemes together over-settle one bill.
+        if combined > outstanding + _MONEY_EPSILON:
+            raise ValidationException(
+                f"Combined scheme redemption of {combined} exceeds the outstanding {outstanding} on "
+                f"invoice {sale.invoice_number}. Apply {outstanding} or less across the selected "
+                f"schemes; the remaining scheme balances stay available for a future purchase."
+            )
+
+        # 6. Past this point every check has passed, so the writes below either
+        # all land or all roll back with the single commit.
+        now = datetime.now(timezone.utc)
+        payment_date = datetime.now(IST).date()
+        applied: list = []
+
+        for enrollment, amount, total_paid, total_redeemed, available in validated:
+            redemption = SchemeRedemption(
+                id=f"srd_{uuid.uuid4().hex[:12]}",
+                tenant_id=current_user.tenant_id,
+                enrollment_id=enrollment.id,
+                customer_id=enrollment.customer_id,
+                sale_id=sale.id,
+                invoice_number=sale.invoice_number,
+                amount=amount,
+                redeemed_at=now,
+                recorded_by=current_user.id,
+            )
+            await SchemeRedemptionRepository.create(db, redemption)
+
+            # One ledger row per scheme — never a merged total. The invoice must
+            # keep showing which scheme funded which rupee.
+            ledger_row = SalePayment(
+                id=f"sp_{uuid.uuid4().hex[:12]}",
+                tenant_id=current_user.tenant_id,
+                sale_id=sale.id,
+                amount=amount,
+                payment_date=payment_date,
+                payment_method="OTHER",
+                source=PAYMENT_SOURCE_SCHEME_REDEMPTION,
+                reference_no=enrollment.enrollment_number,
+                remarks=f"Scheme redemption from enrollment {enrollment.enrollment_number}",
+                enrollment_id=enrollment.id,
+                recorded_by=current_user.id,
+            )
+            await SalePaymentRepository.create(db, ledger_row)
+
+            new_redeemed = _round2(total_redeemed + amount)
+            remaining = _round2(max(0.0, total_paid - new_redeemed))
+            before_status = enrollment.status
+            if remaining <= _MONEY_EPSILON:
+                enrollment.status = STATUS_REDEEMED
+
+            applied.append({
+                "enrollment_id": enrollment.id,
+                "enrollment_number": enrollment.enrollment_number,
+                "amount": amount,
+                "balance_before": available,
+                "balance_after": remaining,
+                "status_before": before_status,
+                "status_after": enrollment.status,
+            })
+
+        # 7. Derived caches refreshed once for the whole settlement.
+        new_paid = _round2(already_paid + combined)
+        sale.amount_paid = new_paid
+        previous_status = sale.payment_status
+        sale.payment_status = _derive_payment_status(sale.final_amount, new_paid)
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="SCHEME_REDEMPTION_APPLY_MULTI",
+            target_entity="sales",
+            target_id=sale.id,
+            before_state={
+                "sale_amount_paid": already_paid,
+                "sale_payment_status": previous_status,
+                "sale_outstanding": outstanding,
+            },
+            after_state={
+                "sale_id": sale.id,
+                "invoice_number": sale.invoice_number,
+                "customer_id": sale.customer_id,
+                "schemes_applied": applied,
+                "total_redeemed": combined,
+                "sale_amount_paid": new_paid,
+                "sale_payment_status": sale.payment_status,
+                "sale_outstanding": _round2(max(0.0, sale.final_amount - new_paid)),
+                "redeemed_at": now.isoformat(),
+                "recorded_by": current_user.id,
+            },
+        )
+
+        await db.commit()
+
+        # 9. Read back the authoritative post-commit position.
+        balances = [
+            await SchemeBalanceService.get_balance(db, current_user, row["enrollment_id"])
+            for row in applied
+        ]
+        refreshed = await SaleRepository.get_by_id(db, sale.id, current_user.tenant_id)
+        settled_paid = _round2(refreshed.amount_paid or 0)
+        return MultiSchemeRedeemResponse(
+            sale_id=refreshed.id,
+            invoice_number=refreshed.invoice_number,
+            total_redeemed=combined,
+            sale_final_amount=_round2(refreshed.final_amount),
+            sale_amount_paid=settled_paid,
+            sale_outstanding=_round2(max(0.0, refreshed.final_amount - settled_paid)),
+            sale_payment_status=refreshed.payment_status,
+            balances=balances,
+        )

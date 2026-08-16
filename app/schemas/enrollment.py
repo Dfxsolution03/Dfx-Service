@@ -96,7 +96,44 @@ class EnrollmentCloseRequest(BaseModel):
     reason: str = Field(..., min_length=3, max_length=500)
 
 
+class SchemeRedeemItem(BaseModel):
+    """One enrollment's share of a multi-scheme settlement. The amount is per
+    enrollment on purpose — a customer paying with three schemes must see, and
+    the ledger must keep, exactly which scheme funded which rupee."""
+    enrollment_id: str
+    amount: float = Field(..., gt=0)
+
+
+class MultiSchemeRedeemRequest(BaseModel):
+    """Settle one invoice from several scheme balances in a SINGLE transaction.
+
+    All-or-nothing: if any enrollment fails validation (ownership, status,
+    balance) or the combined amount exceeds the invoice's outstanding, nothing
+    is written at all. The frontend must never chain independent redemption
+    calls and hope each one lands.
+    """
+    items: List[SchemeRedeemItem] = Field(..., min_length=1)
+
+
+class MultiSchemeRedeemResponse(BaseModel):
+    """Post-settlement position: what the invoice now owes, and the refreshed
+    balance of every enrollment that funded it."""
+    sale_id: str
+    invoice_number: str
+    total_redeemed: float
+    sale_final_amount: float
+    sale_amount_paid: float
+    sale_outstanding: float
+    sale_payment_status: str
+    balances: List["EnrollmentBalanceResponse"] = []
+
+
 class SchemeRedeemRequest(BaseModel):
     """Apply scheme credit to an existing jewellery invoice."""
     sale_id: str
     amount: float = Field(..., gt=0, description="Never above the available balance or the sale's outstanding")
+
+
+# Forward reference: MultiSchemeRedeemResponse cites EnrollmentBalanceResponse,
+# which is declared above it in this module.
+MultiSchemeRedeemResponse.model_rebuild()

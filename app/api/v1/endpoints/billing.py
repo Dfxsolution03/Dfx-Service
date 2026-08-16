@@ -31,6 +31,8 @@ from app.services.billing_service import (
     SalePaymentService,
     SaleReturnService,
 )
+from app.services.enrollment_service import SchemeBalanceService
+from app.schemas.enrollment import MultiSchemeRedeemRequest
 from app.services import billing_export_service
 from app.exceptions.base import ValidationException
 
@@ -572,6 +574,35 @@ async def record_sale_payment(
 # =============================================================================
 # 3b. Sale Return / Cancellation
 # =============================================================================
+
+@router.post(
+    "/billing/sales/{sale_id}/redeem-schemes",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Settle An Invoice From Several Scheme Balances (Admin)",
+    description=(
+        "Applies one or more of the customer's scheme balances to a single invoice in ONE "
+        "transaction. Every enrollment is locked and fully validated (customer ownership, tenant, "
+        "redeemable status, own balance) and the COMBINED amount is checked against the invoice's "
+        "outstanding before anything is written, so a failure on one scheme leaves none of the "
+        "others spent. Each scheme gets its own redemption and SCHEME_REDEMPTION ledger row, so the "
+        "invoice always shows which scheme funded which rupee; scheme credit settles the invoice but "
+        "is never counted as cash."
+    ),
+)
+async def redeem_schemes_against_sale(
+    sale_id: str,
+    req: MultiSchemeRedeemRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await SchemeBalanceService.redeem_multiple_against_sale(db, current_user, sale_id, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Scheme balances redeemed successfully",
+        data={"settlement": result.model_dump(mode="json")},
+    )
+
 
 @router.get(
     "/billing/inventory/{inventory_item_id}/return",
