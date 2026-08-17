@@ -26,7 +26,7 @@ class PromotionCreateRequest(BaseModel):
 
 class PromotionUpdateRequest(BaseModel):
     banner_type: Optional[BannerType] = None
-    title: Optional[str] = Field(None, min_length=1, max_length=200)
+    title: Optional[str] = Field(None, max_length=200)
     subtitle: Optional[str] = Field(None, max_length=300)
     description: Optional[str] = Field(None, max_length=2000)
     image_url: Optional[str] = Field(None, max_length=500)
