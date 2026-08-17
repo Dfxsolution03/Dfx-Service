@@ -132,6 +132,9 @@ class Settings(BaseSettings):
     # doc for the full design; sync()/get_effective_rate() are unimplemented
     # scaffolding until Phase 1/2 regardless of this flag's value.
     ENABLE_MARKET_RATE_SYNC: bool = False
+    # Phase 7 — overdue reminder scheduler. Off by default (deploy opts in).
+    ENABLE_COLLECTION_REMINDERS: bool = False
+    COLLECTION_REMINDER_INTERVAL_HOURS: int = 24
     MARKET_RATE_PROVIDER: str = "METALPRICEAPI"
     MARKET_RATE_SYNC_INTERVAL_MINUTES: int = 10
     MARKET_RATE_FETCH_TIMEOUT_SECONDS: int = 10

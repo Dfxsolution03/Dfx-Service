@@ -10,8 +10,25 @@ from app.schemas.auth import StandardSuccessResponse
 from app.schemas.report import ReportPeriod
 from app.schemas.export import ExportFormat
 from app.services.report_service import ReportService, TopProductsService, DashboardCardsService
+from app.services.collection_service import CollectionsReadService
 
 router = APIRouter()
+
+
+@router.get(
+    "/collections",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Overdue Collections (Admin/Staff)",
+    description="Read-only list of currently-overdue scheme installments (1..15 days, ACTIVE only), "
+                "with customer/scheme/due-date/overdue-days and reminders already sent. No engine invoked.",
+)
+async def list_collections(
+    current_user: User = Depends(require_admin_or_staff_module("reports")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    items = await CollectionsReadService.list_collections(db, current_user)
+    return StandardSuccessResponse(success=True, message="Collections retrieved", data={"collections": items})
 
 
 @router.get(

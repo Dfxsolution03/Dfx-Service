@@ -52,6 +52,12 @@ async def lifespan(app: FastAPI):
         get_scheduler().start()
         logger.info("Market rate sync scheduler started.")
 
+    # Phase 7 — overdue reminder scheduler. Inert unless explicitly enabled.
+    if settings.ENABLE_COLLECTION_REMINDERS:
+        from app.scheduler.collection_reminder_scheduler import get_scheduler as get_collection_scheduler
+        get_collection_scheduler().start()
+        logger.info("Collection reminder scheduler started.")
+
     yield
 
     # Shutdown tasks
@@ -59,6 +65,9 @@ async def lifespan(app: FastAPI):
     if settings.ENABLE_MARKET_RATE_SYNC:
         from app.scheduler.market_rate_scheduler import get_scheduler
         get_scheduler().shutdown(wait=False)
+    if settings.ENABLE_COLLECTION_REMINDERS:
+        from app.scheduler.collection_reminder_scheduler import get_scheduler as get_collection_scheduler
+        get_collection_scheduler().shutdown(wait=False)
     await close_database_connections()
 
 
