@@ -47,3 +47,34 @@ class CustomerSchemeResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ─── Phase 2 — Scheme Request lifecycle ───
+
+class SchemeRequestCreate(BaseModel):
+    scheme_id: str
+
+
+class SchemeRequestReject(BaseModel):
+    reason: str = Field(min_length=3, max_length=500)
+
+
+class SchemeRequestResponse(BaseModel):
+    id: str
+    customer_id: str
+    customer_name: Optional[str] = None
+    customer_code: Optional[str] = None
+    scheme_id: str
+    scheme_name: Optional[str] = None
+    status: str
+    kyc_status_at_request: Optional[str] = None
+    kyc_status_current: Optional[str] = None
+    enrollment_id: Optional[str] = None
+    enrollment_number: Optional[str] = None
+    rejection_reason: Optional[str] = None
+    requested_by: Optional[str] = None
+    approved_by: Optional[str] = None
+    rejected_by: Optional[str] = None
+    approved_at: Optional[datetime] = None
+    rejected_at: Optional[datetime] = None
+    created_at: Optional[datetime] = None

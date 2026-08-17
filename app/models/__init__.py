@@ -13,7 +13,7 @@ from app.models.auth import (
 from app.models.customer import KYCRecord, UserAddress, Branch, KycDocument
 from app.models.audit import AuditLog
 from app.models.goldrate import GoldRate
-from app.models.scheme import Scheme
+from app.models.scheme import Scheme, SchemeRequest
 from app.models.enrollment import SchemeEnrollment
 from app.models.passbook import PassbookEntry
 from app.models.payment import Payment
@@ -47,6 +47,7 @@ __all__ = [
     "AuditLog",
     "GoldRate",
     "Scheme",
+    "SchemeRequest",
     "SchemeEnrollment",
     "PassbookEntry",
     "Payment",
