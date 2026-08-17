@@ -3,7 +3,7 @@ from typing import List, Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.auth import User
-from app.models.promotion import Promotion
+from app.models.promotion import Promotion, BANNER_TYPE_IMAGE_ONLY, BANNER_TYPE_STANDARD
 from app.repositories.promotion_repository import PromotionRepository
 from app.repositories.customer_repository import CustomerRepository
 from app.repositories.audit_repository import AuditRepository
@@ -45,6 +45,7 @@ class PromotionService:
 
         return CustomerBannerResponse(
             id=promotion.id,
+            banner_type=promotion.banner_type,
             title=promotion.title,
             subtitle=promotion.subtitle,
             description=promotion.description,
@@ -74,11 +75,22 @@ class PromotionService:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
 
+        data = req.model_dump()
+        banner_type = data.get("banner_type") or BANNER_TYPE_STANDARD
+        if banner_type == BANNER_TYPE_IMAGE_ONLY:
+            # The image is the whole banner: it is mandatory, the title is not.
+            if not (data.get("image_url") or "").strip():
+                raise ValidationException("An Image-Only banner requires a banner image.")
+            data["title"] = ""  # NOT NULL column; image carries all copy
+        else:
+            if not (data.get("title") or "").strip():
+                raise ValidationException("A Standard banner requires a title.")
+
         promotion_id = f"promo_{uuid.uuid4().hex[:12]}"
         promotion = Promotion(
             id=promotion_id,
             tenant_id=current_user.tenant_id,
-            **req.model_dump(),
+            **data,
         )
         await PromotionRepository.create(db, promotion)
         await db.flush()
@@ -124,6 +136,16 @@ class PromotionService:
 
         for field, value in updates.items():
             setattr(promotion, field, value)
+
+        # Validate the resulting state (post-merge), not just the incoming diff,
+        # so switching type or clearing the image can't leave an invalid banner.
+        if promotion.banner_type == BANNER_TYPE_IMAGE_ONLY:
+            if not (promotion.image_url or "").strip():
+                raise ValidationException("An Image-Only banner requires a banner image.")
+            promotion.title = ""
+        else:
+            if not (promotion.title or "").strip():
+                raise ValidationException("A Standard banner requires a title.")
 
         after_state = {k: getattr(promotion, k) for k in updates}
 

@@ -1,10 +1,16 @@
 from datetime import datetime
-from typing import Optional
+from typing import Literal, Optional
 from pydantic import BaseModel, Field
+
+BannerType = Literal["STANDARD", "IMAGE_ONLY"]
 
 
 class PromotionCreateRequest(BaseModel):
-    title: str = Field(..., min_length=1, max_length=200)
+    # Optional + defaulted so existing STANDARD callers (which never sent it)
+    # remain compatible. title is optional here because IMAGE_ONLY needs none;
+    # the service enforces title-for-STANDARD and image-for-IMAGE_ONLY.
+    banner_type: BannerType = "STANDARD"
+    title: Optional[str] = Field(None, max_length=200)
     subtitle: Optional[str] = Field(None, max_length=300)
     description: Optional[str] = Field(None, max_length=2000)
     image_url: Optional[str] = Field(None, max_length=500)
@@ -19,6 +25,7 @@ class PromotionCreateRequest(BaseModel):
 
 
 class PromotionUpdateRequest(BaseModel):
+    banner_type: Optional[BannerType] = None
     title: Optional[str] = Field(None, min_length=1, max_length=200)
     subtitle: Optional[str] = Field(None, max_length=300)
     description: Optional[str] = Field(None, max_length=2000)
@@ -37,6 +44,7 @@ class PromotionResponse(BaseModel):
     """Admin-facing — full record."""
     id: str
     tenant_id: str
+    banner_type: str = "STANDARD"
     title: str
     subtitle: Optional[str]
     description: Optional[str]
@@ -60,6 +68,7 @@ class CustomerBannerResponse(BaseModel):
     """Customer-facing — lean, includes derived store branding so the app
     doesn't need a second call to render the banner."""
     id: str
+    banner_type: str = "STANDARD"
     title: str
     subtitle: Optional[str] = None
     description: Optional[str] = None
