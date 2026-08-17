@@ -117,6 +117,9 @@ class MultiSchemeRedeemRequest(BaseModel):
     calls and hope each one lands.
     """
     items: List[SchemeRedeemItem] = Field(..., min_length=1)
+    # Phase 5 — the customer-app OTP authorising this sensitive redemption. The
+    # code is verified and consumed server-side before any balance is spent.
+    otp_code: str = Field(..., min_length=4, max_length=10)
 
 
 class MultiSchemeRedeemResponse(BaseModel):

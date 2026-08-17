@@ -32,6 +32,7 @@ from app.services.billing_service import (
     SaleReturnService,
 )
 from app.services.enrollment_service import SchemeBalanceService
+from app.services.otp_service import OtpService
 from app.schemas.enrollment import MultiSchemeRedeemRequest
 from app.services import billing_export_service
 from app.exceptions.base import ValidationException
@@ -576,6 +577,30 @@ async def record_sale_payment(
 # =============================================================================
 
 @router.post(
+    "/billing/sales/{sale_id}/redeem-schemes/request-otp",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Send Scheme-Redemption OTP To The Customer App (Admin)",
+    description=(
+        "Generates a single-use, 5-minute verification code for the sale's customer and "
+        "delivers it to their app as an IN_APP notification (never SMS/WhatsApp). The code "
+        "must be entered back into the redeem-schemes call to authorise the redemption."
+    ),
+)
+async def request_redemption_otp(
+    sale_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await OtpService.create_redemption_challenge(db, current_user, sale_id)
+    return StandardSuccessResponse(
+        success=True,
+        message="Verification code sent to the customer's app",
+        data={"otp": {"challenge_id": result["challenge_id"], "expires_at": result["expires_at"].isoformat()}},
+    )
+
+
+@router.post(
     "/billing/sales/{sale_id}/redeem-schemes",
     response_model=StandardSuccessResponse,
     status_code=status.HTTP_201_CREATED,
@@ -596,6 +621,10 @@ async def redeem_schemes_against_sale(
     current_user: User = Depends(require_admin_or_staff_module("billing")),
     db: AsyncSession = Depends(get_async_db),
 ):
+    # Phase 5 gate: the customer-app OTP must verify (and is consumed) before any
+    # scheme balance is touched. On an invalid/expired/exhausted code this raises
+    # and the redemption engine never runs. The engine itself is unchanged.
+    await OtpService.verify_and_consume(db, current_user, sale_id, req.otp_code)
     result = await SchemeBalanceService.redeem_multiple_against_sale(db, current_user, sale_id, req)
     return StandardSuccessResponse(
         success=True,
