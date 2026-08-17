@@ -9,12 +9,19 @@ from app.repositories.payment_repository import PaymentRepository
 from app.models.enrollment import CONTRIBUTABLE_STATUSES
 from app.repositories.enrollment_repository import EnrollmentRepository
 from app.repositories.audit_repository import AuditRepository
-from app.exceptions.base import ResourceNotFoundException, ForbiddenException, ConflictException
+from app.services.enrollment_service import _add_months
+from app.exceptions.base import (
+    ResourceNotFoundException, ForbiddenException, ConflictException, ValidationException,
+)
 from app.schemas.payment import PaymentManualCreateRequest, PaymentUpdateRequest, PaymentResponse, CustomerPaymentResponse
 
 
 def _generate_payment_reference() -> str:
     return f"PAY-{date.today():%y%m%d}-{uuid.uuid4().hex[:6].upper()}"
+
+
+def _round2(v: float) -> float:
+    return round(v + 1e-9, 2)
 
 
 def _to_admin_response(payment: Payment) -> PaymentResponse:
@@ -31,6 +38,9 @@ def _to_admin_response(payment: Payment) -> PaymentResponse:
         payment_date=payment.payment_date,
         payment_method=payment.payment_method,
         payment_status=payment.payment_status,
+        months_covered=payment.months_covered,
+        period_start=payment.period_start,
+        period_end=payment.period_end,
         gateway_name=payment.gateway_name,
         gateway_transaction_id=payment.gateway_transaction_id,
         remarks=payment.remarks,
@@ -51,6 +61,9 @@ def _to_customer_response(payment: Payment) -> CustomerPaymentResponse:
         payment_date=payment.payment_date,
         payment_method=payment.payment_method,
         payment_status=payment.payment_status,
+        months_covered=payment.months_covered,
+        period_start=payment.period_start,
+        period_end=payment.period_end,
         remarks=payment.remarks,
     )
 
@@ -80,12 +93,39 @@ class PaymentService:
     async def create_manual_payment(
         db: AsyncSession, current_user: User, req: PaymentManualCreateRequest
     ) -> PaymentResponse:
-        """Admin records a payment collected outside the app (cash/bank transfer/cheque/etc.)."""
+        """Admin records a scheme contribution collected outside the app
+        (cash/bank transfer/cheque/etc.).
+
+        Phase 3: a single call may cover 1, 3 or 6 monthly installments in ONE
+        real financial transaction (months_covered). It is recorded as exactly
+        one Payment row — never N fabricated monthly rows — and, when SUCCESSFUL,
+        advances the enrollment's coverage (months_paid) and next_due_date inside
+        one row-locked transaction, so:
+          - concurrent contributions serialise (no double-advance from stale state),
+          - a failed/pending payment changes neither balance nor coverage,
+          - a retry carrying the same idempotency_key returns the existing row.
+        """
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
+        tenant_id = current_user.tenant_id
 
-        enrollment = await EnrollmentRepository.get_enrollment_by_id(
-            db, req.enrollment_id, current_user.tenant_id
+        months = req.months_covered or 1
+        status = req.payment_status or STATUS_SUCCESS
+
+        # Idempotency: a caller-supplied key doubles as the payment_reference,
+        # which is UNIQUE per tenant. Check first so a retry is a no-op read;
+        # the unique constraint is the concurrency backstop if two retries race.
+        if req.idempotency_key:
+            existing = await PaymentRepository.get_payment_by_reference(
+                db, tenant_id, req.idempotency_key
+            )
+            if existing:
+                return _to_admin_response(existing)
+
+        # Row-lock the enrollment so a concurrent contribution to the same
+        # enrollment serialises here and reads a fresh months_paid.
+        enrollment = await EnrollmentRepository.get_enrollment_by_id_for_update(
+            db, req.enrollment_id, tenant_id
         )
         if not enrollment:
             raise ResourceNotFoundException(f"Enrollment ID '{req.enrollment_id}' not found")
@@ -98,17 +138,54 @@ class PaymentService:
                 f"longer accepts contributions."
             )
 
+        # Fetch scheme for duration + monthly amount. The row-locked enrollment
+        # fetch does NOT eager-load relations, so never touch enrollment.scheme
+        # here (lazy access would raise in async) — load it explicitly.
+        from app.repositories.scheme_repository import SchemeRepository
+        scheme = await SchemeRepository.get_scheme_by_id(db, enrollment.scheme_id, tenant_id)
+        if scheme is None:
+            raise ResourceNotFoundException(f"Scheme ID '{enrollment.scheme_id}' not found")
+        duration = scheme.duration_months
+
+        # Advance contributions must pay the exact monthly amount × months so
+        # coverage and rupees stay reconciled. A plain 1-month contribution keeps
+        # its historical freedom (partial monthly amounts still allowed).
+        if months > 1:
+            expected = _round2(scheme.monthly_amount * months)
+            if _round2(req.amount) != expected:
+                raise ValidationException(
+                    f"A {months}-month advance must be exactly {expected} "
+                    f"({scheme.monthly_amount} × {months}); got {req.amount}"
+                )
+
+        # Coverage only advances for a SUCCESSFUL contribution. Capacity is
+        # checked against the scheme duration only when it will actually advance.
+        will_advance = status == STATUS_SUCCESS
+        if will_advance and enrollment.months_paid + months > duration:
+            remaining = max(0, duration - enrollment.months_paid)
+            raise ConflictException(
+                f"Contribution of {months} month(s) exceeds the scheme's remaining "
+                f"coverage ({remaining} of {duration} months left)."
+            )
+
+        # Window this transaction pays for, from the enrollment's current coverage.
+        period_start = _add_months(enrollment.joined_date, enrollment.months_paid)
+        period_end = _add_months(enrollment.joined_date, enrollment.months_paid + months)
+
         payment_id = f"pay_{uuid.uuid4().hex[:12]}"
         payment = Payment(
             id=payment_id,
-            tenant_id=current_user.tenant_id,
+            tenant_id=tenant_id,
             enrollment_id=enrollment.id,
             passbook_entry_id=None,
-            payment_reference=_generate_payment_reference(),
+            payment_reference=req.idempotency_key or _generate_payment_reference(),
             amount=req.amount,
             payment_date=req.payment_date or date.today(),
             payment_method=req.payment_method,
-            payment_status=req.payment_status or STATUS_SUCCESS,
+            payment_status=status,
+            months_covered=months,
+            period_start=period_start if will_advance else None,
+            period_end=period_end if will_advance else None,
             gateway_name=None,
             gateway_transaction_id=None,
             remarks=req.remarks,
@@ -116,9 +193,16 @@ class PaymentService:
         )
         await PaymentRepository.create_payment(db, payment)
 
+        if will_advance:
+            enrollment.months_paid += months
+            enrollment.next_due_date = (
+                _add_months(enrollment.joined_date, enrollment.months_paid)
+                if enrollment.months_paid < duration else None
+            )
+
         await AuditRepository.create_log(
             db,
-            tenant_id=current_user.tenant_id,
+            tenant_id=tenant_id,
             actor_user_id=current_user.id,
             actor_name=current_user.name,
             actor_role=current_user.role.name,
@@ -130,16 +214,19 @@ class PaymentService:
                 "enrollment_id": enrollment.id,
                 "amount": req.amount,
                 "payment_method": req.payment_method,
-                "payment_status": payment.payment_status,
+                "payment_status": status,
+                "months_covered": months,
+                "next_due_date": str(enrollment.next_due_date) if will_advance else None,
             },
         )
 
+        # Single commit: payment row + coverage advance land together, or neither.
         await db.commit()
 
-        # NOTE: a successful manual payment deliberately does NOT create a passbook
-        # entry here. See PaymentService.create_passbook_entry_for_payment below.
+        # NOTE: a successful contribution deliberately does NOT create a passbook
+        # entry here — see PaymentService.create_passbook_entry_for_payment.
 
-        refreshed = await PaymentRepository.get_payment_by_id(db, payment_id, current_user.tenant_id)
+        refreshed = await PaymentRepository.get_payment_by_id(db, payment_id, tenant_id)
         return _to_admin_response(refreshed)
 
     @staticmethod

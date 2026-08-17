@@ -69,6 +69,22 @@ class PaymentRepository:
         return result.scalar_one_or_none()
 
     @staticmethod
+    async def get_payment_by_reference(
+        db: AsyncSession, tenant_id: str, payment_reference: str
+    ) -> Optional[Payment]:
+        """Idempotency lookup — the (tenant_id, payment_reference) pair is UNIQUE.
+        Used to make a retried/double-submitted contribution return the existing
+        row instead of creating a second one."""
+        stmt = PaymentRepository._with_relations(
+            select(Payment).where(
+                Payment.tenant_id == tenant_id,
+                Payment.payment_reference == payment_reference,
+            )
+        )
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    @staticmethod
     async def create_payment(db: AsyncSession, payment: Payment) -> Payment:
         db.add(payment)
         return payment

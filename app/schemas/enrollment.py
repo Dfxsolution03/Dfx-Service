@@ -19,6 +19,8 @@ class EnrollmentResponse(BaseModel):
     joined_date: date
     status: str
     maturity_date: date
+    months_paid: int = 0
+    next_due_date: Optional[date] = None
     created_at: datetime
     updated_at: datetime
 
@@ -35,6 +37,8 @@ class CustomerEnrollmentResponse(BaseModel):
     joined_date: date
     status: str
     maturity_date: date
+    months_paid: int = 0
+    next_due_date: Optional[date] = None
 
     class Config:
         from_attributes = True

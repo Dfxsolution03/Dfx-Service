@@ -1,6 +1,6 @@
 from datetime import date, datetime
 from typing import Optional
-from sqlalchemy import String, Date, DateTime, Float, ForeignKey, UniqueConstraint
+from sqlalchemy import String, Date, DateTime, Float, Integer, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
@@ -45,6 +45,18 @@ class SchemeEnrollment(Base, TimestampMixin):
     joined_date: Mapped[date] = mapped_column(Date, nullable=False)
     status: Mapped[str] = mapped_column(String(20), default=STATUS_ACTIVE, nullable=False, index=True)
     maturity_date: Mapped[date] = mapped_column(Date, nullable=False)
+
+    # ─── Phase 3 — contribution coverage ───
+    # Total monthly installments successfully covered so far (sum of
+    # Payment.months_covered across SUCCESSFUL contributions). A derived
+    # cache advanced only inside the row-locked contribution transaction, so
+    # concurrent contributions serialise and can never both advance from the
+    # same stale value. Balance in rupees stays derived from the payment
+    # ledger — this counts installments, not money.
+    months_paid: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Date the next installment falls due = joined_date + months_paid months.
+    # NULL once the scheme is fully covered (months_paid >= duration_months).
+    next_due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
 
     # Closure audit. Set only when an Admin explicitly closes the scheme; a
     # closure is recorded, never inferred from the status alone. No monetary

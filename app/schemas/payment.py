@@ -16,6 +16,15 @@ class PaymentManualCreateRequest(BaseModel):
     # Explicitly overridable — e.g. a cheque awaiting clearance can be logged as PENDING.
     payment_status: Optional[PaymentStatus] = "SUCCESS"
     remarks: Optional[str] = Field(None, max_length=500)
+    # ─── Phase 3 — advance contributions ───
+    # Number of monthly installments this ONE transaction covers. 1 = ordinary
+    # monthly contribution (unchanged behaviour). 3 / 6 = advance payment; the
+    # amount must then equal scheme.monthly_amount * months_covered exactly.
+    months_covered: Optional[Literal[1, 3, 6]] = 1
+    # Optional caller-supplied idempotency key. If a payment with this reference
+    # already exists for the tenant, the existing one is returned unchanged —
+    # a retry or double-submit never creates a second contribution.
+    idempotency_key: Optional[str] = Field(None, min_length=6, max_length=30)
 
 
 class PaymentUpdateRequest(BaseModel):
@@ -40,6 +49,9 @@ class PaymentResponse(BaseModel):
     payment_date: date
     payment_method: str
     payment_status: str
+    months_covered: int = 1
+    period_start: Optional[date] = None
+    period_end: Optional[date] = None
     gateway_name: Optional[str] = None
     gateway_transaction_id: Optional[str] = None
     remarks: Optional[str] = None
@@ -62,6 +74,9 @@ class CustomerPaymentResponse(BaseModel):
     payment_date: date
     payment_method: str
     payment_status: str
+    months_covered: int = 1
+    period_start: Optional[date] = None
+    period_end: Optional[date] = None
     remarks: Optional[str] = None
 
     class Config:
