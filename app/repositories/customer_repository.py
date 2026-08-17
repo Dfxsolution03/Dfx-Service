@@ -254,6 +254,35 @@ class CustomerRepository:
         return list(rows), total
 
     @staticmethod
+    async def customer_ids_with_enrollment(
+        db: AsyncSession, customer_ids: List[str], tenant_id: str
+    ) -> set:
+        """Subset of the given customers that hold at least one scheme enrollment.
+        Batched — one query resolves a whole list page."""
+        from app.models.enrollment import SchemeEnrollment
+        ids = list({c for c in customer_ids if c})
+        if not ids:
+            return set()
+        stmt = select(SchemeEnrollment.customer_id).where(
+            SchemeEnrollment.tenant_id == tenant_id, SchemeEnrollment.customer_id.in_(ids)
+        ).distinct()
+        return {r for (r,) in (await db.execute(stmt)).all()}
+
+    @staticmethod
+    async def customer_ids_with_sale(
+        db: AsyncSession, customer_ids: List[str], tenant_id: str
+    ) -> set:
+        """Subset of the given customers that have at least one sale/purchase."""
+        from app.models.billing import Sale
+        ids = list({c for c in customer_ids if c})
+        if not ids:
+            return set()
+        stmt = select(Sale.customer_id).where(
+            Sale.tenant_id == tenant_id, Sale.customer_id.in_(ids)
+        ).distinct()
+        return {r for (r,) in (await db.execute(stmt)).all()}
+
+    @staticmethod
     async def codes_for_customer_ids(
         db: AsyncSession, customer_ids: List[str], tenant_id: str
     ) -> dict:

@@ -657,7 +657,22 @@ class CustomerService:
         pagination = AdminCustomerPaginationInfo(
             page=page, page_size=limit, total_items=total, total_pages=total_pages
         )
-        return [AdminCustomerListItem.model_validate(c) for c in customers], pagination
+
+        # Derive the display type for this page in two batched queries (same rule
+        # as Customer 360): enrollment only = SCHEME, sale only or neither =
+        # WALK-IN, both = HYBRID. Never stored.
+        ids = [c.id for c in customers]
+        with_enr = await CustomerRepository.customer_ids_with_enrollment(db, ids, current_user.tenant_id)
+        with_sale = await CustomerRepository.customer_ids_with_sale(db, ids, current_user.tenant_id)
+        items = []
+        for c in customers:
+            item = AdminCustomerListItem.model_validate(c)
+            if c.id in with_enr:
+                item.customer_type = CUSTOMER_TYPE_HYBRID if c.id in with_sale else CUSTOMER_TYPE_SCHEME
+            else:
+                item.customer_type = CUSTOMER_TYPE_WALK_IN
+            items.append(item)
+        return items, pagination
 
     @staticmethod
     async def get_customer_detail_for_admin(

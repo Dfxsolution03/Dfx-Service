@@ -19,6 +19,7 @@ from datetime import date, timezone
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.models.auth import User
 from app.models.collection import CollectionReminder, REMINDER_CHANNEL_IN_APP
 from app.repositories.collection_repository import CollectionRepository
 from app.repositories.audit_repository import AuditRepository
@@ -85,3 +86,62 @@ class CollectionService:
 
         await db.commit()
         return {"sent": sent, "skipped": skipped, "candidates": len(candidates)}
+
+
+# ─── Phase 7 read API — Collections list (read-only) ───
+from sqlalchemy import select as _select, func as _func  # noqa: E402
+from app.models.scheme import Scheme as _Scheme  # noqa: E402
+from app.models.auth import User as _User  # noqa: E402
+from app.models.collection import CollectionReminder as _Reminder  # noqa: E402
+
+
+class CollectionsReadService:
+    @staticmethod
+    async def list_collections(db: AsyncSession, current_user: User) -> list:
+        """Read-only view of currently-overdue scheme installments (1..15 days,
+        ACTIVE only — same rule as the reminder engine). Composition only: it
+        creates nothing, and reminder counts come from the append-only
+        CollectionReminder rows, never a fabricated activity."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        t = current_user.tenant_id
+        today = date.today()
+
+        rows = await CollectionRepository.list_overdue_active(db, today, REMINDER_WINDOW_DAYS, t)
+        if not rows:
+            return []
+
+        enr_ids = [e.id for e in rows]
+        scheme_ids = list({e.scheme_id for e in rows})
+        cust_ids = list({e.customer_id for e in rows})
+
+        schemes = {s.id: s.name for s in (await db.execute(
+            _select(_Scheme.id, _Scheme.name).where(_Scheme.id.in_(scheme_ids))
+        )).all()}
+        users = {u.id: (u.name, u.phone, u.customer_code) for u in (await db.execute(
+            _select(_User.id, _User.name, _User.phone, _User.customer_code).where(_User.id.in_(cust_ids))
+        )).all()}
+        counts = dict((await db.execute(
+            _select(_Reminder.enrollment_id, _func.count(_Reminder.id))
+            .where(_Reminder.tenant_id == t, _Reminder.enrollment_id.in_(enr_ids))
+            .group_by(_Reminder.enrollment_id)
+        )).all())
+
+        out = []
+        for e in rows:
+            name, phone, code = users.get(e.customer_id, (None, None, None))
+            out.append({
+                "enrollment_id": e.id,
+                "enrollment_number": e.enrollment_number,
+                "customer_id": e.customer_id,
+                "customer_name": name,
+                "customer_code": code,
+                "customer_phone": phone,
+                "scheme_name": schemes.get(e.scheme_id),
+                "due_date": e.next_due_date.isoformat() if e.next_due_date else None,
+                "overdue_days": (today - e.next_due_date).days if e.next_due_date else None,
+                "reminders_sent": int(counts.get(e.id, 0)),
+                "status": "OVERDUE",
+            })
+        out.sort(key=lambda x: x["overdue_days"] or 0, reverse=True)
+        return out

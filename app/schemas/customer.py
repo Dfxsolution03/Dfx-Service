@@ -236,6 +236,8 @@ class AdminCustomerListItem(BaseModel):
     kyc_status: str
     member_since: Optional[str]
     is_active: bool
+    # Derived at read time (WALK-IN | SCHEME CUSTOMER | HYBRID), never stored.
+    customer_type: Optional[str] = None
 
     class Config:
         from_attributes = True
