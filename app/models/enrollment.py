@@ -58,6 +58,11 @@ class SchemeEnrollment(Base, TimestampMixin):
     # NULL once the scheme is fully covered (months_paid >= duration_months).
     next_due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
 
+    # Phase 8 — free-text operational note on the enrollment (preset or custom,
+    # chosen on the frontend). Pure metadata: editable at any time and never a
+    # financial field, so editing it never touches the payment/redemption ledgers.
+    remarks: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+
     # Closure audit. Set only when an Admin explicitly closes the scheme; a
     # closure is recorded, never inferred from the status alone. No monetary
     # cache here — the eligible balance is always derived from the successful

@@ -8,6 +8,7 @@ from app.schemas.auth import StandardSuccessResponse
 from app.schemas.enrollment import (
     EnrollmentCreateRequest,
     EnrollmentCloseRequest,
+    EnrollmentRemarksUpdate,
     SchemeRedeemRequest,
 )
 from app.services.enrollment_service import EnrollmentService, SchemeBalanceService
@@ -51,6 +52,27 @@ async def get_enrollment(
     return StandardSuccessResponse(
         success=True,
         message="Enrollment retrieved successfully",
+        data={"enrollment": enrollment.model_dump(mode="json")},
+    )
+
+
+@router.patch(
+    "/enrollments/{enrollment_id}/remarks",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update Enrollment Remarks (Admin/Staff)",
+    description="Edits the enrollment's free-text remark (metadata only). Financial history is untouched.",
+)
+async def update_enrollment_remarks(
+    enrollment_id: str,
+    req: EnrollmentRemarksUpdate,
+    current_user: User = Depends(require_admin_or_staff_module("enrollments")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    enrollment = await EnrollmentService.update_remarks(db, current_user, enrollment_id, req.remarks)
+    return StandardSuccessResponse(
+        success=True,
+        message="Enrollment remarks updated",
         data={"enrollment": enrollment.model_dump(mode="json")},
     )
 
