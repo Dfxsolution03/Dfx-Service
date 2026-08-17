@@ -528,6 +528,33 @@ async def download_sales_history_excel(
 
 
 @router.get(
+    "/billing/sales/ca-export.xlsx",
+    summary="CA / Accounting Export (Admin)",
+    description="Accounting-only xlsx over a period — established Sale/tax fields only, "
+                "no internal margin, no invented GST/HSN fields. Returned/cancelled sales "
+                "are included with their status so the accountant reconciles reversals.",
+)
+async def export_ca_xlsx(
+    period: Optional[str] = Query(None, pattern="^(today|this_week|this_month|this_year|custom)$"),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    current_user: User = Depends(require_admin_or_staff_module("reports")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    sales, _payments, period_label, sel_from, sel_to = await SaleService.list_for_export(
+        db, current_user, period, date_from, date_to, None, None, None
+    )
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))).scalar_one_or_none()
+    xlsx_bytes = billing_export_service.build_ca_export_excel(sales, tenant, period_label)
+    filename = f"ca-export-{sel_from.isoformat()}-to-{sel_to.isoformat()}.xlsx"
+    return Response(
+        content=xlsx_bytes,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@router.get(
     "/billing/sales/{sale_id}/payments",
     response_model=StandardSuccessResponse,
     status_code=status.HTTP_200_OK,

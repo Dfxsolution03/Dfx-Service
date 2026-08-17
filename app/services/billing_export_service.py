@@ -228,3 +228,63 @@ def build_sales_history_excel(
     buf = io.BytesIO()
     wb.save(buf)
     return buf.getvalue()
+
+
+def build_ca_export_excel(
+    sales: list,
+    tenant: Optional[Tenant],
+    period_label: str,
+) -> bytes:
+    """CA / accounting export — one row per invoice, restricted to accounting
+    fields the project already stores on the immutable Sale snapshot. NO internal
+    margin/purchase cost is exposed, and NO GST/HSN/tax field is invented: every
+    tax column here (gst_applied, tax_rate_percent, tax_amount) already exists on
+    the Sale row exactly as it was priced. Read-only — reads snapshots, writes
+    nothing."""
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "CA Export"
+
+    ws.append([tenant.name if tenant else "", "", "GSTIN", tenant.gst_number if tenant else ""])
+    ws.append(["Accounting Export", period_label])
+    ws.append([])
+
+    headers = [
+        "Invoice No", "Date", "Customer", "Product Code", "Product", "HUID", "Purity",
+        "Net Gold Weight (g)", "Gold Value (Rs)", "Making (Rs)", "Wastage (Rs)",
+        "Stone (Rs)", "Other (Rs)", "Subtotal Before Tax (Rs)", "GST Applied",
+        "Tax Rate %", "Tax Amount (Rs)", "Discount (Rs)", "Final Amount (Rs)",
+        "Sale Status", "Amount Paid (Rs)", "Amount Refunded (Rs)", "Payment Method",
+    ]
+    ws.append(headers)
+
+    for s in sales:
+        ws.append([
+            s.invoice_number,
+            s.sale_timestamp.strftime("%d-%b-%Y"),
+            s.customer_name or s.customer_id or "Walk-in",
+            s.product_code,
+            s.product_name,
+            s.huid or "",
+            s.purity,
+            s.net_gold_weight_grams,
+            s.gold_value_amount,
+            s.making_charge_amount,
+            s.wastage_amount,
+            s.stone_charge_amount,
+            s.other_charges_amount,
+            s.subtotal_before_tax,
+            "Yes" if s.gst_applied else "No",
+            s.tax_rate_percent,
+            s.tax_amount,
+            s.discount_amount,
+            s.final_amount,
+            s.sale_status,
+            s.amount_paid,
+            s.amount_refunded,
+            s.payment_method,
+        ])
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    return buf.getvalue()
