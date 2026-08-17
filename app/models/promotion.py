@@ -5,6 +5,13 @@ from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
 
+# Banner rendering mode.
+#   STANDARD   — existing behaviour: title/subtitle/CTA/colours composed by the app.
+#   IMAGE_ONLY — the uploaded image IS the finished banner; app renders only it.
+BANNER_TYPE_STANDARD = "STANDARD"
+BANNER_TYPE_IMAGE_ONLY = "IMAGE_ONLY"
+BANNER_TYPES = [BANNER_TYPE_STANDARD, BANNER_TYPE_IMAGE_ONLY]
+
 
 class Promotion(Base, TimestampMixin):
     """
@@ -21,6 +28,14 @@ class Promotion(Base, TimestampMixin):
         String(50), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
     )
 
+    # STANDARD (default) keeps every existing row and API consumer working
+    # unchanged. IMAGE_ONLY renders the uploaded image_url as the whole banner.
+    banner_type: Mapped[str] = mapped_column(
+        String(20), nullable=False, default=BANNER_TYPE_STANDARD, server_default=BANNER_TYPE_STANDARD
+    )
+    # Kept NOT NULL for backwards compatibility. An IMAGE_ONLY banner needs no
+    # title, so the service stores an empty string rather than forcing the admin
+    # to type one — the image carries all copy.
     title: Mapped[str] = mapped_column(String(200), nullable=False)
     subtitle: Mapped[Optional[str]] = mapped_column(String(300), nullable=True)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
