@@ -237,6 +237,8 @@ class SchemeRequestService:
             joined_date=today,  # the date the scheme was taken by the customer
             status=STATUS_ACTIVE,
             maturity_date=_add_months(today, scheme.duration_months),
+            months_paid=0,
+            next_due_date=today,  # first installment due from the join date
         )
         await EnrollmentRepository.create_enrollment(db, enrollment)
 

@@ -1,6 +1,6 @@
 from datetime import date
 from typing import Optional
-from sqlalchemy import String, Float, Date, Text, ForeignKey, UniqueConstraint
+from sqlalchemy import String, Float, Integer, Date, Text, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
@@ -50,6 +50,19 @@ class Payment(Base, TimestampMixin):
     payment_date: Mapped[date] = mapped_column(Date, nullable=False)
     payment_method: Mapped[str] = mapped_column(String(20), nullable=False)
     payment_status: Mapped[str] = mapped_column(String(20), nullable=False, index=True, default=STATUS_SUCCESS)
+    # ─── Phase 3 — advance-contribution coverage ───
+    # How many monthly installments THIS single financial transaction covers
+    # (1 / 3 / 6). Always 1 for an ordinary monthly contribution. There is
+    # never more than one Payment row per real transaction — an advance is one
+    # row with months_covered > 1, never N fake monthly rows.
+    months_covered: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    # The installment window this transaction pays for, derived from the
+    # enrollment's coverage at the moment it was recorded. period_end is the
+    # exclusive next-due boundary (== enrollment.next_due_date after this row,
+    # unless the scheme is now fully covered). Nullable for historical rows
+    # created before Phase 3.
+    period_start: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+    period_end: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     gateway_name: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     gateway_transaction_id: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     remarks: Mapped[Optional[str]] = mapped_column(Text, nullable=True)

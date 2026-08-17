@@ -63,6 +63,8 @@ def _to_admin_response(enrollment: SchemeEnrollment) -> EnrollmentResponse:
         joined_date=enrollment.joined_date,
         status=enrollment.status,
         maturity_date=enrollment.maturity_date,
+        months_paid=enrollment.months_paid,
+        next_due_date=enrollment.next_due_date,
         created_at=enrollment.created_at,
         updated_at=enrollment.updated_at,
     )
@@ -77,6 +79,8 @@ def _to_customer_response(enrollment: SchemeEnrollment) -> CustomerEnrollmentRes
         joined_date=enrollment.joined_date,
         status=enrollment.status,
         maturity_date=enrollment.maturity_date,
+        months_paid=enrollment.months_paid,
+        next_due_date=enrollment.next_due_date,
     )
 
 
@@ -135,6 +139,8 @@ class EnrollmentService:
             joined_date=today,
             status=STATUS_ACTIVE,
             maturity_date=_add_months(today, scheme.duration_months),
+            months_paid=0,
+            next_due_date=today,  # first installment due from the join date
         )
         await EnrollmentRepository.create_enrollment(db, enrollment)
 
