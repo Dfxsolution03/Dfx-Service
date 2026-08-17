@@ -9,9 +9,24 @@ from app.permissions.dependencies import require_admin_or_staff_module
 from app.schemas.auth import StandardSuccessResponse
 from app.schemas.report import ReportPeriod
 from app.schemas.export import ExportFormat
-from app.services.report_service import ReportService, TopProductsService
+from app.services.report_service import ReportService, TopProductsService, DashboardCardsService
 
 router = APIRouter()
+
+
+@router.get(
+    "/reports/dashboard-cards",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Dashboard Operational Cards (Admin/Staff)",
+    description="Live counts for the dashboard: overdue enrollments, pending KYC, pending inspection.",
+)
+async def get_dashboard_cards(
+    current_user: User = Depends(require_admin_or_staff_module("reports")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await DashboardCardsService.get_cards(db, current_user)
+    return StandardSuccessResponse(success=True, message="Dashboard cards retrieved", data=result)
 
 
 @router.get(

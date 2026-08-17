@@ -414,3 +414,40 @@ class TopProductsService:
             "profit_visible": privileged,
             "items": items,
         }
+
+
+# ─── Phase 8 — Dashboard operational cards ───
+from datetime import date as _date  # noqa: E402
+from sqlalchemy import select as _select, func as _func  # noqa: E402
+from app.models.auth import User as _User, Role as _Role  # noqa: E402
+from app.models.billing import InventoryItem as _Item  # noqa: E402
+from app.core.constants import ROLE_CUSTOMER as _ROLE_CUSTOMER, STOCK_STATUS_RETURNED_PENDING_INSPECTION as _PENDING_INSP  # noqa: E402
+from app.repositories.collection_repository import CollectionRepository as _CollRepo  # noqa: E402
+from app.services.collection_service import REMINDER_WINDOW_DAYS as _WINDOW  # noqa: E402
+
+
+class DashboardCardsService:
+    @staticmethod
+    async def get_cards(db: AsyncSession, current_user: User) -> dict:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        t = current_user.tenant_id
+
+        overdue = len(await _CollRepo.list_overdue_active(db, _date.today(), _WINDOW, t))
+
+        pending_kyc = int((await db.execute(
+            _select(_func.count(_User.id))
+            .join(_Role, _User.role_id == _Role.id)
+            .where(_User.tenant_id == t, _Role.name == _ROLE_CUSTOMER, _User.kyc_status == "Pending")
+        )).scalar_one())
+
+        pending_inspection = int((await db.execute(
+            _select(_func.count(_Item.id))
+            .where(_Item.tenant_id == t, _Item.stock_status == _PENDING_INSP)
+        )).scalar_one())
+
+        return {
+            "overdue_enrollments": overdue,
+            "pending_kyc": pending_kyc,
+            "pending_inspection": pending_inspection,
+        }

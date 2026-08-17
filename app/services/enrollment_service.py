@@ -65,6 +65,7 @@ def _to_admin_response(enrollment: SchemeEnrollment) -> EnrollmentResponse:
         maturity_date=enrollment.maturity_date,
         months_paid=enrollment.months_paid,
         next_due_date=enrollment.next_due_date,
+        remarks=enrollment.remarks,
         created_at=enrollment.created_at,
         updated_at=enrollment.updated_at,
     )
@@ -106,6 +107,30 @@ class EnrollmentService:
         if not enrollment:
             raise ResourceNotFoundException(f"Enrollment ID '{enrollment_id}' not found")
         return _to_admin_response(enrollment)
+
+    @staticmethod
+    async def update_remarks(
+        db: AsyncSession, current_user: User, enrollment_id: str, remarks
+    ) -> EnrollmentResponse:
+        """Edit the enrollment's free-text remark. Metadata only — no financial
+        row is touched, so this stays editable regardless of contributions."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        enrollment = await EnrollmentRepository.get_enrollment_by_id(db, enrollment_id, current_user.tenant_id)
+        if not enrollment:
+            raise ResourceNotFoundException(f"Enrollment ID '{enrollment_id}' not found")
+        before = enrollment.remarks
+        enrollment.remarks = (remarks or None)
+        await AuditRepository.create_log(
+            db, tenant_id=current_user.tenant_id, actor_user_id=current_user.id,
+            actor_name=current_user.name, actor_role=current_user.role.name,
+            action="ENROLLMENT_REMARKS_UPDATE", target_entity="scheme_enrollments",
+            target_id=enrollment.id, before_state={"remarks": before},
+            after_state={"remarks": enrollment.remarks},
+        )
+        await db.commit()
+        refreshed = await EnrollmentRepository.get_enrollment_by_id(db, enrollment_id, current_user.tenant_id)
+        return _to_admin_response(refreshed)
 
     # ─── Customer ───
 

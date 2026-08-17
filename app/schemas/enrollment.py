@@ -21,11 +21,16 @@ class EnrollmentResponse(BaseModel):
     maturity_date: date
     months_paid: int = 0
     next_due_date: Optional[date] = None
+    remarks: Optional[str] = None
     created_at: datetime
     updated_at: datetime
 
     class Config:
         from_attributes = True
+
+
+class EnrollmentRemarksUpdate(BaseModel):
+    remarks: Optional[str] = Field(None, max_length=500)
 
 
 class CustomerEnrollmentResponse(BaseModel):
