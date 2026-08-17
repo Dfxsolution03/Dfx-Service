@@ -78,8 +78,18 @@ class PromotionService:
         data = req.model_dump()
         banner_type = data.get("banner_type") or BANNER_TYPE_STANDARD
         if banner_type == BANNER_TYPE_IMAGE_ONLY:
-            # The image is the whole banner: it is mandatory, the title is not.
-            if not (data.get("image_url") or "").strip():
+            # The image is the whole banner.  When is_active=False the caller is
+            # staging the record to obtain a promotion ID before uploading the
+            # image file (the upload endpoint requires an existing ID).  Requiring
+            # image_url at create-time when the promotion is inactive would make
+            # that two-phase flow impossible.
+            #
+            # Invariant preserved by:
+            #   • update_promotion: validates image_url before any activation.
+            #   • get_top_active_for_tenant: only returns is_active=True rows.
+            #
+            # Attempted active creation (or update) without an image is still rejected.
+            if data.get("is_active", True) and not (data.get("image_url") or "").strip():
                 raise ValidationException("An Image-Only banner requires a banner image.")
             data["title"] = ""  # NOT NULL column; image carries all copy
         else:
