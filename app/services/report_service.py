@@ -361,3 +361,56 @@ class ReportService:
         columns = [ExportColumn("metric", "Metric"), ExportColumn("value", "Value")]
         stem = f"DFX_Solution_Admin_Dashboard_{_today_ist().isoformat()}"
         return ExportService.generate(rows, columns, fmt, stem)
+
+
+# ─── Phase 6 — Top Products ───
+from datetime import time as _time  # noqa: E402
+from app.repositories.report_repository import TopProductsRepository  # noqa: E402
+from app.services.billing_service import _is_privileged  # noqa: E402
+
+_TOP_METRICS = {"revenue", "quantity", "weight", "profit"}
+
+
+class TopProductsService:
+    @staticmethod
+    async def get_top_products(
+        db: AsyncSession, current_user: User, date_from: date, date_to: date,
+        metric: str = "revenue", limit: int = 10,
+    ) -> dict:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        if metric not in _TOP_METRICS:
+            raise ValidationException(f"Invalid metric '{metric}'")
+        if date_from > date_to:
+            raise ValidationException("date_from must not be after date_to")
+        limit = max(1, min(limit, 100))
+
+        privileged = _is_privileged(current_user)
+        # Profit is a privileged figure — Staff may neither rank by it nor see it.
+        if metric == "profit" and not privileged:
+            raise ForbiddenException("Profit ranking requires elevated privileges")
+
+        start = datetime.combine(date_from, _time.min, tzinfo=IST)
+        end = datetime.combine(date_to, _time.max, tzinfo=IST)
+        rows = await TopProductsRepository.aggregate(
+            db, current_user.tenant_id, start, end, metric, limit
+        )
+        items = []
+        for r in rows:
+            item = {
+                "product_code": r.product_code,
+                "product_name": r.product_name,
+                "units": int(r.units),
+                "revenue": round(float(r.revenue), 2),
+                "gold_weight_grams": round(float(r.gold_weight), 3),
+            }
+            # Never leak profit to a non-privileged caller.
+            item["profit"] = round(float(r.profit), 2) if privileged else None
+            items.append(item)
+        return {
+            "metric": metric,
+            "date_from": date_from.isoformat(),
+            "date_to": date_to.isoformat(),
+            "profit_visible": privileged,
+            "items": items,
+        }

@@ -9,9 +9,31 @@ from app.permissions.dependencies import require_admin_or_staff_module
 from app.schemas.auth import StandardSuccessResponse
 from app.schemas.report import ReportPeriod
 from app.schemas.export import ExportFormat
-from app.services.report_service import ReportService
+from app.services.report_service import ReportService, TopProductsService
 
 router = APIRouter()
+
+
+@router.get(
+    "/reports/top-products",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Top Products (Admin/Staff)",
+    description="Ranks products over a sale-date period by revenue | quantity | weight | profit. "
+                "Only COMPLETED sales count (returned/cancelled excluded). Profit is privileged.",
+)
+async def get_top_products(
+    date_from: date = Query(...),
+    date_to: date = Query(...),
+    metric: str = Query("revenue", pattern="^(revenue|quantity|weight|profit)$"),
+    limit: int = Query(10, ge=1, le=100),
+    current_user: User = Depends(require_admin_or_staff_module("reports")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await TopProductsService.get_top_products(db, current_user, date_from, date_to, metric, limit)
+    return StandardSuccessResponse(
+        success=True, message="Top products retrieved successfully", data=result,
+    )
 
 
 # All endpoints are reusable, general-purpose report types (not one-per-chart) —

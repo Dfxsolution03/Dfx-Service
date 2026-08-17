@@ -276,3 +276,47 @@ class ReportRepository:
             stmt = stmt.where(User.created_at <= as_of)
         result = await db.execute(stmt)
         return int(result.scalar_one())
+
+
+# ─── Phase 6 — Top Products (authoritative Sale aggregation) ───
+from app.models.billing import Sale  # noqa: E402
+from app.core.constants import SALE_STATUS_COMPLETED  # noqa: E402
+
+_TOP_PRODUCT_METRICS = {
+    "revenue": func.coalesce(func.sum(Sale.final_amount), 0.0),
+    "quantity": func.count(Sale.id),
+    "weight": func.coalesce(func.sum(Sale.net_gold_weight_grams), 0.0),
+    "profit": func.coalesce(func.sum(Sale.estimated_gross_margin), 0.0),
+}
+
+
+class TopProductsRepository:
+    @staticmethod
+    async def aggregate(
+        db: AsyncSession, tenant_id: str, date_from: date, date_to: date,
+        metric: str, limit: int,
+    ):
+        """Group COMPLETED sales by product; returned/cancelled sales are excluded
+        (only sale_status COMPLETED counts), so a reversed sale never inflates a
+        product's totals. Period is the sale-date axis (sale_timestamp)."""
+        order_col = _TOP_PRODUCT_METRICS[metric]
+        stmt = (
+            select(
+                Sale.product_code,
+                Sale.product_name,
+                func.count(Sale.id).label("units"),
+                func.coalesce(func.sum(Sale.final_amount), 0.0).label("revenue"),
+                func.coalesce(func.sum(Sale.net_gold_weight_grams), 0.0).label("gold_weight"),
+                func.coalesce(func.sum(Sale.estimated_gross_margin), 0.0).label("profit"),
+            )
+            .where(
+                Sale.tenant_id == tenant_id,
+                Sale.sale_status == SALE_STATUS_COMPLETED,
+                Sale.sale_timestamp >= date_from,
+                Sale.sale_timestamp <= date_to,
+            )
+            .group_by(Sale.product_code, Sale.product_name)
+            .order_by(order_col.desc())
+            .limit(limit)
+        )
+        return list((await db.execute(stmt)).all())
