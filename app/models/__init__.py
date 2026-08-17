@@ -26,6 +26,7 @@ from app.models.tenant_pricing import TenantPricingConfig
 from app.models.provider_health import ProviderHealth
 from app.models.promotion import Promotion
 from app.models.otp import OtpChallenge
+from app.models.collection import CollectionReminder
 from app.models.integration import PlatformIntegration, Webhook
 from app.models.platform_settings import PlatformSettings
 from app.models.billing import Vendor, CategoryPricingDefault, TenantBillingDefaults, InventoryItem, Sale
@@ -67,6 +68,7 @@ __all__ = [
     "ProviderHealth",
     "Promotion",
     "OtpChallenge",
+    "CollectionReminder",
     "PlatformIntegration",
     "Webhook",
     "PlatformSettings",
