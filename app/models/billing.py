@@ -1,9 +1,16 @@
 from datetime import date, datetime
 from typing import Optional
-from sqlalchemy import String, Float, Date, DateTime, Boolean, ForeignKey, UniqueConstraint
+from sqlalchemy import String, Float, Date, DateTime, Boolean, ForeignKey, UniqueConstraint, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
+
+# Bill draft (unfinished bill) lifecycle statuses. A draft is NEVER a Sale — it
+# lives in its own table and is excluded from every financial query.
+BILL_DRAFT_OPEN = "OPEN"
+BILL_DRAFT_FINALIZED = "FINALIZED"
+BILL_DRAFT_DISCARDED = "DISCARDED"
+BILL_DRAFT_STATUSES = [BILL_DRAFT_OPEN, BILL_DRAFT_FINALIZED, BILL_DRAFT_DISCARDED]
 
 
 class Vendor(Base, TimestampMixin):
@@ -476,3 +483,64 @@ class SaleReturn(Base, TimestampMixin):
 
     tenant: Mapped["Tenant"] = relationship("Tenant")
     sale: Mapped["Sale"] = relationship("Sale")
+
+
+class BillDraft(Base, TimestampMixin):
+    """An unfinished bill (draft) held server-side so an Admin/Staff can save
+    several in-progress bills, resume them on any device, and finalize later.
+
+    A draft is NOT a Sale and lives in its own table: no dashboard, report,
+    sales-history, inventory-SOLD, scheme-balance or collection query ever reads
+    it, so a draft can never move a financial figure. Only stored values are the
+    Admin's editable INPUTS — never a computed money figure; every amount is
+    recomputed by the backend on finalize, so a stale draft can never resurrect
+    a stale price or gold rate. Finalization creates exactly one Sale (reusing
+    SaleService) and flips this row to FINALIZED with finalized_sale_id set; the
+    row is kept for audit and never reopened."""
+    __tablename__ = "bill_drafts"
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Owner (creator). Admin sees all tenant drafts; Staff only their own.
+    created_by: Mapped[str] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default=BILL_DRAFT_OPEN, index=True)
+
+    # Item reference (never locked/marked SOLD by a draft) — code drives resume.
+    product_code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+
+    # Buyer — walk-in (name/phone only) or an existing customer.
+    customer_id: Mapped[Optional[str]] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    customer_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    customer_phone: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    customer_query: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+
+    # Editable pricing INPUTS only (no computed money is stored).
+    customer_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gst_applied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    making_charge_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    wastage_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gold_profit_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    discount_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+
+    payment_method: Mapped[str] = mapped_column(String(20), nullable=False, default="CASH")
+    payment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="PAID")
+    initial_payment: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # Admin's chosen scheme amounts: {enrollment_id: amount}. Selection only —
+    # never applied to a balance until finalize re-validates it live.
+    scheme_amounts: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    # Set once, at finalize.
+    finalized_sale_id: Mapped[Optional[str]] = mapped_column(
+        String(50), ForeignKey("sales.id", ondelete="SET NULL"), nullable=True
+    )
+
+    tenant: Mapped["Tenant"] = relationship("Tenant")

@@ -270,6 +270,57 @@ class AdminCustomerDetailResponse(BaseModel):
     total_invested: float
 
 
+class AdminCustomerCreateRequest(BaseModel):
+    """Admin-side manual customer creation (walk-in support). Phone AND email are
+    both optional — a walk-in with neither can still be created and gets a
+    Customer ID. The admin sets an initial password the customer can change
+    later. An optional scheme_id enrolls the new customer immediately, returning
+    the auto-generated Enrollment ID linked to this customer."""
+    name: str = Field(..., min_length=2, max_length=100)
+    phone: Optional[str] = Field(None, min_length=10, max_length=15)
+    email: Optional[EmailStr] = None
+    password: str = Field(..., min_length=8, max_length=72)
+    scheme_id: Optional[str] = Field(None, min_length=1)
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, v: Optional[str]) -> Optional[str]:
+        if v and not re.match(r"^[6-9]\d{9}$", v):
+            raise ValueError("Phone number must be a valid 10-digit Indian mobile number")
+        return v
+
+
+class AdminCustomerUpdateRequest(BaseModel):
+    """Admin-side edit of an existing customer. All optional (partial update).
+    Password, when supplied, is re-hashed; name/phone/email/is_active edited in
+    place. tenant_id is never accepted — always the admin's own tenant."""
+    name: Optional[str] = Field(None, min_length=2, max_length=100)
+    phone: Optional[str] = Field(None, min_length=10, max_length=15)
+    email: Optional[EmailStr] = None
+    password: Optional[str] = Field(None, min_length=8, max_length=72)
+    is_active: Optional[bool] = None
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, v: Optional[str]) -> Optional[str]:
+        if v and not re.match(r"^[6-9]\d{9}$", v):
+            raise ValueError("Phone number must be a valid 10-digit Indian mobile number")
+        return v
+
+
+class AdminCustomerCreateResponse(BaseModel):
+    """Result of manual customer creation — the generated Customer ID
+    (customer_code) and, when a scheme was chosen, the linked Enrollment ID."""
+    id: str
+    customer_code: Optional[str]
+    name: str
+    email: Optional[str]
+    phone: Optional[str]
+    is_active: bool
+    enrollment_id: Optional[str] = None
+    enrollment_number: Optional[str] = None
+
+
 # ─── Phase 1 — Customer 360 (read-only composition) ───
 
 CUSTOMER_TYPE_WALK_IN = "WALK-IN"

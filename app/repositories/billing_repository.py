@@ -14,6 +14,8 @@ from app.models.billing import (
     SalePayment,
     SaleReturn,
     PAYMENT_SOURCE_REFUND,
+    BillDraft,
+    BILL_DRAFT_OPEN,
 )
 
 
@@ -362,10 +364,33 @@ class SaleRepository:
             SalePayment.payment_date <= end_d,
         )
         cash, scheme, refunds = (await db.execute(stmt)).one()
+
+        # Per-method split of the SAME cash_collected figure — one extra grouped
+        # query, same WHERE clause and the same "neither refund nor scheme"
+        # filter, so the parts always sum to cash_collected and a scheme
+        # settlement can never be double-counted as CASH/UPI/CARD money in.
+        method_stmt = (
+            select(SalePayment.payment_method, func.coalesce(func.sum(SalePayment.amount), 0.0))
+            .where(
+                SalePayment.tenant_id == tenant_id,
+                SalePayment.payment_date >= start_d,
+                SalePayment.payment_date <= end_d,
+                ~is_refund,
+                ~is_scheme,
+            )
+            .group_by(SalePayment.payment_method)
+        )
+        by_method = {
+            str(method): float(total)
+            for method, total in (await db.execute(method_stmt)).all()
+            if method is not None
+        }
+
         return {
             "cash_collected": float(cash),
             "scheme_redemption": float(scheme),
             "refunds": float(-refunds),  # stored negative; report positive
+            "collected_by_method": by_method,
         }
 
     @staticmethod
@@ -592,4 +617,61 @@ class SaleReturnRepository:
         stmt = select(SaleReturn).where(
             SaleReturn.sale_id.in_(sale_ids), SaleReturn.tenant_id == tenant_id
         )
+        return list((await db.execute(stmt)).scalars().all())
+
+
+class BillDraftRepository:
+    """Data access for unfinished bills. Every read is tenant-scoped; an
+    optional owner_id further restricts to a single creator (Staff visibility).
+    Kept intentionally thin — all business rules live in BillDraftService."""
+
+    @staticmethod
+    async def create(db: AsyncSession, draft: BillDraft) -> BillDraft:
+        db.add(draft)
+        await db.flush()
+        return draft
+
+    @staticmethod
+    async def get_by_id(
+        db: AsyncSession, draft_id: str, tenant_id: str, owner_id: Optional[str] = None
+    ) -> Optional[BillDraft]:
+        stmt = select(BillDraft).where(
+            BillDraft.id == draft_id, BillDraft.tenant_id == tenant_id
+        )
+        if owner_id is not None:
+            stmt = stmt.where(BillDraft.created_by == owner_id)
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def get_by_id_for_update(
+        db: AsyncSession, draft_id: str, tenant_id: str, owner_id: Optional[str] = None
+    ) -> Optional[BillDraft]:
+        stmt = (
+            select(BillDraft)
+            .where(BillDraft.id == draft_id, BillDraft.tenant_id == tenant_id)
+            .with_for_update()
+        )
+        if owner_id is not None:
+            stmt = stmt.where(BillDraft.created_by == owner_id)
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def list_drafts(
+        db: AsyncSession,
+        tenant_id: str,
+        owner_id: Optional[str] = None,
+        status: Optional[str] = None,
+        product_code: Optional[str] = None,
+        customer_id: Optional[str] = None,
+    ) -> List[BillDraft]:
+        stmt = select(BillDraft).where(BillDraft.tenant_id == tenant_id)
+        if owner_id is not None:
+            stmt = stmt.where(BillDraft.created_by == owner_id)
+        # Default view is OPEN drafts only; an explicit status can widen it.
+        stmt = stmt.where(BillDraft.status == (status or BILL_DRAFT_OPEN))
+        if product_code is not None:
+            stmt = stmt.where(BillDraft.product_code == product_code)
+        if customer_id is not None:
+            stmt = stmt.where(BillDraft.customer_id == customer_id)
+        stmt = stmt.order_by(BillDraft.updated_at.desc())
         return list((await db.execute(stmt)).scalars().all())

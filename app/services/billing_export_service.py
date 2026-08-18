@@ -151,6 +151,7 @@ def build_sales_history_excel(
     tenant: Optional[Tenant],
     period_label: str,
     status_label: str,
+    include_internal: bool = True,
 ) -> bytes:
     """Sales History export — one row per invoice, rendered off the immutable
     Sale snapshots plus the sale_payments ledger. Same openpyxl path as
@@ -160,8 +161,10 @@ def build_sales_history_excel(
     Internal identifiers (sale id, tenant id, inventory item id, customer id,
     created_by) are deliberately omitted — they are meaningless to the Admin
     and needlessly expose internal structure. Purchase cost and profit/loss
-    ARE included: this is an owner/Admin financial export, and the caller is
-    responsible for only offering it to a privileged role.
+    are commercially sensitive: they are included ONLY when include_internal is
+    True (Admin/SuperAdmin). For Staff the caller passes include_internal=False
+    and those two columns are omitted entirely — mirroring the JSON redaction in
+    billing_service._is_privileged so the export cannot leak what the API hides.
     """
     wb = Workbook()
     ws = wb.active
@@ -177,10 +180,12 @@ def build_sales_history_excel(
         "Invoice No", "Sale Date", "Customer", "Phone",
         "Product Code", "Product", "Vendor", "Purity",
         "Gross Weight (g)", "Net Gold Weight (g)", "Gold Rate Applied (Rs/g)",
-        "Purchase Cost (Rs)", "Gold Value (Rs)", "Making (Rs)", "Wastage (Rs)",
+        *(["Purchase Cost (Rs)"] if include_internal else []),
+        "Gold Value (Rs)", "Making (Rs)", "Wastage (Rs)",
         "Stone (Rs)", "Other (Rs)", "Subtotal (Rs)", "GST %", "GST (Rs)",
         "Discount (Rs)", "Invoice Total (Rs)", "Amount Paid (Rs)",
-        "Outstanding (Rs)", "Payment Status", "Payment History", "Profit/Loss (Rs)",
+        "Outstanding (Rs)", "Payment Status", "Payment History",
+        *(["Profit/Loss (Rs)"] if include_internal else []),
     ]
     ws.append(headers)
 
@@ -203,7 +208,8 @@ def build_sales_history_excel(
             s.gross_weight_grams,
             s.net_gold_weight_grams,
             s.gold_rate_applied,
-            s.purchase_cost_snapshot if s.purchase_cost_snapshot is not None else "",
+            *([s.purchase_cost_snapshot if s.purchase_cost_snapshot is not None else ""]
+              if include_internal else []),
             s.gold_value_amount,
             s.making_charge_amount,
             s.wastage_amount,
@@ -218,12 +224,20 @@ def build_sales_history_excel(
             round(outstanding, 2),
             s.payment_status,
             _payment_history_text(payments_by_sale.get(s.id, [])),
-            s.estimated_gross_margin if s.estimated_gross_margin is not None else "",
+            *([s.estimated_gross_margin if s.estimated_gross_margin is not None else ""]
+              if include_internal else []),
         ])
 
     ws.append([])
-    ws.append(["TOTALS", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "", "",
-               round(total_invoiced, 2), round(total_collected, 2), round(total_outstanding, 2)])
+    # Totals align under Invoice Total / Amount Paid / Outstanding regardless of
+    # whether the two internal columns are present.
+    total_col = headers.index("Invoice Total (Rs)")
+    totals_row = [""] * len(headers)
+    totals_row[0] = "TOTALS"
+    totals_row[total_col] = round(total_invoiced, 2)
+    totals_row[total_col + 1] = round(total_collected, 2)
+    totals_row[total_col + 2] = round(total_outstanding, 2)
+    ws.append(totals_row)
 
     buf = io.BytesIO()
     wb.save(buf)

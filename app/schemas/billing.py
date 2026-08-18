@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Dict
 from pydantic import BaseModel, Field, model_validator
 
 Purity = Literal["9K", "14K", "18K", "20K", "22K", "24K"]
@@ -149,6 +149,10 @@ class InventoryItemCreateRequest(BaseModel):
     wastage_type: ChargeType = "PERCENTAGE"
     wastage_value: float = Field(0, ge=0)
     gold_profit_percent: float = Field(0, ge=0, le=100)
+    # Absolute per-item charges (model columns NOT NULL default 0). Read
+    # directly by BillingService.create_item, so they must exist on the request.
+    stone_charge_amount: float = Field(0, ge=0)
+    other_charges_amount: float = Field(0, ge=0)
     # Required, no default — a GST/tax rate must be a conscious choice per
     # item, never silently assumed (see app/models/billing.py).
     tax_rate_percent: float = Field(..., ge=0, le=100)
@@ -184,6 +188,8 @@ class InventoryItemUpdateRequest(BaseModel):
     wastage_type: Optional[ChargeType] = None
     wastage_value: Optional[float] = Field(None, ge=0)
     gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
+    stone_charge_amount: Optional[float] = Field(None, ge=0)
+    other_charges_amount: Optional[float] = Field(None, ge=0)
     tax_rate_percent: Optional[float] = Field(None, ge=0, le=100)
     pricing_mode: Optional[PricingMode] = None
 
@@ -256,6 +262,8 @@ class BulkPurchaseLineItem(BaseModel):
     wastage_type: ChargeType = "PERCENTAGE"
     wastage_value: float = Field(0, ge=0)
     gold_profit_percent: float = Field(0, ge=0, le=100)
+    stone_charge_amount: float = Field(0, ge=0)
+    other_charges_amount: float = Field(0, ge=0)
     tax_rate_percent: float = Field(..., ge=0, le=100)
     pricing_mode: Optional[PricingMode] = None
 
@@ -681,6 +689,10 @@ class BillingPeriodSummary(BaseModel):
     cash_collected: float = 0.0
     scheme_redemption: float = 0.0
     refunds_paid: float = 0.0
+    # Payment-method split of cash_collected ONLY (e.g. {"CASH": 5000, "UPI":
+    # 2000}). Scheme settlements and refunds are excluded upstream, so these
+    # parts sum to cash_collected and scheme credit is never counted as money in.
+    collected_by_method: Dict[str, float] = Field(default_factory=dict)
     # Receivables position over the period (active COMPLETED sales only).
     total_paid: float = 0.0
     total_outstanding: float = 0.0
@@ -749,3 +761,100 @@ class PriceLinePreviewResponse(BaseModel):
 # declared after it; resolve it once at import time so the first request never
 # pays for (or trips over) a lazy rebuild.
 SaleResponse.model_rebuild()
+
+
+# =============================================================================
+# Bill Drafts (unfinished bills) — server-side, multiple per user
+# =============================================================================
+
+class BillDraftCreateRequest(BaseModel):
+    """Editable INPUTS of an unfinished bill. No computed money is accepted —
+    every amount is recomputed by the backend on finalize."""
+    product_code: str = Field(..., min_length=1, max_length=50)
+    customer_id: Optional[str] = Field(None, max_length=50)
+    customer_name: Optional[str] = Field(None, max_length=150)
+    customer_phone: Optional[str] = Field(None, max_length=20)
+    customer_query: Optional[str] = Field(None, max_length=150)
+    customer_price: Optional[float] = Field(None, ge=0)
+    gst_applied: bool = True
+    making_charge_value: Optional[float] = Field(None, ge=0)
+    wastage_value: Optional[float] = Field(None, ge=0)
+    gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
+    discount_amount: float = Field(0, ge=0)
+    payment_method: PaymentMethod = "CASH"
+    payment_status: PaymentStatus = "PAID"
+    initial_payment: Optional[float] = Field(None, ge=0)
+    # {enrollment_id: amount} — selection only, never applied until finalize.
+    scheme_amounts: Optional[Dict[str, float]] = None
+    note: Optional[str] = Field(None, max_length=255)
+
+
+class BillDraftUpdateRequest(BaseModel):
+    """All optional — partial update of an OPEN draft."""
+    product_code: Optional[str] = Field(None, min_length=1, max_length=50)
+    customer_id: Optional[str] = Field(None, max_length=50)
+    customer_name: Optional[str] = Field(None, max_length=150)
+    customer_phone: Optional[str] = Field(None, max_length=20)
+    customer_query: Optional[str] = Field(None, max_length=150)
+    customer_price: Optional[float] = Field(None, ge=0)
+    gst_applied: Optional[bool] = None
+    making_charge_value: Optional[float] = Field(None, ge=0)
+    wastage_value: Optional[float] = Field(None, ge=0)
+    gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
+    discount_amount: Optional[float] = Field(None, ge=0)
+    payment_method: Optional[PaymentMethod] = None
+    payment_status: Optional[PaymentStatus] = None
+    initial_payment: Optional[float] = Field(None, ge=0)
+    scheme_amounts: Optional[Dict[str, float]] = None
+    note: Optional[str] = Field(None, max_length=255)
+
+
+class BillDraftFinalizeRequest(BaseModel):
+    """Finalize an OPEN draft into exactly one Sale. otp_code is required only
+    when the draft carries scheme_amounts (scheme redemption is OTP-gated, same
+    as the live sell screen)."""
+    otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
+
+
+class BillDraftResponse(BaseModel):
+    id: str
+    tenant_id: str
+    created_by: str
+    status: str
+    product_code: str
+    customer_id: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    customer_query: Optional[str] = None
+    customer_price: Optional[float] = None
+    gst_applied: bool
+    making_charge_value: Optional[float] = None
+    wastage_value: Optional[float] = None
+    gold_profit_percent: Optional[float] = None
+    discount_amount: float
+    payment_method: str
+    payment_status: str
+    initial_payment: Optional[float] = None
+    scheme_amounts: Optional[Dict[str, float]] = None
+    note: Optional[str] = None
+    finalized_sale_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class BillDraftListItem(BaseModel):
+    """Lean row for the Unfinished Bills list."""
+    id: str
+    status: str
+    product_code: str
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    created_by: str
+    note: Optional[str] = None
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True

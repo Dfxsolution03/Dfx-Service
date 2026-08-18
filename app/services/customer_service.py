@@ -6,8 +6,11 @@ from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import hash_password, verify_password
-from app.models.auth import User, Tenant, RefreshToken
+from app.core.constants import ROLE_CUSTOMER
+from app.models.auth import User, Tenant, RefreshToken, Role
 from app.models.customer import KYCRecord, UserAddress, Branch, KycDocument
+from app.models.enrollment import SchemeEnrollment, STATUS_ACTIVE
+from app.repositories.scheme_repository import SchemeRepository
 from app.models.payment import STATUS_SUCCESS as PAYMENT_SUCCESS
 from app.core.constants import SALE_STATUS_COMPLETED
 from app.repositories.customer_repository import CustomerRepository
@@ -20,7 +23,11 @@ from app.repositories.billing_repository import (
     SalePaymentRepository,
     SaleReturnRepository,
 )
-from app.services.enrollment_service import SchemeBalanceService
+from app.services.enrollment_service import (
+    SchemeBalanceService,
+    _add_months,
+    _generate_enrollment_number,
+)
 
 # Upper bound on how many contribution / purchase rows one Customer 360 read
 # returns. A memory backstop for an unusually long-lived customer, not a
@@ -50,6 +57,9 @@ from app.schemas.customer import (
     AdminCustomerListItem,
     AdminCustomerDetailResponse,
     AdminCustomerPaginationInfo,
+    AdminCustomerCreateRequest,
+    AdminCustomerCreateResponse,
+    AdminCustomerUpdateRequest,
     CustomerOverviewResponse,
     CustomerOverviewProfile,
     CustomerOverviewKyc,
@@ -640,6 +650,145 @@ class CustomerService:
         return KycDocumentResponse.model_validate(document)
 
     # ─── Phase 6C / Module 33: Admin Customer Management ───
+
+    @staticmethod
+    async def create_customer_admin(
+        db: AsyncSession, current_user: User, req: AdminCustomerCreateRequest
+    ) -> AdminCustomerCreateResponse:
+        """Admin manual customer creation (walk-in). Phone/email optional; a
+        Customer ID (customer_code) is always allocated. If scheme_id is given,
+        an ACTIVE enrollment with an auto Enrollment ID is created and linked to
+        the new customer in the SAME transaction. Tenant is always the admin's
+        own — never taken from the request."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        # Duplicate identity is checked globally, matching register_customer:
+        # login resolves a user by email/phone with no tenant filter, so these
+        # must stay globally unique or login would break.
+        if req.email:
+            if (await db.execute(select(User).where(User.email == req.email))).scalar_one_or_none():
+                raise ConflictException("An account with this email address already exists")
+        if req.phone:
+            if (await db.execute(select(User).where(User.phone == req.phone))).scalar_one_or_none():
+                raise ConflictException("An account with this mobile phone number already exists")
+
+        role = (await db.execute(select(Role).where(Role.name == ROLE_CUSTOMER))).scalar_one_or_none()
+        if not role:
+            raise ResourceNotFoundException("Customer role configuration missing in database")
+
+        # Validate the scheme up front (before allocating a code) so an invalid
+        # scheme_id never consumes a customer-code sequence value.
+        scheme = None
+        if req.scheme_id:
+            scheme = await SchemeRepository.get_scheme_by_id(db, req.scheme_id, current_user.tenant_id)
+            if not scheme:
+                raise ResourceNotFoundException(f"Scheme ID '{req.scheme_id}' not found")
+            if not scheme.is_active:
+                raise ValidationException("This scheme is not currently active and cannot accept new enrollments")
+
+        customer_code = await CustomerRepository.allocate_customer_code(db, current_user.tenant_id)
+        user = User(
+            id=f"usr_{uuid.uuid4().hex[:12]}",
+            tenant_id=current_user.tenant_id,
+            role_id=role.id,
+            email=req.email,
+            phone=req.phone,
+            hashed_password=hash_password(req.password),
+            name=req.name,
+            kyc_status="Pending",
+            customer_code=customer_code,
+            member_since=datetime.now(timezone.utc).strftime("%B %Y"),
+            is_active=True,
+        )
+        db.add(user)
+        await db.flush()  # assign FK-usable user.id before the enrollment insert
+
+        enrollment = None
+        if scheme:
+            today = datetime.now(timezone.utc).date()
+            enrollment = SchemeEnrollment(
+                id=f"enr_{uuid.uuid4().hex[:12]}",
+                tenant_id=current_user.tenant_id,
+                customer_id=user.id,
+                scheme_id=scheme.id,
+                enrollment_number=_generate_enrollment_number(),
+                joined_date=today,
+                status=STATUS_ACTIVE,
+                maturity_date=_add_months(today, scheme.duration_months),
+                months_paid=0,
+                next_due_date=today,
+            )
+            db.add(enrollment)
+            await db.flush()
+
+        await AuditRepository.create_log(
+            db, tenant_id=current_user.tenant_id, actor_user_id=current_user.id,
+            actor_name=current_user.name, actor_role=current_user.role.name,
+            action="CUSTOMER_CREATE", target_entity="users", target_id=user.id,
+            before_state=None,
+            after_state={
+                "customer_code": customer_code,
+                "enrollment_number": enrollment.enrollment_number if enrollment else None,
+            },
+        )
+        await db.commit()
+
+        return AdminCustomerCreateResponse(
+            id=user.id,
+            customer_code=customer_code,
+            name=user.name,
+            email=user.email,
+            phone=user.phone,
+            is_active=user.is_active,
+            enrollment_id=enrollment.id if enrollment else None,
+            enrollment_number=enrollment.enrollment_number if enrollment else None,
+        )
+
+    @staticmethod
+    async def update_customer_admin(
+        db: AsyncSession, current_user: User, customer_id: str, req: AdminCustomerUpdateRequest
+    ) -> AdminCustomerDetailResponse:
+        """Admin edit of an existing own-tenant customer. Partial update; unique
+        email/phone re-checked globally when changed."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        customer = await CustomerRepository.get_customer_by_id_for_tenant(
+            db, current_user.tenant_id, customer_id
+        )
+        if not customer:
+            raise ResourceNotFoundException(f"Customer ID '{customer_id}' not found")
+
+        if req.email is not None and req.email != customer.email:
+            dup = (await db.execute(
+                select(User).where(User.email == req.email, User.id != customer.id)
+            )).scalar_one_or_none()
+            if dup:
+                raise ConflictException("An account with this email address already exists")
+            customer.email = req.email
+        if req.phone is not None and req.phone != customer.phone:
+            dup = (await db.execute(
+                select(User).where(User.phone == req.phone, User.id != customer.id)
+            )).scalar_one_or_none()
+            if dup:
+                raise ConflictException("An account with this mobile phone number already exists")
+            customer.phone = req.phone
+        if req.name is not None:
+            customer.name = req.name
+        if req.is_active is not None:
+            customer.is_active = req.is_active
+        if req.password:
+            customer.hashed_password = hash_password(req.password)
+
+        await AuditRepository.create_log(
+            db, tenant_id=current_user.tenant_id, actor_user_id=current_user.id,
+            actor_name=current_user.name, actor_role=current_user.role.name,
+            action="CUSTOMER_UPDATE", target_entity="users", target_id=customer.id,
+            before_state=None, after_state={"customer_id": customer.id},
+        )
+        await db.commit()
+        return await CustomerService.get_customer_detail_for_admin(db, current_user, customer_id)
 
     @staticmethod
     async def get_customers_for_admin(

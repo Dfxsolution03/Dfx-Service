@@ -22,6 +22,9 @@ from app.schemas.billing import (
     SalePaymentCreateRequest,
     SaleReturnCreateRequest,
     SaleReturnInspectionRequest,
+    BillDraftCreateRequest,
+    BillDraftUpdateRequest,
+    BillDraftFinalizeRequest,
 )
 from app.services.billing_service import (
     VendorService,
@@ -30,6 +33,8 @@ from app.services.billing_service import (
     SaleService,
     SalePaymentService,
     SaleReturnService,
+    BillDraftService,
+    _is_privileged,
 )
 from app.services.enrollment_service import SchemeBalanceService
 from app.services.otp_service import OtpService
@@ -517,7 +522,8 @@ async def download_sales_history_excel(
     )
     tenant = (await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))).scalar_one_or_none()
     xlsx_bytes = billing_export_service.build_sales_history_excel(
-        sales, payments_by_sale, tenant, period_label, payment_status or "ALL"
+        sales, payments_by_sale, tenant, period_label, payment_status or "ALL",
+        include_internal=_is_privileged(current_user),
     )
     filename = f"sales-history-{sel_from.isoformat()}-to-{sel_to.isoformat()}.xlsx"
     return Response(
@@ -838,4 +844,123 @@ async def download_invoice_excel(
         content=xlsx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{sale.invoice_number}.xlsx"'},
+    )
+
+
+
+# =============================================================================
+# Bill Drafts (unfinished bills)
+# =============================================================================
+@router.post(
+    "/billing/drafts",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Save Unfinished Bill (Admin/Staff)",
+    description="Saves an unfinished bill (draft). A draft is never a Sale and never touches "
+                "inventory, scheme balances or any financial total until finalized. Multiple "
+                "drafts may exist at once.",
+)
+async def create_bill_draft(
+    req: BillDraftCreateRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    draft = await BillDraftService.create_draft(db, current_user, req)
+    return StandardSuccessResponse(
+        success=True, message="Unfinished bill saved", data={"draft": draft.model_dump(mode="json")}
+    )
+
+
+@router.get(
+    "/billing/drafts",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List Unfinished Bills (Admin/Staff)",
+    description="Admin sees all tenant drafts; Staff sees only their own. Optional filters: "
+                "status, product_code (resume by code), customer_id.",
+)
+async def list_bill_drafts(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    product_code: Optional[str] = Query(None),
+    customer_id: Optional[str] = Query(None),
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    drafts = await BillDraftService.list_drafts(db, current_user, status_filter, product_code, customer_id)
+    return StandardSuccessResponse(
+        success=True,
+        message="Unfinished bills retrieved",
+        data={"drafts": [d.model_dump(mode="json") for d in drafts]},
+    )
+
+
+@router.get(
+    "/billing/drafts/{draft_id}",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Unfinished Bill (Admin/Staff)",
+)
+async def get_bill_draft(
+    draft_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    draft = await BillDraftService.get_draft(db, current_user, draft_id)
+    return StandardSuccessResponse(
+        success=True, message="Unfinished bill retrieved", data={"draft": draft.model_dump(mode="json")}
+    )
+
+
+@router.put(
+    "/billing/drafts/{draft_id}",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Edit Unfinished Bill (Admin/Staff)",
+)
+async def update_bill_draft(
+    draft_id: str,
+    req: BillDraftUpdateRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    draft = await BillDraftService.update_draft(db, current_user, draft_id, req)
+    return StandardSuccessResponse(
+        success=True, message="Unfinished bill updated", data={"draft": draft.model_dump(mode="json")}
+    )
+
+
+@router.delete(
+    "/billing/drafts/{draft_id}",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Discard Unfinished Bill (Admin/Staff)",
+)
+async def discard_bill_draft(
+    draft_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    await BillDraftService.discard_draft(db, current_user, draft_id)
+    return StandardSuccessResponse(success=True, message="Unfinished bill discarded", data={})
+
+
+@router.post(
+    "/billing/drafts/{draft_id}/finalize",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Finalize Unfinished Bill Into A Sale (Admin/Staff)",
+    description="Converts an OPEN draft into exactly one finalized Sale: recomputes pricing from "
+                "the live item and gold rate, marks inventory SOLD atomically, applies selected "
+                "scheme redemption (OTP-gated), and flips the draft to FINALIZED. Any failure "
+                "leaves the draft OPEN. A finalized draft cannot be finalized again.",
+)
+async def finalize_bill_draft(
+    draft_id: str,
+    req: BillDraftFinalizeRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    sale = await BillDraftService.finalize_draft(db, current_user, draft_id, req)
+    return StandardSuccessResponse(
+        success=True, message="Bill finalized", data={"sale": sale.model_dump(mode="json")}
     )

@@ -1,6 +1,6 @@
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, List
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +35,10 @@ from app.models.billing import (
     PAYMENT_SOURCE_COUNTER,
     PAYMENT_SOURCE_REFUND,
     PAYMENT_SOURCE_SCHEME_REDEMPTION,
+    BillDraft,
+    BILL_DRAFT_OPEN,
+    BILL_DRAFT_FINALIZED,
+    BILL_DRAFT_DISCARDED,
 )
 from app.repositories.billing_repository import (
     VendorRepository,
@@ -44,6 +48,7 @@ from app.repositories.billing_repository import (
     SaleRepository,
     SalePaymentRepository,
     SaleReturnRepository,
+    BillDraftRepository,
 )
 from app.repositories.enrollment_repository import EnrollmentRepository, SchemeRedemptionRepository
 from app.models.enrollment import (
@@ -75,6 +80,11 @@ from app.schemas.billing import (
     InventoryItemUpdateRequest,
     InventoryItemResponse,
     InventoryItemListResponse,
+    BillDraftCreateRequest,
+    BillDraftUpdateRequest,
+    BillDraftFinalizeRequest,
+    BillDraftResponse,
+    BillDraftListItem,
     BulkPurchaseRequest,
     BulkPurchaseResponse,
     PriceBreakdown,
@@ -1317,6 +1327,9 @@ class SaleService:
             "cash_collected": coll["cash_collected"],
             "scheme_redemption": coll["scheme_redemption"],
             "refunds_paid": coll["refunds"],
+            # Per-method split of cash_collected only (scheme settlements and
+            # refunds are excluded upstream), so the parts sum to cash_collected.
+            "collected_by_method": coll.get("collected_by_method", {}),
             "total_paid": rec["total_paid"],
             "total_outstanding": rec["total_outstanding"],
             "paid_count": rec["paid_count"],
@@ -2057,3 +2070,209 @@ class SaleReturnService:
 
         await db.commit()
         return await SaleReturnService.get_for_sale(db, current_user, sale_id)
+
+
+
+class BillDraftService:
+    """Server-side unfinished bills. A draft is never a Sale and lives in its
+    own table, so it can never touch inventory, scheme balances or any financial
+    total until it is finalized. Finalization reuses SaleService.create_sale and
+    the existing scheme-redemption engine verbatim — no financial logic is
+    duplicated here.
+
+    Ownership: Admin/SuperAdmin see and act on every draft in their tenant;
+    Staff only on drafts they created. Enforced by passing owner_id into every
+    repository read (None for privileged, current_user.id for Staff)."""
+
+    @staticmethod
+    def _owner_scope(current_user: User) -> Optional[str]:
+        return None if _is_privileged(current_user) else current_user.id
+
+    @staticmethod
+    def _to_response(draft: BillDraft) -> BillDraftResponse:
+        return BillDraftResponse.model_validate(draft)
+
+    @staticmethod
+    async def create_draft(
+        db: AsyncSession, current_user: User, req: BillDraftCreateRequest
+    ) -> BillDraftResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        draft = BillDraft(
+            id=f"bd_{uuid.uuid4().hex[:12]}",
+            tenant_id=current_user.tenant_id,
+            created_by=current_user.id,
+            status=BILL_DRAFT_OPEN,
+            product_code=req.product_code,
+            customer_id=req.customer_id,
+            customer_name=req.customer_name,
+            customer_phone=req.customer_phone,
+            customer_query=req.customer_query,
+            customer_price=req.customer_price,
+            gst_applied=req.gst_applied,
+            making_charge_value=req.making_charge_value,
+            wastage_value=req.wastage_value,
+            gold_profit_percent=req.gold_profit_percent,
+            discount_amount=req.discount_amount,
+            payment_method=req.payment_method,
+            payment_status=req.payment_status,
+            initial_payment=req.initial_payment,
+            scheme_amounts=req.scheme_amounts or None,
+            note=req.note,
+        )
+        await BillDraftRepository.create(db, draft)
+        await db.commit()
+        refreshed = await BillDraftRepository.get_by_id(db, draft.id, current_user.tenant_id)
+        return BillDraftService._to_response(refreshed)
+
+    @staticmethod
+    async def list_drafts(
+        db: AsyncSession,
+        current_user: User,
+        status: Optional[str] = None,
+        product_code: Optional[str] = None,
+        customer_id: Optional[str] = None,
+    ) -> List[BillDraftListItem]:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        rows = await BillDraftRepository.list_drafts(
+            db, current_user.tenant_id, BillDraftService._owner_scope(current_user),
+            status, product_code, customer_id,
+        )
+        return [BillDraftListItem.model_validate(r) for r in rows]
+
+    @staticmethod
+    async def get_draft(
+        db: AsyncSession, current_user: User, draft_id: str
+    ) -> BillDraftResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        draft = await BillDraftRepository.get_by_id(
+            db, draft_id, current_user.tenant_id, BillDraftService._owner_scope(current_user)
+        )
+        if not draft:
+            raise ResourceNotFoundException(f"Bill draft '{draft_id}' not found")
+        return BillDraftService._to_response(draft)
+
+    @staticmethod
+    async def update_draft(
+        db: AsyncSession, current_user: User, draft_id: str, req: BillDraftUpdateRequest
+    ) -> BillDraftResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        draft = await BillDraftRepository.get_by_id_for_update(
+            db, draft_id, current_user.tenant_id, BillDraftService._owner_scope(current_user)
+        )
+        if not draft:
+            raise ResourceNotFoundException(f"Bill draft '{draft_id}' not found")
+        if draft.status != BILL_DRAFT_OPEN:
+            raise ConflictException(f"Bill draft is '{draft.status}' and can no longer be edited")
+
+        for field in (
+            "product_code", "customer_id", "customer_name", "customer_phone", "customer_query",
+            "customer_price", "gst_applied", "making_charge_value", "wastage_value",
+            "gold_profit_percent", "discount_amount", "payment_method", "payment_status",
+            "initial_payment", "note",
+        ):
+            val = getattr(req, field, None)
+            if val is not None:
+                setattr(draft, field, val)
+        if req.scheme_amounts is not None:
+            draft.scheme_amounts = req.scheme_amounts or None
+
+        await db.commit()
+        refreshed = await BillDraftRepository.get_by_id(db, draft_id, current_user.tenant_id)
+        return BillDraftService._to_response(refreshed)
+
+    @staticmethod
+    async def discard_draft(db: AsyncSession, current_user: User, draft_id: str) -> None:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        draft = await BillDraftRepository.get_by_id_for_update(
+            db, draft_id, current_user.tenant_id, BillDraftService._owner_scope(current_user)
+        )
+        if not draft:
+            raise ResourceNotFoundException(f"Bill draft '{draft_id}' not found")
+        if draft.status == BILL_DRAFT_FINALIZED:
+            raise ConflictException("A finalized draft cannot be discarded")
+        draft.status = BILL_DRAFT_DISCARDED
+        await db.commit()
+
+    @staticmethod
+    async def finalize_draft(
+        db: AsyncSession, current_user: User, draft_id: str, req: BillDraftFinalizeRequest
+    ) -> SaleResponse:
+        """Convert an OPEN draft into exactly one finalized Sale.
+
+        Reuses SaleService.create_sale verbatim (recompute-from-live pricing +
+        atomic inventory SOLD + snapshot). Stored draft pricing is treated as
+        INPUT only; every money figure is recomputed from the live item and gold
+        rate.
+
+        Scheme selection: the scheme-redemption OTP is issued PER SALE
+        (OtpService.create_redemption_challenge needs an existing sale_id), and a
+        draft has no sale until this call runs — so scheme credit cannot be
+        applied inside finalize. When the draft carries a scheme selection the
+        sale is created PENDING (its outstanding preserved) and the caller then
+        settles it through the existing per-sale request-otp + redeem-schemes
+        flow, exactly as the live sell screen does. draft.scheme_amounts is
+        carried on the response's caller so the frontend can drive that step.
+
+        Idempotency / double-finalize: the draft is row-locked and checked OPEN
+        before anything runs; a second finalize sees a non-OPEN status and is
+        rejected. If the item was sold elsewhere between save and finalize,
+        create_sale raises (item not IN_STOCK) and the draft is left OPEN with no
+        partial Sale."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        draft = await BillDraftRepository.get_by_id_for_update(
+            db, draft_id, current_user.tenant_id, BillDraftService._owner_scope(current_user)
+        )
+        if not draft:
+            raise ResourceNotFoundException(f"Bill draft '{draft_id}' not found")
+        if draft.status != BILL_DRAFT_OPEN:
+            raise ConflictException(f"Bill draft is '{draft.status}' and cannot be finalized again")
+
+        has_scheme = bool({k: v for k, v in (draft.scheme_amounts or {}).items() if float(v) > 0})
+
+        # Build the sale request from the draft's INPUTS. When scheme credit will
+        # settle part of the bill, the sale is created PENDING so its outstanding
+        # is preserved for the subsequent per-sale scheme redemption step.
+        sale_req = SaleCreateRequest(
+            product_code=draft.product_code,
+            customer_id=draft.customer_id,
+            customer_name=draft.customer_name,
+            customer_phone=draft.customer_phone,
+            discount_amount=draft.discount_amount or 0,
+            customer_price=draft.customer_price,
+            making_charge_value=draft.making_charge_value,
+            wastage_value=draft.wastage_value,
+            gold_profit_percent=draft.gold_profit_percent,
+            gst_applied=draft.gst_applied,
+            payment_method=draft.payment_method,
+            payment_status=("PENDING" if has_scheme else draft.payment_status),
+            initial_payment_amount=(
+                draft.initial_payment if (not has_scheme and draft.payment_status == "PARTIAL") else None
+            ),
+        )
+        sale = await SaleService.create_sale(db, current_user, sale_req)
+
+        # Flip the draft to FINALIZED. Re-lock in this transaction; a racing
+        # finalize is impossible because create_sale already marked the item SOLD
+        # (a second attempt would have failed above).
+        locked = await BillDraftRepository.get_by_id_for_update(
+            db, draft_id, current_user.tenant_id
+        )
+        locked.status = BILL_DRAFT_FINALIZED
+        locked.finalized_sale_id = sale.id
+        await AuditRepository.create_log(
+            db, tenant_id=current_user.tenant_id, actor_user_id=current_user.id,
+            actor_name=current_user.name, actor_role=current_user.role.name,
+            action="BILL_DRAFT_FINALIZE", target_entity="bill_drafts", target_id=draft_id,
+            before_state={"status": BILL_DRAFT_OPEN},
+            after_state={"status": BILL_DRAFT_FINALIZED, "finalized_sale_id": sale.id},
+        )
+        await db.commit()
+
+        return await SaleService.get_sale(db, current_user, sale.id)
