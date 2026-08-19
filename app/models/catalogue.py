@@ -34,10 +34,15 @@ class Product(Base, TimestampMixin):
     tags: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
     # Making-charge discount shown on the customer catalogue card (mobile reads
     # making_charge_discount_label). Both nullable/additive — no existing row
-    # is affected. tag_colors from the remote catalogue snapshot is deliberately
-    # NOT ported: no current client consumes it.
+    # is affected.
     making_charge_discount_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
     making_charge_discount_label: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # Per-tag display colour overrides for the Admin catalogue UI, stored as a
+    # JSON object string ({"BESTSELLER": "#C9A227", ...}) — same "plain string
+    # column, (de)serialised at the service boundary" convention `tags` and
+    # CatalogueDesign.canvas_json already follow. Added to production by
+    # emergency SQL and brought under Alembic control by revision 00ec5a9151da.
+    tag_colors: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
     # Soft delete, same is_active-flag convention as Scheme/Branch — no
     # dedicated deleted_at column exists anywhere else in this codebase.
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)

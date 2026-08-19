@@ -15,6 +15,12 @@ from app.schemas.customer_catalogue import (
 )
 
 
+def _split_tags(tags_text: Optional[str]) -> List[str]:
+    if not tags_text:
+        return []
+    return [t.strip() for t in tags_text.split(",") if t.strip()]
+
+
 def _primary_image_path(product: Product) -> Optional[str]:
     # Field is named `primary_image_path` for historical/schema-compat reasons,
     # but callers (Web, Flutter) need a fetchable URL — same conversion the
@@ -39,13 +45,14 @@ def _to_list_item(product: Product) -> CustomerProductListItem:
         price=product.price,
         weight_grams=product.weight_grams,
         primary_image_path=_primary_image_path(product),
+        tags=_split_tags(product.tags),
         making_charge_discount_label=product.making_charge_discount_label,
         making_charge_discount_percent=product.making_charge_discount_percent,
     )
 
 
 def _to_detail(product: Product) -> CustomerProductDetailResponse:
-    tags = [t.strip() for t in (product.tags or "").split(",") if t.strip()]
+    tags = _split_tags(product.tags)
     provider = get_storage_provider()
     return CustomerProductDetailResponse(
         id=product.id,
@@ -85,6 +92,8 @@ class CustomerCatalogueService:
         price_max: Optional[float] = None,
         weight_min: Optional[float] = None,
         weight_max: Optional[float] = None,
+        purity: Optional[str] = None,
+        tag: Optional[str] = None,
     ) -> Tuple[List[CustomerProductListItem], ProductListPaginationInfo]:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
@@ -96,7 +105,7 @@ class CustomerCatalogueService:
 
         products, total = await CustomerCatalogueRepository.list_products(
             db, current_user.tenant_id, page, limit, search, category, sort,
-            price_min, price_max, weight_min, weight_max,
+            price_min, price_max, weight_min, weight_max, purity, tag,
         )
         total_pages = math.ceil(total / limit) if limit else 0
         pagination = ProductListPaginationInfo(

@@ -33,11 +33,17 @@ class CustomerCatalogueRepository:
         price_max: Optional[float] = None,
         weight_min: Optional[float] = None,
         weight_max: Optional[float] = None,
+        purity: Optional[str] = None,
+        tag: Optional[str] = None,
     ) -> Tuple[List[Product], int]:
         """
-        Phase 6C / Module 33 — price_min/price_max/weight_min/weight_max are
-        additive, all default None (i.e. no filter, byte-for-byte the same
-        query as before this module when omitted — backward compatible).
+        Phase 6C / Module 33 — price_min/price_max/weight_min/weight_max/purity/
+        tag are additive, all default None (i.e. no filter, byte-for-byte the
+        same query as before this module when omitted — backward compatible).
+
+        purity/tag are substring matches wrapped in func.coalesce: both columns
+        are nullable, and in SQL `NULL ILIKE '%x%'` is NULL rather than false,
+        which would silently drop every row with no purity/tags set.
         """
         conditions = [Product.tenant_id == tenant_id, Product.is_active == True]  # noqa: E712
         if search:
@@ -53,6 +59,10 @@ class CustomerCatalogueRepository:
             conditions.append(Product.weight_grams >= weight_min)
         if weight_max is not None:
             conditions.append(Product.weight_grams <= weight_max)
+        if purity:
+            conditions.append(func.coalesce(Product.purity, "").ilike(f"%{purity}%"))
+        if tag:
+            conditions.append(func.coalesce(Product.tags, "").ilike(f"%{tag}%"))
 
         count_stmt = select(func.count(Product.id))
         list_stmt = select(Product).options(selectinload(Product.images))

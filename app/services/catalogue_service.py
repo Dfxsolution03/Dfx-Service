@@ -1,5 +1,6 @@
 import base64
 import io
+import json
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -102,6 +103,28 @@ def _join_tags(tags: Optional[List[str]]) -> Optional[str]:
     return ", ".join(cleaned) if cleaned else None
 
 
+def _parse_tag_colors(colors_raw: Optional[str]) -> Optional[Dict[str, str]]:
+    """Product.tag_colors is a JSON object string. Malformed content must not
+    500 a whole product listing, so anything unparseable degrades to None —
+    same best-effort posture as _generate_thumbnail_bytes."""
+    if not colors_raw:
+        return None
+    if isinstance(colors_raw, dict):
+        return colors_raw
+    try:
+        parsed = json.loads(colors_raw)
+    except (ValueError, TypeError):
+        logger.warning("Ignoring malformed Product.tag_colors JSON")
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _format_tag_colors(colors: Optional[Dict[str, str]]) -> Optional[str]:
+    if not colors:
+        return None
+    return json.dumps(colors)
+
+
 class CatalogueService:
     # -- Products -----------------------------------------------------------
     @staticmethod
@@ -145,6 +168,7 @@ class CatalogueService:
             tags=_split_tags(product.tags),
             making_charge_discount_percent=product.making_charge_discount_percent,
             making_charge_discount_label=product.making_charge_discount_label,
+            tag_colors=_parse_tag_colors(product.tag_colors),
             is_active=product.is_active,
             created_by=product.created_by,
             created_at=product.created_at,
@@ -212,6 +236,7 @@ class CatalogueService:
             tags=_join_tags(req.tags),
             making_charge_discount_percent=req.making_charge_discount_percent,
             making_charge_discount_label=req.making_charge_discount_label,
+            tag_colors=_format_tag_colors(req.tag_colors),
             is_active=True,
             created_by=current_user.id,
         )
@@ -259,6 +284,8 @@ class CatalogueService:
                 setattr(product, field, val)
         if req.tags is not None:
             product.tags = _join_tags(req.tags)
+        if req.tag_colors is not None:
+            product.tag_colors = _format_tag_colors(req.tag_colors)
 
         await AuditRepository.create_log(
             db,

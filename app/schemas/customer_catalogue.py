@@ -25,6 +25,7 @@ class CustomerProductListItem(BaseModel):
     price: Optional[float] = None
     weight_grams: Optional[float] = None
     primary_image_path: Optional[str] = None
+    tags: List[str] = []
     making_charge_discount_label: Optional[str] = None
     making_charge_discount_percent: Optional[float] = None
 

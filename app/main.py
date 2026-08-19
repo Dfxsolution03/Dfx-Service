@@ -1,3 +1,4 @@
+import re
 from contextlib import asynccontextmanager
 from pathlib import Path
 from fastapi import FastAPI, Request, status
@@ -81,14 +82,42 @@ app = FastAPI(
 )
 
 # CORS Middleware
+#
+# The regex covers every Vercel preview deployment alongside the explicit
+# production origins, so a new preview URL doesn't need an ALLOWED_ORIGINS
+# change to reach the API.
+CORS_ORIGIN_REGEX = r"https://.*\.vercel\.app|http://localhost:.*|http://127\.0\.0\.1:.*"
+
 if settings.ALLOWED_ORIGINS:
     app.add_middleware(
         CORSMiddleware,
         allow_origins=settings.ALLOWED_ORIGINS,
+        allow_origin_regex=CORS_ORIGIN_REGEX,
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+
+def _cors_headers_for(request: Request) -> dict:
+    """CORS headers for a response CORSMiddleware will never see.
+
+    Starlette mounts an `Exception` handler on ServerErrorMiddleware, which
+    wraps *outside* every add_middleware() layer, so an unhandled 500 reaches
+    the browser with no Access-Control-Allow-Origin. The devtools console then
+    reports a CORS policy violation instead of the actual server error, hiding
+    the real cause — exactly what happened while diagnosing the catalogue 500.
+    """
+    origin = request.headers.get("origin")
+    if not origin:
+        return {}
+    if origin in settings.ALLOWED_ORIGINS or re.fullmatch(CORS_ORIGIN_REGEX, origin):
+        return {
+            "Access-Control-Allow-Origin": origin,
+            "Access-Control-Allow-Credentials": "true",
+            "Vary": "Origin",
+        }
+    return {}
 
 
 # Security Headers Middleware
@@ -157,6 +186,7 @@ async def global_exception_handler(request: Request, exc: Exception):
     )
     return JSONResponse(
         status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        headers=_cors_headers_for(request),
         content={
             "success": False,
             "message": "An internal server error occurred",

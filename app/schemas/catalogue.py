@@ -64,6 +64,9 @@ class ProductCreateRequest(BaseModel):
     tags: List[str] = Field(default_factory=list)
     making_charge_discount_percent: Optional[float] = Field(None, ge=0, le=100)
     making_charge_discount_label: Optional[str] = Field(None, max_length=200)
+    # Per-tag colour overrides, e.g. {"BESTSELLER": "#C9A227"}. Persisted as a
+    # JSON string in Product.tag_colors — see CatalogueService._format_tag_colors.
+    tag_colors: Optional[Dict[str, str]] = None
 
 
 class ProductUpdateRequest(BaseModel):
@@ -77,6 +80,9 @@ class ProductUpdateRequest(BaseModel):
     tags: Optional[List[str]] = None
     making_charge_discount_percent: Optional[float] = Field(None, ge=0, le=100)
     making_charge_discount_label: Optional[str] = Field(None, max_length=200)
+    # Per-tag colour overrides, e.g. {"BESTSELLER": "#C9A227"}. Persisted as a
+    # JSON string in Product.tag_colors — see CatalogueService._format_tag_colors.
+    tag_colors: Optional[Dict[str, str]] = None
     is_active: Optional[bool] = None
 
 
@@ -111,6 +117,7 @@ class ProductResponse(BaseModel):
     tags: List[str] = Field(default_factory=list)
     making_charge_discount_percent: Optional[float] = None
     making_charge_discount_label: Optional[str] = None
+    tag_colors: Optional[Dict[str, str]] = None
     is_active: bool
     created_by: str
     created_at: datetime

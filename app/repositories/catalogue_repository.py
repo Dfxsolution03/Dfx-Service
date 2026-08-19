@@ -13,7 +13,11 @@ class CatalogueRepository:
         stmt = (
             select(Product)
             .options(selectinload(Product.images))
-            .where(Product.tenant_id == tenant_id, Product.is_active == True)  # noqa: E712
+            # Admin/staff listing intentionally returns inactive products too —
+            # the Catalogue Studio needs to see and re-activate them. The
+            # customer-facing path filters is_active in
+            # CustomerCatalogueRepository, which is a separate module.
+            .where(Product.tenant_id == tenant_id)
             .order_by(Product.created_at.desc())
         )
         result = await db.execute(stmt)
