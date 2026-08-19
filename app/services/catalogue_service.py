@@ -143,6 +143,8 @@ class CatalogueService:
             price=product.price,
             weight_grams=product.weight_grams,
             tags=_split_tags(product.tags),
+            making_charge_discount_percent=product.making_charge_discount_percent,
+            making_charge_discount_label=product.making_charge_discount_label,
             is_active=product.is_active,
             created_by=product.created_by,
             created_at=product.created_at,
@@ -208,6 +210,8 @@ class CatalogueService:
             price=req.price,
             weight_grams=req.weight_grams,
             tags=_join_tags(req.tags),
+            making_charge_discount_percent=req.making_charge_discount_percent,
+            making_charge_discount_label=req.making_charge_discount_label,
             is_active=True,
             created_by=current_user.id,
         )
@@ -249,7 +253,7 @@ class CatalogueService:
             raise ResourceNotFoundException(f"Product ID '{product_id}' not found")
 
         before_state = {"name": product.name, "is_active": product.is_active}
-        for field in ["name", "description", "category", "sku", "purity", "price", "weight_grams", "is_active"]:
+        for field in ["name", "description", "category", "sku", "purity", "price", "weight_grams", "making_charge_discount_percent", "making_charge_discount_label", "is_active"]:
             val = getattr(req, field, None)
             if val is not None:
                 setattr(product, field, val)

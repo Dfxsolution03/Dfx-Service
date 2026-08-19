@@ -39,6 +39,8 @@ def _to_list_item(product: Product) -> CustomerProductListItem:
         price=product.price,
         weight_grams=product.weight_grams,
         primary_image_path=_primary_image_path(product),
+        making_charge_discount_label=product.making_charge_discount_label,
+        making_charge_discount_percent=product.making_charge_discount_percent,
     )
 
 
@@ -55,6 +57,8 @@ def _to_detail(product: Product) -> CustomerProductDetailResponse:
         price=product.price,
         weight_grams=product.weight_grams,
         tags=tags,
+        making_charge_discount_label=product.making_charge_discount_label,
+        making_charge_discount_percent=product.making_charge_discount_percent,
         images=[
             CustomerProductImageResponse(
                 id=i.id,
