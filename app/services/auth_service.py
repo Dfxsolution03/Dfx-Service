@@ -1,9 +1,7 @@
-import secrets
 import uuid
 from datetime import datetime, timedelta, timezone
 from typing import Optional, List
-from sqlalchemy import func, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -27,13 +25,11 @@ from app.exceptions.base import (
 from app.models.auth import Tenant, Subscription, Role, User, RefreshToken, PasswordResetToken, EmailVerificationToken
 from app.repositories.audit_repository import AuditRepository
 from app.repositories.customer_repository import CustomerRepository
-from app.services.google_identity_service import GoogleIdentity, verify_google_id_token
 from app.services.token_service import TokenService
 from app.services.email_service import get_email_provider
 from app.schemas.auth import (
     UserRegisterRequest,
     UserLoginRequest,
-    GoogleLoginRequest,
     TokenResponseData,
     ForgotPasswordRequest,
     ResetPasswordRequest,
@@ -189,196 +185,7 @@ class AuthService:
         if user.tenant_id:
             await _enforce_tenant_access(db, user.tenant_id)
 
-        return await AuthService._issue_token_pair(db, user)
-
-    @staticmethod
-    async def google_login(
-        db: AsyncSession, req: GoogleLoginRequest
-    ) -> TokenResponseData:
-        """
-        Authenticate (or, for a first-time Google user, register) via a Google
-        OAuth ID token.
-
-        The identity is taken *entirely* from the verified token claims — the
-        request body contributes nothing but the raw token and the chosen
-        store. Once the Google account has been mapped onto a User row this is
-        the same login as any other: identical tenant-lifecycle enforcement
-        and identical token issuance, through the same helpers login_user uses.
-        """
-        identity = await verify_google_id_token(req.id_token)
-
-        user = await AuthService._find_user_for_google_identity(db, identity)
-
-        if user is None:
-            # First time this Google account has been seen. Registering it
-            # needs a store, and picking one on the user's behalf is not this
-            # function's call to make — an arbitrary tenant would silently bind
-            # a customer to a jewellery store they never chose. The client
-            # detects this specific error (errors[0].field == "tenant_id") and
-            # re-prompts with the store picker.
-            if not req.tenant_id:
-                raise ValidationException(
-                    "Select your jewellery store to finish signing in with Google.",
-                    field="tenant_id",
-                )
-            user = await AuthService._register_google_customer(db, identity, req.tenant_id)
-
-        if not user.is_active:
-            raise UnauthorizedException("Account is inactive")
-
-        # The tenant enforced is always the one on the user's own row, never
-        # the tenant_id the client sent — an existing customer of store A
-        # cannot be moved into store B by passing a different id.
-        if user.tenant_id:
-            await _enforce_tenant_access(db, user.tenant_id)
-
-        return await AuthService._issue_token_pair(db, user, device_info="Google Sign-In")
-
-    @staticmethod
-    async def _find_user_for_google_identity(
-        db: AsyncSession, identity: GoogleIdentity
-    ) -> Optional[User]:
-        """
-        Resolve a verified Google account to an existing user, in priority
-        order:
-
-          1. `google_sub` — Google's stable account id. Authoritative: it
-             survives the user changing their Gmail address.
-          2. Verified email, matched case-insensitively (older rows hold
-             whatever casing was typed at signup). This is what links Google
-             sign-in onto an account originally created with email+password
-             instead of creating a second one. Safe precisely because the
-             email came out of a verified token.
-
-        A match found by email is back-filled with `google_sub`, so subsequent
-        sign-ins take path 1.
-        """
-        by_sub = (
-            await db.execute(
-                select(User)
-                .options(joinedload(User.role))
-                .where(User.google_sub == identity.subject)
-            )
-        ).scalar_one_or_none()
-        if by_sub:
-            return by_sub
-
-        by_email = (
-            await db.execute(
-                select(User)
-                .options(joinedload(User.role))
-                .where(func.lower(User.email) == identity.email)
-                .order_by(User.created_at)
-            )
-        ).scalars().first()
-
-        if by_email and not by_email.google_sub:
-            by_email.google_sub = identity.subject
-            # Google has already vouched for this address, so an account that
-            # never managed to complete email verification (no SMTP provider
-            # configured, link expired, ...) becomes verified here.
-            if by_email.email_verified_at is None:
-                by_email.email_verified_at = datetime.now(timezone.utc)
-            await db.commit()
-            # Deliberately no db.refresh(): the two fields just written are
-            # already correct in memory (the session factory uses
-            # expire_on_commit=False), and refreshing would expire the
-            # joinedload-ed `role` — which the caller reads to mint the access
-            # token, and which cannot be lazy-loaded on an async session.
-
-        return by_email
-
-    @staticmethod
-    async def _register_google_customer(
-        db: AsyncSession, identity: GoogleIdentity, tenant_id: str
-    ) -> User:
-        """
-        Create a Customer for a first-time Google account, following the same
-        rules as register_customer: the store must exist and be Active, the
-        Customer role must be seeded, and the customer code is allocated by the
-        backend inside this transaction.
-        """
-        tenant = (
-            await db.execute(
-                select(Tenant).where(Tenant.id == tenant_id, Tenant.status == "Active")
-            )
-        ).scalar_one_or_none()
-        if not tenant:
-            raise ValidationException(
-                f"Selected store ID '{tenant_id}' is invalid or inactive",
-                field="tenant_id",
-            )
-
-        role = (
-            await db.execute(select(Role).where(Role.name == ROLE_CUSTOMER))
-        ).scalar_one_or_none()
-        if not role:
-            raise ResourceNotFoundException("Customer role configuration missing in database")
-
-        customer_code = await CustomerRepository.allocate_customer_code(db, tenant_id)
-        user = User(
-            id=f"usr_{uuid.uuid4().hex[:12]}",
-            tenant_id=tenant_id,
-            role_id=role.id,
-            email=identity.email,
-            google_sub=identity.subject,
-            # Google accounts have no password in this system. A random,
-            # discarded secret keeps the NOT NULL column honest while
-            # guaranteeing no password can ever authenticate this row — the
-            # plaintext is never stored, logged or returned, so there is
-            # nothing to verify against. Such a user signs in with Google, or
-            # sets a password for the first time via "forgot password".
-            hashed_password=hash_password(secrets.token_urlsafe(32)),
-            name=(identity.name or identity.email.split("@")[0]),
-            avatar_url=identity.picture,
-            kyc_status="Pending",
-            customer_code=customer_code,
-            member_since=datetime.now(timezone.utc).strftime("%B %Y"),
-            # Google only ever hands us an address it has verified (see
-            # verify_google_id_token), so this account starts out verified
-            # rather than being emailed a link it does not need.
-            email_verified_at=datetime.now(timezone.utc),
-            is_active=True,
-        )
-        db.add(user)
-
-        try:
-            await db.commit()
-        except IntegrityError:
-            # Two taps of the Google button racing each other: the loser hits
-            # the unique index on google_sub (or the tenant/customer_code
-            # constraint) and simply adopts the row the winner created.
-            await db.rollback()
-            existing = (
-                await db.execute(
-                    select(User)
-                    .options(joinedload(User.role))
-                    .where(User.google_sub == identity.subject)
-                )
-            ).scalar_one_or_none()
-            if existing is None:
-                raise ConflictException(
-                    "Could not complete Google sign-in. Please try again."
-                )
-            return existing
-
-        return (
-            await db.execute(
-                select(User).options(joinedload(User.role)).where(User.id == user.id)
-            )
-        ).scalar_one()
-
-    @staticmethod
-    async def _issue_token_pair(
-        db: AsyncSession, user: User, device_info: Optional[str] = None
-    ) -> TokenResponseData:
-        """
-        Mint an access/refresh pair and persist the refresh token's hash.
-        Extracted from login_user so Google sign-in issues *identical*
-        credentials through the same code path rather than a parallel one —
-        refresh-token rotation and theft detection then work for a
-        Google-authenticated session exactly as they do for a password one.
-        """
+        # Generate tokens
         token_id = f"tkn_{uuid.uuid4().hex[:16]}"
         access_token = create_access_token(
             subject=user.id,
@@ -391,17 +198,15 @@ class AuthService:
             token_id=token_id,
         )
 
-        db.add(
-            RefreshToken(
-                id=token_id,
-                user_id=user.id,
-                token_hash=hash_token_sha256(refresh_token),
-                expires_at=datetime.now(timezone.utc)
-                + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
-                is_revoked=False,
-                device_info=device_info,
-            )
+        # Store hashed refresh token in DB
+        refresh_token_entry = RefreshToken(
+            id=token_id,
+            user_id=user.id,
+            token_hash=hash_token_sha256(refresh_token),
+            expires_at=datetime.now(timezone.utc) + timedelta(days=settings.REFRESH_TOKEN_EXPIRE_DAYS),
+            is_revoked=False,
         )
+        db.add(refresh_token_entry)
         await db.commit()
 
         return TokenResponseData(

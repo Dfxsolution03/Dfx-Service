@@ -12,11 +12,6 @@ passlib[bcrypt]>=1.7.4
 bcrypt>=4.1.2,<4.2.0
 pyjwt>=2.8.0,<3.0.0
 cryptography>=42.0.0
-# Google Sign-In — server-side ID token verification (signature, issuer,
-# audience, expiry). See app/services/google_identity_service.py. `requests`
-# is google-auth's HTTP transport for fetching Google's signing certs.
-google-auth>=2.28.0,<3.0.0
-requests>=2.31.0,<3.0.0
 openpyxl>=3.1.0,<3.2.0
 Pillow>=10.3.0,<11.0.0
 # opencv-python-headless 4.9.x is built against the NumPy 1.x ABI — pinning

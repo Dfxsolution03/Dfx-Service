@@ -77,29 +77,6 @@ class Settings(BaseSettings):
     NEW_SUPERADMIN_EMAIL: Optional[str] = None
     NEW_SUPERADMIN_PASSWORD: Optional[str] = None
 
-    # Google Sign-In — the OAuth 2.0 client IDs whose ID tokens this backend
-    # will accept as the `aud` claim. Comma-separated, or a JSON list.
-    #
-    # For this app that is the Google Cloud **Web application** client ID: both
-    # the Android and iOS clients pass it as `serverClientId`, so the tokens
-    # they mint are addressed to it. Add the iOS client ID as a second entry
-    # only if an iOS build is ever configured without a serverClientId.
-    #
-    # Empty (the default) switches Google sign-in OFF: with nothing to validate
-    # `aud` against there is no safe way to accept a token, so the endpoint
-    # returns a configuration error rather than trusting one. This is not a
-    # secret — client IDs are public by design and ship inside the mobile app.
-    GOOGLE_OAUTH_CLIENT_IDS: Union[List[str], str] = []
-
-    @field_validator("GOOGLE_OAUTH_CLIENT_IDS", mode="before")
-    @classmethod
-    def assemble_google_client_ids(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
-        if isinstance(v, str) and not v.startswith("["):
-            return [i.strip() for i in v.split(",") if i.strip()]
-        elif isinstance(v, str) and v.startswith("["):
-            return json.loads(v)
-        return v
-
     # Module 18 — Authentication Hardening: reset/verification token lifetimes.
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
     EMAIL_VERIFICATION_TOKEN_EXPIRE_HOURS: int = 24

@@ -15,29 +15,6 @@ class UserLoginRequest(BaseModel):
     password: str = Field(..., example="Priya@123")
 
 
-class GoogleLoginRequest(BaseModel):
-    """
-    Deliberately carries no identity fields. Email, name and Google subject
-    are read out of the cryptographically verified ID token server-side (see
-    app/services/google_identity_service.py) — a client-supplied email would
-    be an authentication bypass, since anyone could then claim any address.
-    """
-
-    id_token: str = Field(
-        ...,
-        min_length=1,
-        description="Google OAuth ID token (JWT) obtained by the client from Google",
-    )
-    tenant_id: Optional[str] = Field(
-        None,
-        description=(
-            "Selected Jewellery Store ID. Required only when this Google "
-            "account has no account yet and one must be created; ignored for "
-            "an existing user, whose store is whatever their own record says."
-        ),
-    )
-
-
 class TokenResponseData(BaseModel):
     access_token: str
     refresh_token: str
