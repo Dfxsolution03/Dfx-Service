@@ -103,6 +103,16 @@ class User(Base, TimestampMixin):
     )
     email: Mapped[Optional[str]] = mapped_column(String(255), index=True, nullable=True)
     phone: Mapped[Optional[str]] = mapped_column(String(20), index=True, nullable=True)
+    # Google's `sub` claim — the stable, never-reused identifier for a linked
+    # Google account (see app/services/google_identity_service.py). Additive
+    # and nullable: every user who has never signed in with Google keeps NULL,
+    # and NULLs are distinct under a unique index in both PostgreSQL and
+    # SQLite, so any number of them coexist. Same "value not just flag"
+    # convention as email_verified_at below. Never accepted from a client —
+    # only ever written from a verified ID token.
+    google_sub: Mapped[Optional[str]] = mapped_column(
+        String(255), unique=True, index=True, nullable=True
+    )
     hashed_password: Mapped[str] = mapped_column(String(255), nullable=False)
     name: Mapped[str] = mapped_column(String(100), nullable=False)
     kyc_status: Mapped[str] = mapped_column(String(20), default="Pending", nullable=False)
