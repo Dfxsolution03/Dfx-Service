@@ -58,6 +58,19 @@ class SchemeEnrollment(Base, TimestampMixin):
     # NULL once the scheme is fully covered (months_paid >= duration_months).
     next_due_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
 
+    # ─── Scheme Tier Plans ───
+    # The tier the customer selected at enrollment. SET NULL on tier delete so a
+    # later tier change can never rewrite this enrollment; the snapshot below is
+    # the authoritative source of this enrollment's terms.
+    scheme_tier_id: Mapped[Optional[str]] = mapped_column(
+        String(50), ForeignKey("scheme_tiers.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # Terms frozen at enrollment time. Both NULL for legacy enrollments that
+    # predate tiers or were created without a tier selection — those fall back to
+    # scheme.monthly_amount / scheme.duration_months (see resolve_enrollment_terms).
+    selected_monthly_amount: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    selected_duration_months: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+
     # Phase 8 — free-text operational note on the enrollment (preset or custom,
     # chosen on the frontend). Pure metadata: editable at any time and never a
     # financial field, so editing it never touches the payment/redemption ledgers.

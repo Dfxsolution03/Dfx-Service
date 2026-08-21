@@ -24,13 +24,19 @@ class PassbookEnrollmentInfo(BaseModel):
     joined_date: date
     status: str
     maturity_date: date
+    # The tier this enrollment selected (None for legacy enrollments).
+    scheme_tier_id: Optional[str] = None
 
 
 class PassbookSchemeInfo(BaseModel):
     id: str
     name: str
+    # These reflect the enrollment's RESOLVED terms (selected tier snapshot when
+    # present, else the scheme's base terms) — what the customer actually pays.
     monthly_amount: float
     duration_months: int
+    # Derived: monthly_amount x duration_months. No bonus/interest.
+    maturity_amount: float = 0.0
     bonus_description: Optional[str] = None
 
 

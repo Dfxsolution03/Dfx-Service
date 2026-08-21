@@ -51,7 +51,34 @@ def _generate_enrollment_number() -> str:
     return f"ENR-{date.today():%y%m%d}-{uuid.uuid4().hex[:6].upper()}"
 
 
+def resolve_enrollment_terms(enrollment: SchemeEnrollment, scheme) -> tuple:
+    """Single source of truth for an enrollment's EFFECTIVE terms.
+
+    Returns (monthly_amount, duration_months): the snapshot frozen at enrollment
+    time when the enrollment selected a tier, else the scheme's current base
+    terms for legacy enrollments that predate tiers. Every calculation that
+    needs an enrollment's amount/duration — maturity, advance capacity, passbook,
+    balance — must go through here so tier edits apply ONLY to new enrollments.
+
+    Only reads plain columns on `enrollment` (selected_*), so it is safe with a
+    row-locked enrollment that has no relations eager-loaded, as long as the
+    caller passes the scheme explicitly.
+    """
+    monthly = enrollment.selected_monthly_amount
+    duration = enrollment.selected_duration_months
+    if monthly is None or duration is None:
+        return scheme.monthly_amount, scheme.duration_months
+    return monthly, duration
+
+
+def maturity_amount(monthly: float, duration: int) -> float:
+    """Maturity value = monthly installment x number of months. No bonus,
+    interest or appreciation — the product has no such rule."""
+    return round((monthly or 0) * (duration or 0), 2)
+
+
 def _to_admin_response(enrollment: SchemeEnrollment) -> EnrollmentResponse:
+    monthly, duration = resolve_enrollment_terms(enrollment, enrollment.scheme)
     return EnrollmentResponse(
         id=enrollment.id,
         tenant_id=enrollment.tenant_id,
@@ -66,12 +93,17 @@ def _to_admin_response(enrollment: SchemeEnrollment) -> EnrollmentResponse:
         months_paid=enrollment.months_paid,
         next_due_date=enrollment.next_due_date,
         remarks=enrollment.remarks,
+        scheme_tier_id=enrollment.scheme_tier_id,
+        monthly_amount=monthly,
+        duration_months=duration,
+        maturity_amount=maturity_amount(monthly, duration),
         created_at=enrollment.created_at,
         updated_at=enrollment.updated_at,
     )
 
 
 def _to_customer_response(enrollment: SchemeEnrollment) -> CustomerEnrollmentResponse:
+    monthly, duration = resolve_enrollment_terms(enrollment, enrollment.scheme)
     return CustomerEnrollmentResponse(
         id=enrollment.id,
         scheme_id=enrollment.scheme_id,
@@ -82,6 +114,10 @@ def _to_customer_response(enrollment: SchemeEnrollment) -> CustomerEnrollmentRes
         maturity_date=enrollment.maturity_date,
         months_paid=enrollment.months_paid,
         next_due_date=enrollment.next_due_date,
+        scheme_tier_id=enrollment.scheme_tier_id,
+        monthly_amount=monthly,
+        duration_months=duration,
+        maturity_amount=maturity_amount(monthly, duration),
     )
 
 
@@ -154,6 +190,22 @@ class EnrollmentService:
         if existing:
             raise ConflictException("You already have an active enrollment in this scheme")
 
+        # Tier selection. A chosen tier must belong to THIS scheme and be active;
+        # its terms are snapshotted so a later tier edit never touches this
+        # enrollment. No tier selected => legacy base-terms enrollment (snapshot
+        # left NULL, resolves to the scheme's terms).
+        selected_tier = None
+        if req.scheme_tier_id:
+            selected_tier = next((t for t in scheme.tiers if t.id == req.scheme_tier_id), None)
+            if selected_tier is None:
+                raise ResourceNotFoundException(
+                    f"Scheme tier '{req.scheme_tier_id}' not found for scheme '{scheme.id}'"
+                )
+            if not selected_tier.is_active:
+                raise ValidationException("The selected tier is not active and cannot be used for a new enrollment")
+
+        eff_duration = selected_tier.duration_months if selected_tier else scheme.duration_months
+
         today = date.today()
         enrollment = SchemeEnrollment(
             id=f"enr_{uuid.uuid4().hex[:12]}",
@@ -163,9 +215,12 @@ class EnrollmentService:
             enrollment_number=_generate_enrollment_number(),
             joined_date=today,
             status=STATUS_ACTIVE,
-            maturity_date=_add_months(today, scheme.duration_months),
+            maturity_date=_add_months(today, eff_duration),
             months_paid=0,
             next_due_date=today,  # first installment due from the join date
+            scheme_tier_id=selected_tier.id if selected_tier else None,
+            selected_monthly_amount=selected_tier.monthly_amount if selected_tier else None,
+            selected_duration_months=selected_tier.duration_months if selected_tier else None,
         )
         await EnrollmentRepository.create_enrollment(db, enrollment)
 
@@ -179,7 +234,13 @@ class EnrollmentService:
             target_entity="scheme_enrollments",
             target_id=enrollment.id,
             before_state=None,
-            after_state={"scheme_id": scheme.id, "enrollment_number": enrollment.enrollment_number},
+            after_state={
+                "scheme_id": scheme.id,
+                "enrollment_number": enrollment.enrollment_number,
+                "scheme_tier_id": enrollment.scheme_tier_id,
+                "selected_monthly_amount": enrollment.selected_monthly_amount,
+                "selected_duration_months": enrollment.selected_duration_months,
+            },
         )
 
         await db.commit()
@@ -289,14 +350,18 @@ class SchemeBalanceService:
             db, [enrollment.closed_by] + [r.recorded_by for r in redemptions]
         )
 
+        eff_monthly, eff_duration = resolve_enrollment_terms(enrollment, enrollment.scheme)
+
         return EnrollmentBalanceResponse(
             enrollment_id=enrollment.id,
             enrollment_number=enrollment.enrollment_number,
             customer_id=enrollment.customer_id,
             customer_name=enrollment.customer.name,
             scheme_name=enrollment.scheme.name,
-            monthly_amount=enrollment.scheme.monthly_amount,
-            duration_months=enrollment.scheme.duration_months,
+            scheme_tier_id=enrollment.scheme_tier_id,
+            monthly_amount=eff_monthly,
+            duration_months=eff_duration,
+            maturity_amount=maturity_amount(eff_monthly, eff_duration),
             successful_payment_count=payment_count,
             total_paid=total_paid,
             total_redeemed=total_redeemed,

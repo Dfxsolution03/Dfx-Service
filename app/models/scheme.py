@@ -1,5 +1,5 @@
 from datetime import datetime
-from typing import Optional
+from typing import List, Optional
 from sqlalchemy import String, Float, Integer, Text, Boolean, ForeignKey, DateTime, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -39,6 +39,46 @@ class Scheme(Base, TimestampMixin):
 
     # Relationships
     tenant: Mapped["Tenant"] = relationship("Tenant")
+    # Selectable tier plans within this scheme (Scheme -> SchemeTier). Ordered by
+    # monthly amount for a stable admin grid / customer picker.
+    tiers: Mapped[List["SchemeTier"]] = relationship(
+        "SchemeTier",
+        back_populates="scheme",
+        order_by="SchemeTier.monthly_amount",
+        cascade="all, delete-orphan",
+    )
+
+
+class SchemeTier(Base, TimestampMixin):
+    """One selectable plan inside a Scheme: a fixed (monthly_amount,
+    duration_months) pair the customer chooses at enrollment.
+
+    Maturity is purely monthly_amount x duration_months — no bonus, interest or
+    appreciation. Editing or deactivating a tier only affects NEW enrollments:
+    an existing enrollment snapshots the amount/duration it chose (see
+    SchemeEnrollment.selected_monthly_amount / selected_duration_months), so its
+    terms never change under it.
+
+    Deactivation is soft (is_active=False), mirroring the Scheme pattern — a tier
+    row is never removed while enrollments may still reference it.
+    """
+    __tablename__ = "scheme_tiers"
+    __table_args__ = (
+        UniqueConstraint(
+            "scheme_id", "monthly_amount", "duration_months",
+            name="uq_scheme_tiers_scheme_amount_duration",
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    scheme_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("schemes.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    monthly_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    duration_months: Mapped[int] = mapped_column(Integer, nullable=False)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+
+    scheme: Mapped["Scheme"] = relationship("Scheme", back_populates="tiers")
 
 
 class SchemeRequest(Base, TimestampMixin):
