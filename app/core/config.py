@@ -167,6 +167,15 @@ class Settings(BaseSettings):
     IBJA_API_KEY: str = ""
     GOLDAPI_KEY: str = ""
 
+    # How stale a tenant's last published rate may be before the customer
+    # endpoint stops serving it (see GoldRateService.get_customer_today_rate).
+    # A store that hasn't entered today's rate yet should still show
+    # yesterday's rather than nothing, but a rate from last week is
+    # misinformation on a screen customers value their holdings from — past
+    # this many days the endpoint reports the rate as unavailable instead.
+    # Three days covers a weekend plus a public holiday.
+    CUSTOMER_RATE_FALLBACK_MAX_AGE_DAYS: int = 3
+
     # SuperAdmin Integrations — providers with no credentials yet. Same
     # convention as SMTP_HOST/SUPABASE_URL above: empty string means
     # "not configured", the provider status API reports that truthfully, and

@@ -3,6 +3,7 @@ from datetime import date, datetime, timezone, timedelta
 from typing import Optional
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.models.auth import User
 from app.models.goldrate import GoldRate
 from app.repositories.goldrate_repository import GoldRateRepository
@@ -129,11 +130,31 @@ class GoldRateService:
 
         today = _today_ist()
         rate = await GoldRateRepository.get_rate_for_date(db, current_user.tenant_id, today)
+        if not rate:
+            # Nothing published for today yet. A store that simply hasn't got
+            # round to entering this morning's rate should not blank the
+            # customer's screen, so the most recent one is served instead —
+            # but only while it is still plausibly current, and always
+            # carrying its OWN effective_date (model_validate copies the row,
+            # so the older date reaches the client and the UI can label it).
+            # Restamping it as today's would present a stale price as live.
+            latest = await GoldRateRepository.get_latest_rate(db, current_user.tenant_id)
+            if latest is not None:
+                age_days = (today - latest.effective_date).days
+                # Negative age = a future-dated row, which the write endpoints
+                # cannot currently produce; treated as not yet in effect.
+                if 0 <= age_days <= settings.CUSTOMER_RATE_FALLBACK_MAX_AGE_DAYS:
+                    rate = latest
         if rate:
             return CustomerGoldRateResponse.model_validate(rate)
 
         effective = await TenantPricingService.get_effective_rate(db, current_user.tenant_id)
         if effective is None:
+            # No rate published recently enough and no Module 31 pricing
+            # config: genuinely unavailable. Reported as such (the endpoint
+            # wraps this as HTTP 200 with "rate": null) rather than inventing
+            # a number — customers value their gold holdings off this figure,
+            # so a fabricated price is worse than an empty one.
             return None
 
         return CustomerGoldRateResponse(
