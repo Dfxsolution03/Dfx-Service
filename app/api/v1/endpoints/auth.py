@@ -69,6 +69,7 @@ async def customer_signup(
         phone=user.phone,
         kyc_status=user.kyc_status,
         member_since=user.member_since,
+        date_of_birth=user.date_of_birth,
         is_active=user.is_active,
     )
     return StandardSuccessResponse(
@@ -265,6 +266,7 @@ async def get_my_profile(
         phone=current_user.phone,
         kyc_status=current_user.kyc_status,
         member_since=current_user.member_since,
+        date_of_birth=current_user.date_of_birth,
         is_active=current_user.is_active,
         permissions=[m.strip() for m in (current_user.staff_permissions or "").split(",") if m.strip()],
     )

@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, List
-from sqlalchemy import String, Boolean, DateTime, ForeignKey, Text, Integer, UniqueConstraint, func
+from sqlalchemy import String, Boolean, Date, DateTime, ForeignKey, Text, Integer, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 from app.models.base import Base, TimestampMixin
 
@@ -126,6 +126,10 @@ class User(Base, TimestampMixin):
     # additional, display/search-facing identity only.
     customer_code: Mapped[Optional[str]] = mapped_column(String(32), index=True, nullable=True)
     member_since: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
+    # Customer date of birth — DATE only (no time/zone: a birthday is a calendar
+    # date, not an instant). Nullable: required for NEW customers at the API
+    # layer, but existing rows and every non-Customer user legitimately have none.
+    date_of_birth: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
     avatar_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # Staff-only module access grants — comma-separated STAFF_MODULE keys

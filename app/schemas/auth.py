@@ -1,5 +1,15 @@
+from datetime import date
 from typing import Optional, List, Any
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
+
+
+def _reject_future_dob(v: Optional[date]) -> Optional[date]:
+    """A date of birth cannot be in the future. Calendar validity and format
+    (YYYY-MM-DD) are already enforced by the `date` type; this only adds the
+    business rule. No min/max age rule is applied (business decision)."""
+    if v is not None and v > date.today():
+        raise ValueError("Date of birth cannot be in the future")
+    return v
 
 
 class UserRegisterRequest(BaseModel):
@@ -8,6 +18,10 @@ class UserRegisterRequest(BaseModel):
     phone: Optional[str] = Field(None, min_length=10, max_length=15, example="9876543210")
     password: str = Field(..., min_length=6, max_length=100, example="Priya@123")
     tenant_id: str = Field(..., description="Selected Jewellery Store ID from public stores dropdown")
+    # Required for a new customer (approved Phase-1 decision). Date only.
+    date_of_birth: date = Field(..., example="1995-08-21")
+
+    _dob_not_future = field_validator("date_of_birth")(_reject_future_dob)
 
 
 class UserLoginRequest(BaseModel):
@@ -36,6 +50,12 @@ class GoogleLoginRequest(BaseModel):
             "an existing user, whose store is whatever their own record says."
         ),
     )
+    # Optional on the schema because this endpoint also serves existing-user
+    # login (which needs no DOB). The service requires it only when creating a
+    # brand-new Google customer. Date only; never read from the Google token.
+    date_of_birth: Optional[date] = Field(None, example="1995-08-21")
+
+    _dob_not_future = field_validator("date_of_birth")(_reject_future_dob)
 
 
 class TokenResponseData(BaseModel):
@@ -76,6 +96,7 @@ class UserResponse(BaseModel):
     phone: Optional[str]
     kyc_status: str
     member_since: Optional[str]
+    date_of_birth: Optional[date] = None
     is_active: bool
     # Staff-only module access grants (see app/core/constants.py's
     # ALL_STAFF_MODULES). Always empty for non-Staff roles — Admin/

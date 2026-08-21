@@ -143,6 +143,7 @@ class AuthService:
             kyc_status="Pending",
             customer_code=customer_code,
             member_since=datetime.now(timezone.utc).strftime("%B %Y"),
+            date_of_birth=req.date_of_birth,
             is_active=True,
         )
         db.add(user)
@@ -221,7 +222,17 @@ class AuthService:
                     "Select your jewellery store to finish signing in with Google.",
                     field="tenant_id",
                 )
-            user = await AuthService._register_google_customer(db, identity, req.tenant_id)
+            # DOB is required to CREATE a new customer (approved Phase-1 rule),
+            # but never for an existing Google user logging in — hence enforced
+            # here on the registration branch only, not on GoogleLoginRequest.
+            if req.date_of_birth is None:
+                raise ValidationException(
+                    "Date of birth is required to finish creating your account.",
+                    field="date_of_birth",
+                )
+            user = await AuthService._register_google_customer(
+                db, identity, req.tenant_id, req.date_of_birth
+            )
 
         if not user.is_active:
             raise UnauthorizedException("Account is inactive")
@@ -290,7 +301,7 @@ class AuthService:
 
     @staticmethod
     async def _register_google_customer(
-        db: AsyncSession, identity: GoogleIdentity, tenant_id: str
+        db: AsyncSession, identity: GoogleIdentity, tenant_id: str, date_of_birth=None
     ) -> User:
         """
         Create a Customer for a first-time Google account, following the same
@@ -334,6 +345,7 @@ class AuthService:
             kyc_status="Pending",
             customer_code=customer_code,
             member_since=datetime.now(timezone.utc).strftime("%B %Y"),
+            date_of_birth=date_of_birth,
             # Google only ever hands us an address it has verified (see
             # verify_google_id_token), so this account starts out verified
             # rather than being emailed a link it does not need.

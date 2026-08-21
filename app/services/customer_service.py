@@ -102,6 +102,7 @@ class CustomerService:
             phone=current_user.phone,
             kyc_status=current_user.kyc_status,
             member_since=current_user.member_since or "July 2026",
+            date_of_birth=current_user.date_of_birth,
             avatar_url=current_user.avatar_url,
         )
 
@@ -115,6 +116,7 @@ class CustomerService:
             "email": current_user.email,
             "phone": current_user.phone,
             "avatar_url": current_user.avatar_url,
+            "date_of_birth": current_user.date_of_birth.isoformat() if current_user.date_of_birth else None,
         }
 
         # Validate duplicate email or phone
@@ -136,11 +138,15 @@ class CustomerService:
         if req.avatar_url is not None:
             current_user.avatar_url = req.avatar_url
 
+        if req.date_of_birth is not None:
+            current_user.date_of_birth = req.date_of_birth
+
         after_state = {
             "name": current_user.name,
             "email": current_user.email,
             "phone": current_user.phone,
             "avatar_url": current_user.avatar_url,
+            "date_of_birth": current_user.date_of_birth.isoformat() if current_user.date_of_birth else None,
         }
 
         # Emit Audit Log
@@ -699,6 +705,7 @@ class CustomerService:
             kyc_status="Pending",
             customer_code=customer_code,
             member_since=datetime.now(timezone.utc).strftime("%B %Y"),
+            date_of_birth=req.date_of_birth,
             is_active=True,
         )
         db.add(user)
@@ -778,6 +785,8 @@ class CustomerService:
             customer.name = req.name
         if req.is_active is not None:
             customer.is_active = req.is_active
+        if req.date_of_birth is not None:
+            customer.date_of_birth = req.date_of_birth
         if req.password:
             customer.hashed_password = hash_password(req.password)
 
@@ -856,6 +865,7 @@ class CustomerService:
             phone=customer.phone,
             kyc_status=customer.kyc_status,
             member_since=customer.member_since,
+            date_of_birth=customer.date_of_birth,
             avatar_url=customer.avatar_url,
             is_active=customer.is_active,
             enrollment_count=len(enrollments),
@@ -1040,6 +1050,7 @@ class CustomerService:
                 avatar_url=customer.avatar_url,
                 is_active=customer.is_active,
                 member_since=customer.member_since,
+                date_of_birth=customer.date_of_birth,
                 created_at=customer.created_at,
                 customer_type=customer_type,
             ),
