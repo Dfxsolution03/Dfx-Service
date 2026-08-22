@@ -36,6 +36,8 @@ from app.services.billing_service import (
     BillDraftService,
     _is_privileged,
 )
+from app.schemas.catalogue import InventoryPublishRequest, InventoryBulkPublishRequest
+from app.services.catalogue_service import CatalogueService
 from app.services.enrollment_service import SchemeBalanceService
 from app.services.otp_service import OtpService
 from app.schemas.enrollment import MultiSchemeRedeemRequest
@@ -290,6 +292,51 @@ async def upload_inventory_item_image(
     )
     return StandardSuccessResponse(
         success=True, message="Image uploaded successfully", data={"item": item.model_dump(mode="json")}
+    )
+
+
+@router.post(
+    "/billing/inventory/publish-bulk",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Publish Inventory Items To Catalogue In Bulk (Admin)",
+    description="Publishes many inventory items to the catalogue. Each item needs its own catalogue "
+                "image; items that fail validation are reported individually and do not roll back the rest.",
+)
+async def publish_inventory_bulk(
+    req: InventoryBulkPublishRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await CatalogueService.publish_inventory_bulk(db, current_user, req)
+    return StandardSuccessResponse(
+        success=True,
+        message=f"Published {result.published_count}, failed {result.failed_count}",
+        data=result.model_dump(mode="json"),
+    )
+
+
+@router.post(
+    "/billing/inventory/{item_id}/publish",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Publish Inventory Item To Catalogue (Admin)",
+    description="Publishes (or idempotently re-publishes) one inventory item to the catalogue. "
+                "SELLING_COST is server-calculated (client price rejected); CATALOGUE_COST is the "
+                "admin's manual price. A catalogue image is mandatory; duplicate publishing updates "
+                "the same linked product instead of creating a new one.",
+)
+async def publish_inventory_item(
+    item_id: str,
+    req: InventoryPublishRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    product = await CatalogueService.publish_inventory_item(db, current_user, item_id, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Inventory item published to catalogue",
+        data={"product": product.model_dump(mode="json")},
     )
 
 

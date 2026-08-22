@@ -1,5 +1,5 @@
 from typing import Optional
-from fastapi import APIRouter, Depends, File, Form, UploadFile, status
+from fastapi import APIRouter, Depends, File, Form, Query, UploadFile, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_db
@@ -30,13 +30,19 @@ router = APIRouter()
     response_model=StandardSuccessResponse,
     status_code=status.HTTP_200_OK,
     summary="List Products (Admin)",
-    description="Returns all products (active and inactive) for the admin's tenant, each with its image variants.",
+    description="Returns all products (active and inactive) for the admin's tenant, each with its "
+                "image variants. Optional filters: category, purity, sub_category (case-insensitive).",
 )
 async def list_products(
+    category: Optional[str] = Query(None),
+    purity: Optional[str] = Query(None),
+    sub_category: Optional[str] = Query(None),
     current_user: User = Depends(require_admin_or_staff_module("catalogue")),
     db: AsyncSession = Depends(get_async_db),
 ):
-    products = await CatalogueService.get_products(db, current_user)
+    products = await CatalogueService.get_products(
+        db, current_user, category=category, purity=purity, sub_category=sub_category
+    )
     return StandardSuccessResponse(
         success=True,
         message="Products retrieved successfully",

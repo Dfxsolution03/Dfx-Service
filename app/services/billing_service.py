@@ -566,6 +566,7 @@ class InventoryService:
             other_charges_amount=item.other_charges_amount,
             tax_rate_percent=item.tax_rate_percent,
             pricing_mode=item.pricing_mode,
+            add_to_catalogue=item.add_to_catalogue,
             created_by=item.created_by,
             created_at=item.created_at,
             updated_at=item.updated_at,

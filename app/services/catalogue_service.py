@@ -1,8 +1,9 @@
 import base64
 import io
 import json
+import mimetypes
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Dict, List, Optional
 from fastapi import UploadFile
@@ -161,6 +162,7 @@ class CatalogueService:
             name=product.name,
             description=product.description,
             category=product.category,
+            sub_category=product.sub_category,
             sku=product.sku,
             purity=product.purity,
             price=product.price,
@@ -170,6 +172,10 @@ class CatalogueService:
             making_charge_discount_label=product.making_charge_discount_label,
             tag_colors=_parse_tag_colors(product.tag_colors),
             is_active=product.is_active,
+            inventory_item_id=product.inventory_item_id,
+            pricing_source=product.pricing_source,
+            computed_selling_cost=product.computed_selling_cost,
+            price_effective_date=product.price_effective_date,
             created_by=product.created_by,
             created_at=product.created_at,
             updated_at=product.updated_at,
@@ -198,10 +204,18 @@ class CatalogueService:
             return None
 
     @staticmethod
-    async def get_products(db: AsyncSession, current_user: User) -> List[ProductResponse]:
+    async def get_products(
+        db: AsyncSession,
+        current_user: User,
+        category: Optional[str] = None,
+        purity: Optional[str] = None,
+        sub_category: Optional[str] = None,
+    ) -> List[ProductResponse]:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
-        products = await CatalogueRepository.get_products_by_tenant(db, current_user.tenant_id)
+        products = await CatalogueRepository.get_products_by_tenant(
+            db, current_user.tenant_id, category=category, purity=purity, sub_category=sub_category
+        )
         return [CatalogueService._build_product_response(p) for p in products]
 
     @staticmethod
@@ -229,6 +243,7 @@ class CatalogueService:
             name=req.name,
             description=req.description,
             category=req.category,
+            sub_category=req.sub_category,
             sku=req.sku,
             purity=req.purity,
             price=req.price,
@@ -278,7 +293,7 @@ class CatalogueService:
             raise ResourceNotFoundException(f"Product ID '{product_id}' not found")
 
         before_state = {"name": product.name, "is_active": product.is_active}
-        for field in ["name", "description", "category", "sku", "purity", "price", "weight_grams", "making_charge_discount_percent", "making_charge_discount_label", "is_active"]:
+        for field in ["name", "description", "category", "sub_category", "sku", "purity", "price", "weight_grams", "making_charge_discount_percent", "making_charge_discount_label", "is_active"]:
             val = getattr(req, field, None)
             if val is not None:
                 setattr(product, field, val)
@@ -307,6 +322,189 @@ class CatalogueService:
         # and a partial-attribute refresh doesn't reload it.
         product = await CatalogueRepository.get_product_by_id(db, product_id, current_user.tenant_id)
         return CatalogueService._build_product_response(product)
+
+    # ─── Phase 3 — Inventory → Catalogue publishing ───
+
+    @staticmethod
+    async def _resolve_publish_price(db, current_user, item, req):
+        """Return (price, computed_selling_cost, effective_date) for a publish.
+
+        SELLING_COST is calculated by the authoritative BillingCalculationEngine
+        against today's gold rate — the SAME engine Selling uses, never a
+        duplicated formula, and never a client-supplied figure. CATALOGUE_COST
+        uses the admin's manual price verbatim (no invented bound)."""
+        # Imported here (not at module top) purely to avoid any import-order
+        # coupling between the catalogue and billing packages.
+        from app.services.billing_service import BillingCalculationEngine
+        from app.services.goldrate_service import GoldRateService
+
+        if req.pricing_source == "SELLING_COST":
+            rate = await GoldRateService.get_customer_today_rate(db, current_user)
+            if not rate:
+                raise ValidationException(
+                    "No live gold rate is available for today. Set today's gold rate "
+                    "before publishing with SELLING_COST."
+                )
+            breakdown = BillingCalculationEngine.calculate(
+                item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
+                0, req.gst_applied,
+            )
+            price = round(breakdown.final_amount, 2)
+            return price, price, rate.effective_date
+        # CATALOGUE_COST — manual, validated > 0 at the schema layer.
+        return round(req.catalogue_price, 2), None, date.today()
+
+    @staticmethod
+    async def publish_inventory_item(
+        db: AsyncSession, current_user: User, item_id: str, req
+    ) -> ProductResponse:
+        """Publish (or idempotently re-publish) ONE inventory item to the
+        catalogue. Tenant-scoped throughout. A catalogue image is mandatory. A
+        second publish of the same item UPDATES its existing linked product
+        (re-snapshotting price) instead of creating a duplicate."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        from app.repositories.billing_repository import InventoryRepository
+        item = await InventoryRepository.get_by_id(db, item_id, current_user.tenant_id)
+        if not item:
+            raise ResourceNotFoundException(f"Inventory item '{item_id}' not found")
+
+        # Mandatory catalogue image: reuse the item's own uploaded image. Reject
+        # publishing an item that has none (validated per item; bulk reports it).
+        if not item.image_storage_path:
+            raise ValidationException(
+                f"Inventory item '{item.product_code}' has no image. Upload an image before "
+                f"publishing it to the catalogue."
+            )
+
+        price, computed, eff_date = await CatalogueService._resolve_publish_price(
+            db, current_user, item, req
+        )
+        sub_cat = req.sub_category if req.sub_category is not None else item.subcategory
+
+        existing = await CatalogueRepository.get_product_by_inventory_item(
+            db, item.id, current_user.tenant_id
+        )
+        if existing is not None:
+            # Idempotent re-publish/resave — update the linked product in place.
+            product = existing
+            product.name = item.product_name
+            product.category = item.category
+            product.sub_category = sub_cat
+            product.sku = item.product_code
+            product.purity = item.purity  # copy inventory purity exactly
+            product.weight_grams = item.gross_weight_grams
+            product.price = price
+            product.pricing_source = req.pricing_source
+            product.computed_selling_cost = computed
+            product.price_effective_date = eff_date
+            product.is_active = True
+            action = "PRODUCT_REPUBLISH_FROM_INVENTORY"
+            product_id = product.id
+        else:
+            product_id = f"prd_{uuid.uuid4().hex[:12]}"
+            product = Product(
+                id=product_id,
+                tenant_id=current_user.tenant_id,
+                name=item.product_name,
+                category=item.category,
+                sub_category=sub_cat,
+                sku=item.product_code,
+                purity=item.purity,  # copy inventory purity exactly
+                price=price,
+                weight_grams=item.gross_weight_grams,
+                is_active=True,
+                inventory_item_id=item.id,
+                pricing_source=req.pricing_source,
+                computed_selling_cost=computed,
+                price_effective_date=eff_date,
+                created_by=current_user.id,
+            )
+            await CatalogueRepository.create_product(db, product)
+            await db.flush()  # assign product.id before attaching its image
+            # Seed the catalogue's primary image from the inventory image. Reuses
+            # the same stored file (path); size is unknown here so recorded as 0
+            # (metadata only — never used in pricing or business logic).
+            fname = item.image_storage_path.rsplit("/", 1)[-1] or "image"
+            ctype, _ = mimetypes.guess_type(fname)
+            image = ProductImage(
+                id=f"pimg_{uuid.uuid4().hex[:12]}",
+                product_id=product.id,
+                tenant_id=current_user.tenant_id,
+                variant_type="ORIGINAL",
+                storage_path=item.image_storage_path,
+                file_name=fname,
+                content_type=ctype or "image/jpeg",
+                file_size_bytes=0,
+                display_order=0,
+                is_primary=True,
+                created_by=current_user.id,
+            )
+            await CatalogueRepository.create_image(db, image)
+            action = "PRODUCT_PUBLISH_FROM_INVENTORY"
+
+        # Flag the inventory item as published (state only; the link on Product
+        # is authoritative). Inventory stock_status is never touched here — a
+        # sold item stays sold, and the catalogue entry is independent.
+        item.add_to_catalogue = True
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action=action,
+            target_entity="products",
+            target_id=product_id,
+            before_state=None,
+            after_state={
+                "inventory_item_id": item.id,
+                "product_code": item.product_code,
+                "pricing_source": req.pricing_source,
+                "price": price,
+                "computed_selling_cost": computed,
+            },
+        )
+
+        await db.commit()
+        product = await CatalogueRepository.get_product_by_id(db, product_id, current_user.tenant_id)
+        return CatalogueService._build_product_response(product)
+
+    @staticmethod
+    async def publish_inventory_bulk(db: AsyncSession, current_user: User, req):
+        """Publish many inventory items. Each item is validated and published
+        independently (its own image is mandatory); a failure on one item is
+        reported and never rolls back the items that already succeeded."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        from app.schemas.catalogue import (
+            InventoryBulkPublishResponse,
+            InventoryPublishFailure,
+        )
+
+        published = []
+        failed = []
+        for item_req in req.items:
+            try:
+                resp = await CatalogueService.publish_inventory_item(
+                    db, current_user, item_req.inventory_item_id, item_req
+                )
+                published.append(resp)
+            except (ValidationException, ResourceNotFoundException, ForbiddenException) as exc:
+                failed.append(
+                    InventoryPublishFailure(
+                        inventory_item_id=item_req.inventory_item_id, error=str(exc)
+                    )
+                )
+        return InventoryBulkPublishResponse(
+            published=published,
+            failed=failed,
+            published_count=len(published),
+            failed_count=len(failed),
+        )
 
     @staticmethod
     async def deactivate_product(db: AsyncSession, current_user: User, product_id: str) -> None:

@@ -213,6 +213,12 @@ class InventoryItem(Base, TimestampMixin):
     # inventory needs no backfill.
     pricing_mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
 
+    # Phase 3 — whether this item has been published to the customer catalogue.
+    # Set True by the publish workflow (CatalogueService.publish_inventory_item);
+    # the authoritative link is Product.inventory_item_id. Default False so all
+    # pre-existing inventory stays inventory-only and needs no backfill.
+    add_to_catalogue: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
+
     created_by: Mapped[str] = mapped_column(
         String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )

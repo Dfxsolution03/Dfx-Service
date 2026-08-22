@@ -227,6 +227,8 @@ class InventoryItemResponse(BaseModel):
     other_charges_amount: float
     tax_rate_percent: float
     pricing_mode: Optional[PricingMode] = None
+    # Phase 3 — whether this item has been published to the catalogue.
+    add_to_catalogue: bool = False
     created_by: str
     created_at: datetime
     updated_at: datetime

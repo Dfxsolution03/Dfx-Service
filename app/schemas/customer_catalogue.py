@@ -21,6 +21,7 @@ class CustomerProductListItem(BaseModel):
     name: str
     description: Optional[str] = None
     category: Optional[str] = None
+    sub_category: Optional[str] = None
     purity: Optional[str] = None
     price: Optional[float] = None
     weight_grams: Optional[float] = None
@@ -38,6 +39,7 @@ class CustomerProductDetailResponse(BaseModel):
     name: str
     description: Optional[str] = None
     category: Optional[str] = None
+    sub_category: Optional[str] = None
     sku: Optional[str] = None
     purity: Optional[str] = None
     price: Optional[float] = None
