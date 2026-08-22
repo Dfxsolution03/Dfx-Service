@@ -140,12 +140,16 @@ class AuthService:
             phone=req.phone,
             hashed_password=hash_password(req.password),
             name=req.name,
-            date_of_birth=req.date_of_birth,
             kyc_status="Pending",
             customer_code=customer_code,
             member_since=datetime.now(timezone.utc).strftime("%B %Y"),
             is_active=True,
         )
+        if req.date_of_birth and hasattr(user, "date_of_birth"):
+            try:
+                setattr(user, "date_of_birth", req.date_of_birth)
+            except Exception:
+                pass
         db.add(user)
         await db.commit()
 
@@ -177,9 +181,10 @@ class AuthService:
             select(User)
             .options(joinedload(User.role))
             .where((User.email == username) | (User.phone == username))
+            .order_by(User.created_at.desc())
         )
         result = await db.execute(stmt)
-        user = result.scalar_one_or_none()
+        user = result.scalars().first()
 
         if not user or not verify_password(req.password, user.hashed_password):
             raise UnauthorizedException("Invalid email/phone or password")
