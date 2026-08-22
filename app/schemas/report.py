@@ -133,6 +133,35 @@ class SchemeSummaryResponse(BaseModel):
     schemes: List[SchemeSummaryItem]
 
 
+class SalesTrendPoint(BaseModel):
+    period_label: str
+    total_amount: float
+    sale_count: int
+
+
+class SalesTrendResponse(BaseModel):
+    """Business sales revenue time-series for the Admin Dashboard Sales Trend
+    chart. Day buckets for short ranges, month buckets for long ones."""
+    range: DateRangeInfo
+    trend: List[SalesTrendPoint]
+
+
+class CategorySalesItem(BaseModel):
+    category: str
+    total_sales: float
+    bill_count: int
+    # Share of total_sales in the range, 0..100, backend-computed so the
+    # frontend never divides/ fabricates a percentage.
+    percentage: float
+
+
+class SalesByCategoryResponse(BaseModel):
+    """Category breakdown for the Admin Dashboard Top Selling Categories donut."""
+    range: DateRangeInfo
+    total_sales: float
+    categories: List[CategorySalesItem]
+
+
 class DashboardSummaryResponse(BaseModel):
     """Composed from the same repository methods as the other report responses.
     Built in Module 12 as a reusable foundation; consumed for the first time

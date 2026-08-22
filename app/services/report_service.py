@@ -19,6 +19,10 @@ from app.schemas.report import (
     SchemeSummaryResponse,
     SchemeSummaryItem,
     DashboardSummaryResponse,
+    SalesTrendPoint,
+    SalesTrendResponse,
+    CategorySalesItem,
+    SalesByCategoryResponse,
     TopCustomerBySalesItem,
     TopCustomersBySalesResponse,
     InsightItem,
@@ -156,6 +160,58 @@ class ReportService:
                     payment_count=row["payment_count"],
                 )
                 for row in trend_rows
+            ],
+        )
+
+    # ─── Dashboard — Business sales aggregations (Module 13 Dashboard) ───
+
+    @staticmethod
+    async def get_sales_trend(
+        db: AsyncSession,
+        current_user: User,
+        period: Optional[str],
+        date_from: Optional[date],
+        date_to: Optional[date],
+    ) -> SalesTrendResponse:
+        tenant_id = ReportService._require_tenant(current_user)
+        d_from, d_to, label = _resolve_range(period, date_from, date_to)
+        group_by_month = (d_to - d_from).days > 31
+        rows = await ReportRepository.get_sales_trend(db, tenant_id, d_from, d_to, group_by_month)
+        return SalesTrendResponse(
+            range=DateRangeInfo(date_from=d_from, date_to=d_to, label=label),
+            trend=[
+                SalesTrendPoint(
+                    period_label=_label_bucket(row["bucket"], group_by_month),
+                    total_amount=round(row["total_amount"], 2),
+                    sale_count=row["sale_count"],
+                )
+                for row in rows
+            ],
+        )
+
+    @staticmethod
+    async def get_sales_by_category(
+        db: AsyncSession,
+        current_user: User,
+        period: Optional[str],
+        date_from: Optional[date],
+        date_to: Optional[date],
+    ) -> SalesByCategoryResponse:
+        tenant_id = ReportService._require_tenant(current_user)
+        d_from, d_to, label = _resolve_range(period, date_from, date_to)
+        rows = await ReportRepository.get_sales_by_category(db, tenant_id, d_from, d_to)
+        total = sum(r["total_sales"] for r in rows)
+        return SalesByCategoryResponse(
+            range=DateRangeInfo(date_from=d_from, date_to=d_to, label=label),
+            total_sales=round(total, 2),
+            categories=[
+                CategorySalesItem(
+                    category=r["category"],
+                    total_sales=round(r["total_sales"], 2),
+                    bill_count=r["bill_count"],
+                    percentage=round((r["total_sales"] / total) * 100, 1) if total else 0.0,
+                )
+                for r in rows
             ],
         )
 
@@ -652,7 +708,7 @@ from datetime import date as _date  # noqa: E402
 from sqlalchemy import select as _select, func as _func  # noqa: E402
 from app.models.auth import User as _User, Role as _Role  # noqa: E402
 from app.models.billing import InventoryItem as _Item  # noqa: E402
-from app.core.constants import ROLE_CUSTOMER as _ROLE_CUSTOMER, STOCK_STATUS_RETURNED_PENDING_INSPECTION as _PENDING_INSP  # noqa: E402
+from app.core.constants import ROLE_CUSTOMER as _ROLE_CUSTOMER, STOCK_STATUS_RETURNED_PENDING_INSPECTION as _PENDING_INSP, STOCK_STATUS_IN_STOCK as _IN_STOCK  # noqa: E402
 from app.repositories.collection_repository import CollectionRepository as _CollRepo  # noqa: E402
 from app.services.collection_service import REMINDER_WINDOW_DAYS as _WINDOW  # noqa: E402
 
@@ -677,8 +733,17 @@ class DashboardCardsService:
             .where(_Item.tenant_id == t, _Item.stock_status == _PENDING_INSP)
         )).scalar_one())
 
+        # Honest inventory metric — the data model has no quantity/reorder
+        # threshold, so there is no true "low stock"; we surface the sellable
+        # (IN_STOCK) item count instead.
+        items_in_stock = int((await db.execute(
+            _select(_func.count(_Item.id))
+            .where(_Item.tenant_id == t, _Item.stock_status == _IN_STOCK)
+        )).scalar_one())
+
         return {
             "overdue_enrollments": overdue,
             "pending_kyc": pending_kyc,
             "pending_inspection": pending_inspection,
+            "items_in_stock": items_in_stock,
         }

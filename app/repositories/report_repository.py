@@ -9,7 +9,7 @@ from app.models.scheme import Scheme
 from app.models.goldrate import GoldRate
 from app.models.passbook import PassbookEntry
 from app.models.auth import User, Role
-from app.models.billing import Sale
+from app.models.billing import Sale, InventoryItem
 from app.core.constants import ROLE_CUSTOMER, SALE_STATUS_COMPLETED
 
 
@@ -364,6 +364,76 @@ class ReportRepository:
             "bill_count": int(row.bill_count),
             "customer_count": int(row.customer_count),
         }
+
+    # ─── Dashboard — Business sales aggregations (Module 13 Dashboard) ───
+
+    @staticmethod
+    async def get_sales_trend(
+        db: AsyncSession, tenant_id: str, date_from: date, date_to: date, group_by_month: bool
+    ) -> List[dict]:
+        """Sales revenue grouped by day (or month for long ranges) over the
+        sale-date axis. COMPLETED sales only, so returns/cancellations never
+        inflate a bucket. Same bucketing convention as get_payment_trend."""
+        start = datetime.combine(date_from, datetime.min.time())
+        end = datetime.combine(date_to, datetime.max.time())
+        bucket = (
+            func.date_trunc("month", Sale.sale_timestamp)
+            if group_by_month
+            else func.date_trunc("day", Sale.sale_timestamp)
+        )
+        stmt = (
+            select(
+                bucket.label("bucket"),
+                func.coalesce(func.sum(Sale.final_amount), 0.0).label("total_amount"),
+                func.count(Sale.id).label("sale_count"),
+            )
+            .where(
+                Sale.tenant_id == tenant_id,
+                Sale.sale_status == SALE_STATUS_COMPLETED,
+                Sale.sale_timestamp >= start,
+                Sale.sale_timestamp <= end,
+            )
+            .group_by(bucket)
+            .order_by(bucket)
+        )
+        rows = (await db.execute(stmt)).all()
+        return [
+            {"bucket": r.bucket, "total_amount": float(r.total_amount), "sale_count": int(r.sale_count)}
+            for r in rows
+        ]
+
+    @staticmethod
+    async def get_sales_by_category(
+        db: AsyncSession, tenant_id: str, date_from: date, date_to: date
+    ) -> List[dict]:
+        """Sales revenue grouped by the linked inventory item's category.
+        COMPLETED sales only; NULL categories fold into 'Uncategorized'.
+        Percentage is computed by the caller (ReportService)."""
+        start = datetime.combine(date_from, datetime.min.time())
+        end = datetime.combine(date_to, datetime.max.time())
+        cat = func.coalesce(InventoryItem.category, "Uncategorized")
+        stmt = (
+            select(
+                cat.label("category"),
+                func.coalesce(func.sum(Sale.final_amount), 0.0).label("total_sales"),
+                func.count(Sale.id).label("bill_count"),
+            )
+            .select_from(Sale)
+            .join(InventoryItem, Sale.inventory_item_id == InventoryItem.id)
+            .where(
+                Sale.tenant_id == tenant_id,
+                Sale.sale_status == SALE_STATUS_COMPLETED,
+                Sale.sale_timestamp >= start,
+                Sale.sale_timestamp <= end,
+            )
+            .group_by(cat)
+            .order_by(func.sum(Sale.final_amount).desc())
+        )
+        rows = (await db.execute(stmt)).all()
+        return [
+            {"category": r.category, "total_sales": float(r.total_sales), "bill_count": int(r.bill_count)}
+            for r in rows
+        ]
 
 
 # ─── Phase 6 — Top Products (authoritative Sale aggregation) ───

@@ -117,6 +117,52 @@ async def get_payment_summary(
 
 
 @router.get(
+    "/reports/sales-trend",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Business Sales Trend (Admin)",
+    description="COMPLETED-sale revenue time-series (day buckets, month buckets for long ranges) "
+                "over a named period or explicit range. Feeds the Admin Dashboard Sales Trend chart.",
+)
+async def get_sales_trend(
+    period: Optional[ReportPeriod] = Query(None, description="today | this_week | this_month | this_year"),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_sales_trend(db, current_user, period, date_from, date_to)
+    return StandardSuccessResponse(
+        success=True,
+        message="Sales trend retrieved successfully",
+        data={"report": data.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/reports/sales-by-category",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Business Sales by Category (Admin)",
+    description="COMPLETED-sale revenue grouped by the linked inventory item's category, with "
+                "backend-computed percentage share. Feeds the Admin Dashboard Top Selling Categories donut.",
+)
+async def get_sales_by_category(
+    period: Optional[ReportPeriod] = Query(None, description="today | this_week | this_month | this_year"),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_sales_by_category(db, current_user, period, date_from, date_to)
+    return StandardSuccessResponse(
+        success=True,
+        message="Sales by category retrieved successfully",
+        data={"report": data.model_dump(mode="json")},
+    )
+
+
+@router.get(
     "/reports/top-customers",
     response_model=StandardSuccessResponse,
     status_code=status.HTTP_200_OK,
