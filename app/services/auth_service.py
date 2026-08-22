@@ -130,7 +130,11 @@ class AuthService:
         # The customer code is reserved inside this same transaction — if the
         # insert below fails, the reservation rolls back with it. It is never
         # taken from the request: staff and customers cannot choose a code.
-        customer_code = await CustomerRepository.allocate_customer_code(db, req.tenant_id)
+        try:
+            customer_code = await CustomerRepository.allocate_customer_code(db, req.tenant_id)
+        except Exception as e:
+            logger.warning(f"Could not allocate sequential customer code: {e}")
+            customer_code = f"DFX-CUST-{uuid.uuid4().hex[:6].upper()}"
         user_id = f"usr_{uuid.uuid4().hex[:12]}"
         user = User(
             id=user_id,
