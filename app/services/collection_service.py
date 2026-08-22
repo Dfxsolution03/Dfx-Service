@@ -28,7 +28,16 @@ from app.repositories.audit_repository import AuditRepository
 from app.services.notification_service import NotificationService
 from app.services.push_service import PushService
 
-REMINDER_WINDOW_DAYS = 15  # remind only while 1..15 days overdue
+REMINDER_WINDOW_DAYS = 15  # legacy lower-bound window (kept for compatibility)
+
+# Phase 9 — 7-day overdue bucket. days 1-7 → 0, 8-14 → 1, 15-21 → 2, … so a
+# still-unpaid installment lands in a new bucket every 7 days and earns exactly
+# one more reminder per bucket.
+REMINDER_INTERVAL_DAYS = 7
+
+
+def _overdue_week_index(overdue_days: int) -> int:
+    return max(0, (overdue_days - 1) // REMINDER_INTERVAL_DAYS)
 
 
 class CollectionService:
@@ -36,11 +45,15 @@ class CollectionService:
     async def run_due_reminders(
         db: AsyncSession, today: date | None = None, tenant_id: str | None = None
     ) -> dict:
-        """Raise one reminder per overdue (enrollment, due_date) not already
-        reminded. Returns a small summary. today is injectable for testing."""
+        """Raise one reminder per overdue (enrollment, due_date, week_index) not
+        already reminded — i.e. once per 7-day overdue bucket, so an unpaid due
+        is re-reminded every 7 days until a payment advances next_due_date.
+        Returns a small summary. today is injectable for testing."""
         run_day = today or date.today()
+        # window_days=None → every overdue installment is considered, regardless
+        # of how long it has been overdue, so weekly reminders never stop early.
         candidates = await CollectionRepository.list_overdue_active(
-            db, run_day, REMINDER_WINDOW_DAYS, tenant_id
+            db, run_day, None, tenant_id
         )
 
         sent, skipped = 0, 0
@@ -48,6 +61,7 @@ class CollectionService:
         for e in candidates:
             due = e.next_due_date
             overdue_days = (run_day - due).days
+            week_index = _overdue_week_index(overdue_days)
             reminder = CollectionReminder(
                 id=f"col_{uuid.uuid4().hex[:12]}",
                 tenant_id=e.tenant_id,
@@ -55,6 +69,7 @@ class CollectionService:
                 customer_id=e.customer_id,
                 due_date=due,
                 overdue_days=overdue_days,
+                week_index=week_index,
                 channel=REMINDER_CHANNEL_IN_APP,
             )
             # Savepoint per reminder: a UNIQUE collision (already reminded, or a
@@ -89,7 +104,8 @@ class CollectionService:
                 actor_name="system", actor_role="SYSTEM",
                 action="COLLECTION_REMINDER", target_entity="collection_reminders",
                 target_id=reminder.id, before_state=None,
-                after_state={"enrollment_id": e.id, "due_date": due.isoformat(), "overdue_days": overdue_days},
+                after_state={"enrollment_id": e.id, "due_date": due.isoformat(),
+                             "overdue_days": overdue_days, "week_index": week_index},
             )
             sent += 1
 
