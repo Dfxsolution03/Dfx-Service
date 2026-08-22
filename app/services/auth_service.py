@@ -112,17 +112,17 @@ class AuthService:
         # 2. Check for duplicate email or phone
         if req.email:
             stmt_email = select(User).where(User.email == req.email)
-            if (await db.execute(stmt_email)).scalar_one_or_none():
+            if (await db.execute(stmt_email)).scalars().first():
                 raise ConflictException("An account with this email address already exists")
 
         if req.phone:
             stmt_phone = select(User).where(User.phone == req.phone)
-            if (await db.execute(stmt_phone)).scalar_one_or_none():
+            if (await db.execute(stmt_phone)).scalars().first():
                 raise ConflictException("An account with this mobile phone number already exists")
 
         # 3. Get Customer Role
         stmt_role = select(Role).where(Role.name == ROLE_CUSTOMER)
-        role = (await db.execute(stmt_role)).scalar_one_or_none()
+        role = (await db.execute(stmt_role)).scalars().first()
         if not role:
             raise ResourceNotFoundException("Customer role configuration missing in database")
 
