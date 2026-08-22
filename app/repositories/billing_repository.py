@@ -110,7 +110,7 @@ class InventoryRepository:
         stock_status: Optional[str] = None,
         category: Optional[str] = None,
         vendor_id: Optional[str] = None,
-    ) -> Tuple[List[InventoryItem], int]:
+    ) -> Tuple[List[InventoryItem], int, float]:
         conditions = [InventoryItem.tenant_id == tenant_id]
         if search:
             like = f"%{search}%"
@@ -125,19 +125,22 @@ class InventoryRepository:
             conditions.append(InventoryItem.vendor_id == vendor_id)
 
         count_stmt = select(func.count(InventoryItem.id))
+        sum_stmt = select(func.coalesce(func.sum(InventoryItem.net_gold_weight_grams), 0.0))
         list_stmt = select(InventoryItem)
         for cond in conditions:
             count_stmt = count_stmt.where(cond)
+            sum_stmt = sum_stmt.where(cond)
             list_stmt = list_stmt.where(cond)
 
         total = int((await db.execute(count_stmt)).scalar_one())
+        total_gold_weight_grams = float((await db.execute(sum_stmt)).scalar_one())
         list_stmt = (
             list_stmt.order_by(InventoryItem.created_at.desc())
             .offset((page - 1) * limit)
             .limit(limit)
         )
         rows = (await db.execute(list_stmt)).scalars().all()
-        return list(rows), total
+        return list(rows), total, total_gold_weight_grams
 
     @staticmethod
     async def create(db: AsyncSession, item: InventoryItem) -> InventoryItem:
@@ -220,7 +223,7 @@ class SaleRepository:
         customer_id: Optional[str] = None,
         product_code: Optional[str] = None,
         category: Optional[str] = None,
-    ) -> Tuple[List[Sale], int]:
+    ) -> Tuple[List[Sale], int, float]:
         conditions = [Sale.tenant_id == tenant_id]
         if payment_status:
             conditions.append(Sale.payment_status == payment_status)
@@ -258,19 +261,22 @@ class SaleRepository:
             conditions.append(Sale.sale_timestamp <= datetime.combine(date_to, datetime.max.time()))
 
         count_stmt = select(func.count(Sale.id))
+        sum_stmt = select(func.coalesce(func.sum(Sale.net_gold_weight_grams), 0.0))
         list_stmt = select(Sale)
         for cond in conditions:
             count_stmt = count_stmt.where(cond)
+            sum_stmt = sum_stmt.where(cond)
             list_stmt = list_stmt.where(cond)
 
         total = int((await db.execute(count_stmt)).scalar_one())
+        total_gold_weight_grams = float((await db.execute(sum_stmt)).scalar_one())
         list_stmt = (
             list_stmt.order_by(Sale.sale_timestamp.desc())
             .offset((page - 1) * limit)
             .limit(limit)
         )
         rows = (await db.execute(list_stmt)).scalars().all()
-        return list(rows), total
+        return list(rows), total, total_gold_weight_grams
 
     @staticmethod
     async def list_by_customer(

@@ -229,7 +229,11 @@ async def list_inventory_items(
     return StandardSuccessResponse(
         success=True,
         message="Inventory items retrieved successfully",
-        data={"items": [i.model_dump(mode="json") for i in result.items], "total": result.total},
+        data={
+            "items": [i.model_dump(mode="json") for i in result.items],
+            "total": result.total,
+            "total_gold_weight_grams": result.total_gold_weight_grams,
+        },
     )
 
 
@@ -599,7 +603,11 @@ async def list_sales(
     return StandardSuccessResponse(
         success=True,
         message="Sales retrieved successfully",
-        data={"sales": [s.model_dump(mode="json") for s in result.sales], "total": result.total},
+        data={
+            "sales": [s.model_dump(mode="json") for s in result.sales],
+            "total": result.total,
+            "total_gold_weight_grams": result.total_gold_weight_grams,
+        },
     )
 
 

@@ -240,6 +240,7 @@ class InventoryItemResponse(BaseModel):
 class InventoryItemListResponse(BaseModel):
     items: List[InventoryItemResponse]
     total: int
+    total_gold_weight_grams: float = 0.0
 
 
 # =============================================================================
@@ -488,6 +489,7 @@ class SaleResponse(BaseModel):
 class SaleListResponse(BaseModel):
     sales: List[SaleResponse]
     total: int
+    total_gold_weight_grams: float = 0.0
 
 
 # ─── Phase 4 — Quotation ("sample bill" that does not sell) ───
