@@ -159,7 +159,7 @@ class AuthService:
 
         # Load role relationship
         stmt_user = select(User).options(joinedload(User.role)).where(User.id == user.id)
-        user_loaded = (await db.execute(stmt_user)).scalar_one()
+        user_loaded = (await db.execute(stmt_user)).unique().scalars().first()
 
         # Module 18 — best-effort verification email. Mirrors the "a failed
         # revoke must never trap the user in a signed-in shell" resilience
