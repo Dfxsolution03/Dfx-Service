@@ -1196,12 +1196,15 @@ class SaleService:
         date_to: Optional[date],
         payment_status: Optional[str] = None,
         sale_status: Optional[str] = None,
+        customer_id: Optional[str] = None,
+        product_code: Optional[str] = None,
+        category: Optional[str] = None,
     ) -> SaleListResponse:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
         sales, total = await SaleRepository.list_by_tenant(
             db, current_user.tenant_id, page, limit, search, date_from, date_to,
-            payment_status, sale_status,
+            payment_status, sale_status, customer_id, product_code, category,
         )
         rows = [SaleService._build_response(s, current_user) for s in sales]
 

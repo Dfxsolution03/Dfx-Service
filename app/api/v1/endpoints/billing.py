@@ -584,11 +584,17 @@ async def list_sales(
         pattern="^(COMPLETED|RETURNED|CANCELLED)$",
         description="Omit for ALL. The sale lifecycle, independent of the payment status.",
     ),
+    customer_id: Optional[str] = Query(None, description="Exact customer filter."),
+    product_code: Optional[str] = Query(None, description="Exact product-code filter."),
+    category: Optional[str] = Query(
+        None, description="Product category filter (resolved via the linked inventory item)."
+    ),
     current_user: User = Depends(require_admin_or_staff_module("billing")),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await SaleService.list_sales(
-        db, current_user, page, limit, search, date_from, date_to, payment_status, sale_status
+        db, current_user, page, limit, search, date_from, date_to, payment_status, sale_status,
+        customer_id, product_code, category,
     )
     return StandardSuccessResponse(
         success=True,

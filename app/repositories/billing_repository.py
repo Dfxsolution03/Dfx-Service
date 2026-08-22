@@ -217,12 +217,32 @@ class SaleRepository:
         date_to: Optional[date] = None,
         payment_status: Optional[str] = None,
         sale_status: Optional[str] = None,
+        customer_id: Optional[str] = None,
+        product_code: Optional[str] = None,
+        category: Optional[str] = None,
     ) -> Tuple[List[Sale], int]:
         conditions = [Sale.tenant_id == tenant_id]
         if payment_status:
             conditions.append(Sale.payment_status == payment_status)
         if sale_status:
             conditions.append(Sale.sale_status == sale_status)
+        # Phase 5 — sales-history filters: exact customer, exact product code, and
+        # product category. Sale has no category column, so category resolves
+        # through the linked inventory item (tenant-scoped subquery — no join
+        # fan-out, so the COUNT stays correct).
+        if customer_id:
+            conditions.append(Sale.customer_id == customer_id)
+        if product_code:
+            conditions.append(Sale.product_code == product_code)
+        if category:
+            conditions.append(
+                Sale.inventory_item_id.in_(
+                    select(InventoryItem.id).where(
+                        InventoryItem.tenant_id == tenant_id,
+                        func.lower(InventoryItem.category) == category.lower(),
+                    )
+                )
+            )
         if search:
             like = f"%{search}%"
             conditions.append(
