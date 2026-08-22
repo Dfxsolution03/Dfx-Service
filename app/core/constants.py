@@ -104,6 +104,60 @@ ALL_STAFF_MODULES = [
     STAFF_MODULE_BILLING,
 ]
 
+# Phase 8 — Staff permission GROUPING for the Admin UI's two dropdowns
+# (Scheme / Business). This is a PRESENTATION + validation grouping over the
+# EXISTING STAFF_MODULE_* keys above — it introduces no new permission keys,
+# renames nothing, and does not change how require_admin_or_staff_module()
+# authorizes. A staff account is still granted a flat set of these same module
+# keys (User.staff_permissions); the groups only tell the frontend how to lay
+# them out and give each key a context label.
+#
+# Notes on the mapping to existing keys (no new keys invented):
+#   * "reports", "analytics", "notifications" are single shared modules — they
+#     appear under BOTH groups with a context label (e.g. "Scheme Reports" vs
+#     "Business Reports"); granting the key from either dropdown grants the one
+#     underlying permission.
+#   * Inventory and Sales are enforced under the existing "billing" key (there
+#     are no separate inventory/sales module keys), surfaced with a combined label.
+#   * Passbook access is covered by the "payments" key (no separate key exists).
+#   * "support" is a valid module but is not part of either business dropdown.
+STAFF_MODULE_GROUP_SCHEME = "SCHEME"
+STAFF_MODULE_GROUP_BUSINESS = "BUSINESS"
+
+STAFF_MODULE_GROUPS = [
+    {
+        "group": STAFF_MODULE_GROUP_SCHEME,
+        "label": "Scheme",
+        "modules": [
+            {"key": STAFF_MODULE_CUSTOMERS, "label": "Customers"},
+            {"key": STAFF_MODULE_KYC, "label": "KYC"},
+            {"key": STAFF_MODULE_SCHEMES, "label": "Schemes"},
+            {"key": STAFF_MODULE_ENROLLMENTS, "label": "Enrollments"},
+            # Passbook has no staff permission key and remains Admin-only (its
+            # admin route uses require_admin_only), so it is NOT bundled here —
+            # this key grants Payments access only.
+            {"key": STAFF_MODULE_PAYMENTS, "label": "Payments"},
+            {"key": STAFF_MODULE_REPORTS, "label": "Scheme Reports"},
+            {"key": STAFF_MODULE_ANALYTICS, "label": "Scheme Analytics"},
+            {"key": STAFF_MODULE_NOTIFICATIONS, "label": "Scheme Notifications"},
+        ],
+    },
+    {
+        "group": STAFF_MODULE_GROUP_BUSINESS,
+        "label": "Business",
+        "modules": [
+            {"key": STAFF_MODULE_CATALOGUE, "label": "Catalogue"},
+            {"key": STAFF_MODULE_BILLING, "label": "Billing, Inventory & Sales"},
+            {"key": STAFF_MODULE_MARKETING, "label": "Marketing"},
+            {"key": STAFF_MODULE_GOLD_RATE, "label": "Gold Rate"},
+            {"key": STAFF_MODULE_BRANCHES, "label": "Branches"},
+            {"key": STAFF_MODULE_REPORTS, "label": "Business Reports"},
+            {"key": STAFF_MODULE_ANALYTICS, "label": "Business Analytics"},
+            {"key": STAFF_MODULE_NOTIFICATIONS, "label": "Business Notifications"},
+        ],
+    },
+]
+
 # Billing Module — Inventory / Selling. Karat-to-24K fraction table
 # (karat/24), the standard jewellery-industry purity conversion — GoldRate
 # and MarketRate only ever store a 24K rate, so a purity-specific rate is
