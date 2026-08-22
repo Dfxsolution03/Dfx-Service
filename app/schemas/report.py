@@ -1,8 +1,44 @@
 from datetime import date
-from typing import List, Literal, Optional
-from pydantic import BaseModel
+from typing import Any, Dict, List, Literal, Optional
+from pydantic import BaseModel, Field
 
 ReportPeriod = Literal["today", "this_week", "this_month", "this_year"]
+
+
+# ─── Phase 6 — Business top customers + AI insights ───
+
+class TopCustomerBySalesItem(BaseModel):
+    customer_id: str
+    customer_name: Optional[str] = None
+    total_spent: float
+    bill_count: int
+
+
+class TopCustomersBySalesResponse(BaseModel):
+    range: "DateRangeInfo"
+    customers: List[TopCustomerBySalesItem]
+
+
+class InsightItem(BaseModel):
+    """One data-grounded insight. `evidence` carries the exact figures behind
+    the statement so the frontend can present it and the admin can trust it —
+    values are never fabricated (see InsightsResponse.data_available)."""
+    id: str
+    category: str
+    title: str
+    detail: str
+    severity: Literal["info", "positive", "warning"] = "info"
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+
+
+class InsightsResponse(BaseModel):
+    range: "DateRangeInfo"
+    module: Literal["business", "scheme"]
+    # False when the range holds no underlying data — the response then carries
+    # a single explanatory insight and NO invented metrics.
+    data_available: bool
+    insights: List[InsightItem] = Field(default_factory=list)
+    note: Optional[str] = None
 
 
 class DateRangeInfo(BaseModel):
@@ -110,3 +146,9 @@ class DashboardSummaryResponse(BaseModel):
     # Added Module 13 — see ReportRepository.get_customer_count.
     total_customers: int
     total_customers_growth_percent: Optional[float] = None
+
+
+# Resolve the forward references to DateRangeInfo used by the Phase 6 models
+# declared above it.
+TopCustomersBySalesResponse.model_rebuild()
+InsightsResponse.model_rebuild()

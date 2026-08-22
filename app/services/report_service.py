@@ -19,6 +19,10 @@ from app.schemas.report import (
     SchemeSummaryResponse,
     SchemeSummaryItem,
     DashboardSummaryResponse,
+    TopCustomerBySalesItem,
+    TopCustomersBySalesResponse,
+    InsightItem,
+    InsightsResponse,
 )
 from app.schemas.export import ExportFileResponse, ExportFormat
 from app.services.export_service import ExportService, ExportColumn
@@ -153,6 +157,166 @@ class ReportService:
             range=DateRangeInfo(date_from=d_from, date_to=d_to, label=label),
             customers=[TopCustomerItem(**row) for row in rows],
         )
+
+    # ─── Phase 6 — Business top customers + AI insights ───
+
+    @staticmethod
+    async def get_top_customers_by_sales(
+        db: AsyncSession,
+        current_user: User,
+        period: Optional[str],
+        date_from: Optional[date],
+        date_to: Optional[date],
+        limit: int,
+    ) -> TopCustomersBySalesResponse:
+        tenant_id = ReportService._require_tenant(current_user)
+        d_from, d_to, label = _resolve_range(period, date_from, date_to)
+        rows = await ReportRepository.get_top_customers_by_sales(db, tenant_id, d_from, d_to, limit)
+        return TopCustomersBySalesResponse(
+            range=DateRangeInfo(date_from=d_from, date_to=d_to, label=label),
+            customers=[TopCustomerBySalesItem(**row) for row in rows],
+        )
+
+    @staticmethod
+    async def get_business_insights(
+        db: AsyncSession,
+        current_user: User,
+        period: Optional[str],
+        date_from: Optional[date],
+        date_to: Optional[date],
+    ) -> InsightsResponse:
+        """Data-grounded business insights. Every figure comes from a real
+        aggregate over COMPLETED sales in the range; when there are none, the
+        response says so and invents nothing."""
+        tenant_id = ReportService._require_tenant(current_user)
+        d_from, d_to, label = _resolve_range(period, date_from, date_to)
+        rng = DateRangeInfo(date_from=d_from, date_to=d_to, label=label)
+
+        totals = await ReportRepository.get_sales_totals(db, tenant_id, d_from, d_to)
+        if totals["bill_count"] == 0:
+            return InsightsResponse(
+                range=rng, module="business", data_available=False,
+                insights=[InsightItem(
+                    id="no_business_data", category="coverage", severity="info",
+                    title="No sales in this period",
+                    detail="No completed sales were recorded in the selected range, so no business "
+                           "analytics can be computed.",
+                    evidence={"revenue": 0, "bill_count": 0},
+                )],
+                note="Insufficient data for the selected range.",
+            )
+
+        insights: list = [InsightItem(
+            id="revenue_overview", category="revenue", severity="positive",
+            title="Sales in this period",
+            detail=f"{totals['bill_count']} completed sale(s) totalling {totals['revenue']} "
+                   f"across {totals['customer_count']} registered customer(s).",
+            evidence=totals,
+        )]
+
+        top_products = await ReportService.get_top_products(db, current_user, d_from, d_to, "revenue", 1)
+        if top_products["items"]:
+            tp = top_products["items"][0]
+            insights.append(InsightItem(
+                id="top_product", category="product", severity="info",
+                title="Top-selling product",
+                detail=f"{tp['product_name']} led sales with {tp['units']} unit(s) and "
+                       f"{tp['revenue']} in revenue.",
+                evidence={"product_code": tp["product_code"], "units": tp["units"], "revenue": tp["revenue"]},
+            ))
+
+        top_customers = await ReportRepository.get_top_customers_by_sales(db, tenant_id, d_from, d_to, 1)
+        if top_customers:
+            tc = top_customers[0]
+            insights.append(InsightItem(
+                id="top_customer", category="customer", severity="info",
+                title="Top customer by spend",
+                detail=f"{tc['customer_name'] or 'A customer'} spent {tc['total_spent']} across "
+                       f"{tc['bill_count']} bill(s) — a candidate for loyalty recognition.",
+                evidence=tc,
+            ))
+
+        return InsightsResponse(range=rng, module="business", data_available=True, insights=insights)
+
+    @staticmethod
+    async def get_scheme_insights(
+        db: AsyncSession,
+        current_user: User,
+        period: Optional[str],
+        date_from: Optional[date],
+        date_to: Optional[date],
+    ) -> InsightsResponse:
+        """Data-grounded scheme insights, from real enrollment/collection
+        aggregates. Invents nothing when the range has no scheme activity."""
+        tenant_id = ReportService._require_tenant(current_user)
+        d_from, d_to, label = _resolve_range(period, date_from, date_to)
+        rng = DateRangeInfo(date_from=d_from, date_to=d_to, label=label)
+
+        pay = await ReportRepository.get_payment_totals(db, tenant_id, d_from, d_to)
+        status_counts = await ReportRepository.get_enrollment_status_counts(db, tenant_id)
+        active = status_counts[STATUS_ACTIVE]
+        completed = status_counts[STATUS_COMPLETED]
+        cancelled = status_counts[STATUS_CANCELLED]
+        total_decided = active + completed + cancelled
+
+        if total_decided == 0 and pay["success_count"] == 0:
+            return InsightsResponse(
+                range=rng, module="scheme", data_available=False,
+                insights=[InsightItem(
+                    id="no_scheme_data", category="coverage", severity="info",
+                    title="No scheme activity",
+                    detail="No enrollments or scheme collections exist for this range, so no scheme "
+                           "analytics can be computed.",
+                    evidence={"enrollments": 0, "collections": 0},
+                )],
+                note="Insufficient data for the selected range.",
+            )
+
+        insights: list = []
+        group_by_month = (d_to - d_from).days > 31
+        trend = await ReportRepository.get_new_enrollment_trend(db, tenant_id, d_from, d_to, group_by_month)
+        new_in_range = sum(r["new_enrollments"] for r in trend)
+        insights.append(InsightItem(
+            id="enrollment_activity", category="enrollment", severity="positive" if new_in_range else "info",
+            title="Enrollment activity",
+            detail=f"{new_in_range} new enrollment(s) in the period; {active} currently active.",
+            evidence={"new_enrollments": new_in_range, "active": active,
+                      "completed": completed, "cancelled": cancelled},
+        ))
+
+        if total_decided:
+            retention = round(((active + completed) / total_decided) * 100, 1)
+            insights.append(InsightItem(
+                id="retention", category="retention",
+                severity="warning" if retention < 50 else "positive",
+                title="Retention rate",
+                detail=f"{retention}% of decided enrollments are active or completed "
+                       f"(rather than cancelled).",
+                evidence={"retention_rate_percent": retention, "cancelled": cancelled},
+            ))
+
+        insights.append(InsightItem(
+            id="scheme_collections", category="collections",
+            severity="positive" if pay["success_amount"] > 0 else "info",
+            title="Scheme collections",
+            detail=f"{pay['success_amount']} collected across {pay['success_count']} successful "
+                   f"contribution(s) in the period.",
+            evidence={"success_amount": pay["success_amount"], "success_count": pay["success_count"]},
+        ))
+
+        top = await ReportRepository.get_top_enrollments_by_investment(db, tenant_id, d_from, d_to, 1)
+        if top:
+            t = top[0]
+            insights.append(InsightItem(
+                id="top_scheme_customer", category="customer", severity="info",
+                title="Top scheme customer",
+                detail=f"{t['customer_name']} invested {t['total_invested']} in "
+                       f"{t['scheme_name']} — a candidate for loyalty recognition.",
+                evidence={"customer_id": t["customer_id"], "scheme_name": t["scheme_name"],
+                          "total_invested": t["total_invested"]},
+            ))
+
+        return InsightsResponse(range=rng, module="scheme", data_available=True, insights=insights)
 
     # ─── Enrollments ───
 

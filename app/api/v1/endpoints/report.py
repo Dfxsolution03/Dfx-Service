@@ -273,3 +273,74 @@ async def export_dashboard_summary(
         message="Export generated successfully",
         data={"export": file.model_dump(mode="json")},
     )
+
+
+# ─── Phase 6 — Business top customers + AI insights ───
+
+@router.get(
+    "/reports/top-customers/business",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Top Customers by Sales Spend (Admin)",
+    description="Ranks registered customers by total completed-sale spend within the range — the "
+                "business-side counterpart to the scheme Top Customers table.",
+)
+async def get_top_customers_business(
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    limit: int = Query(10, ge=1, le=50),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_top_customers_by_sales(db, current_user, period, date_from, date_to, limit)
+    return StandardSuccessResponse(
+        success=True, message="Top business customers retrieved successfully",
+        data={"report": data.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/reports/insights/business",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Business AI Insights (Admin)",
+    description="Data-grounded business insights (revenue, top product, top customer) with the "
+                "evidence behind each. Returns data_available=false and no invented figures when the "
+                "range has no sales.",
+)
+async def get_business_insights(
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_business_insights(db, current_user, period, date_from, date_to)
+    return StandardSuccessResponse(
+        success=True, message="Business insights retrieved successfully",
+        data={"insights": data.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/reports/insights/scheme",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Scheme AI Insights (Admin)",
+    description="Data-grounded scheme insights (enrollment activity, retention, collections, top "
+                "customer) with the evidence behind each. Returns data_available=false and no invented "
+                "figures when the range has no scheme activity.",
+)
+async def get_scheme_insights(
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_scheme_insights(db, current_user, period, date_from, date_to)
+    return StandardSuccessResponse(
+        success=True, message="Scheme insights retrieved successfully",
+        data={"insights": data.model_dump(mode="json")},
+    )

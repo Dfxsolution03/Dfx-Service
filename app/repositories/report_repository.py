@@ -9,7 +9,8 @@ from app.models.scheme import Scheme
 from app.models.goldrate import GoldRate
 from app.models.passbook import PassbookEntry
 from app.models.auth import User, Role
-from app.core.constants import ROLE_CUSTOMER
+from app.models.billing import Sale
+from app.core.constants import ROLE_CUSTOMER, SALE_STATUS_COMPLETED
 
 
 class ReportRepository:
@@ -276,6 +277,72 @@ class ReportRepository:
             stmt = stmt.where(User.created_at <= as_of)
         result = await db.execute(stmt)
         return int(result.scalar_one())
+
+    # ─── Phase 6 — Business (sales) analytics primitives ───
+
+    @staticmethod
+    async def get_top_customers_by_sales(
+        db: AsyncSession, tenant_id: str, date_from: date, date_to: date, limit: int
+    ) -> List[dict]:
+        """Rank customers by total COMPLETED-sale spend within the range — the
+        business-side counterpart to get_top_enrollments_by_investment. Walk-in
+        sales (customer_id NULL) are excluded; only registered customers rank."""
+        start = datetime.combine(date_from, datetime.min.time())
+        end = datetime.combine(date_to, datetime.max.time())
+        stmt = (
+            select(
+                Sale.customer_id.label("customer_id"),
+                Sale.customer_name.label("customer_name"),
+                func.coalesce(func.sum(Sale.final_amount), 0.0).label("total_spent"),
+                func.count(Sale.id).label("bill_count"),
+            )
+            .where(
+                Sale.tenant_id == tenant_id,
+                Sale.customer_id.isnot(None),
+                (Sale.sale_status == SALE_STATUS_COMPLETED) | (Sale.sale_status.is_(None)),
+                Sale.sale_timestamp >= start,
+                Sale.sale_timestamp <= end,
+            )
+            .group_by(Sale.customer_id, Sale.customer_name)
+            .order_by(func.sum(Sale.final_amount).desc())
+            .limit(limit)
+        )
+        rows = (await db.execute(stmt)).all()
+        return [
+            {
+                "customer_id": r.customer_id,
+                "customer_name": r.customer_name,
+                "total_spent": round(float(r.total_spent), 2),
+                "bill_count": int(r.bill_count),
+            }
+            for r in rows
+        ]
+
+    @staticmethod
+    async def get_sales_totals(
+        db: AsyncSession, tenant_id: str, date_from: date, date_to: date
+    ) -> dict:
+        """Range totals over COMPLETED sales: revenue, bill count, and distinct
+        registered-customer count. The single source for the business insights'
+        headline numbers — nothing is fabricated when there are no sales."""
+        start = datetime.combine(date_from, datetime.min.time())
+        end = datetime.combine(date_to, datetime.max.time())
+        stmt = select(
+            func.coalesce(func.sum(Sale.final_amount), 0.0).label("revenue"),
+            func.count(Sale.id).label("bill_count"),
+            func.count(func.distinct(Sale.customer_id)).label("customer_count"),
+        ).where(
+            Sale.tenant_id == tenant_id,
+            (Sale.sale_status == SALE_STATUS_COMPLETED) | (Sale.sale_status.is_(None)),
+            Sale.sale_timestamp >= start,
+            Sale.sale_timestamp <= end,
+        )
+        row = (await db.execute(stmt)).one()
+        return {
+            "revenue": round(float(row.revenue), 2),
+            "bill_count": int(row.bill_count),
+            "customer_count": int(row.customer_count),
+        }
 
 
 # ─── Phase 6 — Top Products (authoritative Sale aggregation) ───
