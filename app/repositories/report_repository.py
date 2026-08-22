@@ -135,6 +135,27 @@ class ReportRepository:
             for row in rows
         ]
 
+    @staticmethod
+    async def get_dobs_for_customers(
+        db: AsyncSession, tenant_id: str, customer_ids: List[str]
+    ) -> List[dict]:
+        """Phase 10 — the date_of_birth for the given customers (tenant-scoped).
+        Rows with a NULL DOB are excluded outright, so a customer with no
+        birthday on file can never appear in a birthday insight. Returns real
+        stored data only — no fabrication."""
+        if not customer_ids:
+            return []
+        stmt = select(User.id, User.name, User.date_of_birth).where(
+            User.tenant_id == tenant_id,
+            User.id.in_(customer_ids),
+            User.date_of_birth.is_not(None),
+        )
+        rows = (await db.execute(stmt)).all()
+        return [
+            {"customer_id": r.id, "customer_name": r.name, "date_of_birth": r.date_of_birth}
+            for r in rows
+        ]
+
     # ─── Enrollments ───
 
     @staticmethod

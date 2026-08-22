@@ -91,6 +91,26 @@ def _end_of_day_ist(d: date) -> datetime:
     return datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=IST)
 
 
+BIRTHDAY_WINDOW_DAYS = 30  # Phase 10 — approved upcoming-birthday window.
+
+
+def _next_birthday_days(dob: date, today: date, window: int = BIRTHDAY_WINDOW_DAYS) -> Optional[int]:
+    """Days until the customer's NEXT birthday, matched on month+day only
+    (birth year ignored). Returns None when the next birthday is outside the
+    window. A Feb-29 birthday falls back to Feb-28 in non-leap years."""
+    def _bday(year: int) -> date:
+        try:
+            return date(year, dob.month, dob.day)
+        except ValueError:  # Feb 29 in a non-leap year
+            return date(year, dob.month, 28)
+
+    upcoming = _bday(today.year)
+    if upcoming < today:
+        upcoming = _bday(today.year + 1)
+    days = (upcoming - today).days
+    return days if 0 <= days <= window else None
+
+
 class ReportService:
     @staticmethod
     def _require_tenant(current_user: User) -> str:
@@ -178,6 +198,39 @@ class ReportService:
         )
 
     @staticmethod
+    async def _birthday_insight(db, tenant_id, customer_rows, today, module):
+        """Phase 10 — build a birthday/complimentary insight from the customers
+        ALREADY ranked by the caller (business top customers / scheme top
+        customers). Looks up their real DOBs (NULL excluded) and keeps only
+        birthdays within the 30-day window. Returns None — never a fabricated
+        insight — when no eligible birthday exists."""
+        ids = list({r["customer_id"] for r in customer_rows if r.get("customer_id")})
+        if not ids:
+            return None
+        dobs = await ReportRepository.get_dobs_for_customers(db, tenant_id, ids)
+        upcoming = []
+        for row in dobs:
+            days = _next_birthday_days(row["date_of_birth"], today)
+            if days is not None:
+                upcoming.append({
+                    "customer_id": row["customer_id"],
+                    "customer_name": row["customer_name"],
+                    "birthday": row["date_of_birth"].strftime("%m-%d"),
+                    "days_until_birthday": days,
+                })
+        if not upcoming:
+            return None
+        upcoming.sort(key=lambda x: x["days_until_birthday"])
+        names = ", ".join((u["customer_name"] or "A customer") for u in upcoming[:5])
+        return InsightItem(
+            id="birthday_complimentary", category="birthday", severity="info",
+            title=f"Top {module} customer birthdays in the next {BIRTHDAY_WINDOW_DAYS} days",
+            detail=f"{len(upcoming)} top {module} customer(s) have a birthday within "
+                   f"{BIRTHDAY_WINDOW_DAYS} days ({names}) — a chance to send a complimentary gift.",
+            evidence={"window_days": BIRTHDAY_WINDOW_DAYS, "customers": upcoming},
+        )
+
+    @staticmethod
     async def get_business_insights(
         db: AsyncSession,
         current_user: User,
@@ -225,7 +278,9 @@ class ReportService:
                 evidence={"product_code": tp["product_code"], "units": tp["units"], "revenue": tp["revenue"]},
             ))
 
-        top_customers = await ReportRepository.get_top_customers_by_sales(db, tenant_id, d_from, d_to, 1)
+        # Top customers by spend — fetched once (top 10) and reused for both the
+        # single top-customer insight and the birthday scan (no new ranking).
+        top_customers = await ReportRepository.get_top_customers_by_sales(db, tenant_id, d_from, d_to, 10)
         if top_customers:
             tc = top_customers[0]
             insights.append(InsightItem(
@@ -235,6 +290,11 @@ class ReportService:
                        f"{tc['bill_count']} bill(s) — a candidate for loyalty recognition.",
                 evidence=tc,
             ))
+            birthday = await ReportService._birthday_insight(
+                db, tenant_id, top_customers, _today_ist(), "business"
+            )
+            if birthday:
+                insights.append(birthday)
 
         return InsightsResponse(range=rng, module="business", data_available=True, insights=insights)
 
@@ -304,7 +364,9 @@ class ReportService:
             evidence={"success_amount": pay["success_amount"], "success_count": pay["success_count"]},
         ))
 
-        top = await ReportRepository.get_top_enrollments_by_investment(db, tenant_id, d_from, d_to, 1)
+        # Top scheme customers by investment — fetched once (top 10) and reused
+        # for the single top-customer insight and the birthday scan.
+        top = await ReportRepository.get_top_enrollments_by_investment(db, tenant_id, d_from, d_to, 10)
         if top:
             t = top[0]
             insights.append(InsightItem(
@@ -315,6 +377,11 @@ class ReportService:
                 evidence={"customer_id": t["customer_id"], "scheme_name": t["scheme_name"],
                           "total_invested": t["total_invested"]},
             ))
+            birthday = await ReportService._birthday_insight(
+                db, tenant_id, top, _today_ist(), "scheme"
+            )
+            if birthday:
+                insights.append(birthday)
 
         return InsightsResponse(range=rng, module="scheme", data_available=True, insights=insights)
 
