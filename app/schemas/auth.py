@@ -8,6 +8,7 @@ class UserRegisterRequest(BaseModel):
     phone: Optional[str] = Field(None, min_length=10, max_length=15, example="9876543210")
     password: str = Field(..., min_length=6, max_length=100, example="Priya@123")
     tenant_id: str = Field(..., description="Selected Jewellery Store ID from public stores dropdown")
+    date_of_birth: Optional[str] = Field(None, description="Customer Date of Birth (YYYY-MM-DD)", example="1995-08-15")
 
 
 class UserLoginRequest(BaseModel):

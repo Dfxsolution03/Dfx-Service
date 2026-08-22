@@ -140,6 +140,7 @@ class AuthService:
             phone=req.phone,
             hashed_password=hash_password(req.password),
             name=req.name,
+            date_of_birth=req.date_of_birth,
             kyc_status="Pending",
             customer_code=customer_code,
             member_since=datetime.now(timezone.utc).strftime("%B %Y"),
