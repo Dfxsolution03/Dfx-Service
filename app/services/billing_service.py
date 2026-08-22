@@ -39,6 +39,7 @@ from app.models.billing import (
     BILL_DRAFT_OPEN,
     BILL_DRAFT_FINALIZED,
     BILL_DRAFT_DISCARDED,
+    Quotation,
 )
 from app.repositories.billing_repository import (
     VendorRepository,
@@ -49,10 +50,12 @@ from app.repositories.billing_repository import (
     SalePaymentRepository,
     SaleReturnRepository,
     BillDraftRepository,
+    QuotationRepository,
 )
 from app.repositories.enrollment_repository import EnrollmentRepository, SchemeRedemptionRepository
 from app.models.enrollment import (
     SchemeRedemption,
+    REDEEMABLE_STATUSES,
     STATUS_ACTIVE as ENR_ACTIVE,
     STATUS_CLOSED as ENR_CLOSED,
     STATUS_REDEEMED as ENR_REDEEMED,
@@ -106,6 +109,10 @@ from app.schemas.billing import (
     BillingDashboardSummaryResponse,
     BusinessSummaryResponse,
     ReceivablesSummaryResponse,
+    QuotationCreateRequest,
+    QuotationResponse,
+    QuotationListResponse,
+    QuotationSchemePreviewItem,
 )
 
 _DEFAULT_FIELD_NAMES = [
@@ -132,6 +139,18 @@ def _charge_amount(charge_type: str, value: float, net_gold_weight_grams: float,
 
 def _round2(value: float) -> float:
     return round(value, 2)
+
+
+def _pl_label(value):
+    """Direction-only label for a profit/loss figure — the WORD a Staff user
+    sees instead of the rupee number (Phase 4). None when there is no figure."""
+    if value is None:
+        return None
+    if value > _MONEY_EPSILON:
+        return "PROFIT"
+    if value < -_MONEY_EPSILON:
+        return "LOSS"
+    return "BREAK_EVEN"
 
 
 # Money tolerance for float comparisons. Amounts are stored as Float and
@@ -944,6 +963,8 @@ class SaleService:
             pricing_mode=sale.pricing_mode,
             purchase_cost_snapshot=sale.purchase_cost_snapshot if privileged else None,
             estimated_gross_margin=sale.estimated_gross_margin if privileged else None,
+            # Direction shown to everyone (incl. Staff, who never see the number).
+            profit_or_loss_label=_pl_label(sale.estimated_gross_margin),
             sale_timestamp=sale.sale_timestamp,
             created_by=sale.created_by,
             created_at=sale.created_at,
@@ -988,13 +1009,14 @@ class SaleService:
             making_charge_value, wastage_value, gold_profit_percent,
         )
         privileged = _is_privileged(current_user)
-        # Both profit views are commercially sensitive (they expose cost and
-        # metal margin), so they are gated exactly like the existing
-        # profit_or_loss — null for Staff.
-        views = (
-            BillingCalculationEngine.profit_views(breakdown, item.purchase_cost)
-            if privileged else {}
-        )
+        # Compute both views once. The direction label is derived here and shown
+        # to everyone (Staff see the WORD); the numeric views stay commercially
+        # sensitive and are gated to privileged callers only.
+        all_views = BillingCalculationEngine.profit_views(breakdown, item.purchase_cost)
+        hp = all_views.get("historical_profit_or_loss")
+        cp = all_views.get("current_gold_value_profit_or_loss")
+        label = _pl_label(hp if hp is not None else cp)
+        views = all_views if privileged else {}
         return SaleQuoteResponse(
             inventory_item=InventoryService._build_response(item, current_user),
             breakdown=breakdown,
@@ -1003,6 +1025,7 @@ class SaleService:
             historical_profit_margin_percent=views.get("historical_profit_margin_percent"),
             current_gold_value_profit_or_loss=views.get("current_gold_value_profit_or_loss"),
             current_gold_value_margin_percent=views.get("current_gold_value_margin_percent"),
+            profit_or_loss_label=label,
         )
 
     @staticmethod
@@ -2277,3 +2300,188 @@ class BillDraftService:
         await db.commit()
 
         return await SaleService.get_sale(db, current_user, sale.id)
+
+
+class QuotationService:
+    """Phase 4 — generate a QUOTATION ('sample bill'): the full computed bill a
+    customer is handed before buying. It reuses the SAME BillingCalculationEngine
+    a real sale uses, so the printed figures match a future finalize, but it
+    NEVER marks the item SOLD and NEVER spends a scheme balance (scheme amounts
+    are a read-only preview). It lives in its own table, so no financial query
+    ever reads it."""
+
+    @staticmethod
+    def _quotation_number() -> str:
+        return f"QTN-{date.today():%y%m%d}-{uuid.uuid4().hex[:6].upper()}"
+
+    @staticmethod
+    async def _scheme_preview(db, current_user, customer_id, scheme_amounts, invoice_total):
+        """Read-only preview of what the customer's scheme balances WOULD cover.
+        Caps mirror the real redemption path exactly (per enrollment <= available
+        balance derived from the ledgers; combined <= the invoice). Writes nothing."""
+        items: list = []
+        applied_total = 0.0
+        remaining = invoice_total
+        for enr_id, requested in (scheme_amounts or {}).items():
+            requested = _round2(requested)
+            if requested <= 0:
+                continue
+            enr = await EnrollmentRepository.get_enrollment_by_id(db, enr_id, current_user.tenant_id)
+            if not enr:
+                raise ResourceNotFoundException(f"Enrollment '{enr_id}' not found")
+            if enr.customer_id != customer_id:
+                raise ValidationException(
+                    f"Enrollment {enr.enrollment_number} does not belong to this customer"
+                )
+            if enr.status not in REDEEMABLE_STATUSES:
+                raise ValidationException(
+                    f"Enrollment {enr.enrollment_number} is {enr.status.lower()} and its balance "
+                    f"cannot be applied."
+                )
+            paid = await SchemeRedemptionRepository.sum_successful_contributions(
+                db, enr.id, current_user.tenant_id
+            )
+            spent = await SchemeRedemptionRepository.sum_for_enrollment(
+                db, enr.id, current_user.tenant_id
+            )
+            available = _round2(max(0.0, paid - spent))
+            applied = _round2(min(requested, available, remaining))
+            remaining = _round2(max(0.0, remaining - applied))
+            applied_total = _round2(applied_total + applied)
+            items.append(QuotationSchemePreviewItem(
+                enrollment_id=enr.id,
+                enrollment_number=enr.enrollment_number,
+                requested_amount=requested,
+                available_balance=available,
+                applied_amount=applied,
+            ))
+        return items, applied_total
+
+    @staticmethod
+    def _to_response(q: Quotation, current_user: User, breakdown, preview) -> QuotationResponse:
+        privileged = _is_privileged(current_user)
+        return QuotationResponse(
+            id=q.id,
+            tenant_id=q.tenant_id,
+            quotation_number=q.quotation_number,
+            inventory_item_id=q.inventory_item_id,
+            product_code=q.product_code,
+            product_name=q.product_name,
+            customer_id=q.customer_id,
+            customer_name=q.customer_name,
+            customer_phone=q.customer_phone,
+            breakdown=breakdown,
+            gst_applied=q.gst_applied,
+            final_amount=_round2(q.final_amount),
+            scheme_amount_total=_round2(q.scheme_amount_total or 0),
+            outstanding_amount=_round2(q.outstanding_amount),
+            scheme_preview=preview,
+            estimated_gross_margin=q.estimated_gross_margin if privileged else None,
+            profit_or_loss_label=q.profit_or_loss_label,
+            note=q.note,
+            created_by=q.created_by,
+            created_at=q.created_at,
+        )
+
+    @staticmethod
+    def _rebuild_view(q: Quotation, current_user: User) -> QuotationResponse:
+        """Reconstruct a response from a stored quotation (list/get reprint)."""
+        breakdown = PriceBreakdown(**q.breakdown_json)
+        preview = [
+            QuotationSchemePreviewItem(**i)
+            for i in ((q.scheme_breakdown_json or {}).get("items", []))
+        ]
+        return QuotationService._to_response(q, current_user, breakdown, preview)
+
+    @staticmethod
+    async def generate(db: AsyncSession, current_user: User, req: QuotationCreateRequest) -> QuotationResponse:
+        await SaleService._validate_customer_id(db, current_user, req.customer_id)
+        item, rate = await SaleService._get_sellable_item_and_rate(db, current_user, req.product_code)
+        breakdown = BillingCalculationEngine.calculate(
+            item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
+            req.discount_amount, req.gst_applied, req.customer_price,
+            req.making_charge_value, req.wastage_value, req.gold_profit_percent,
+        )
+        invoice_total = breakdown.final_amount
+
+        preview, scheme_total = await QuotationService._scheme_preview(
+            db, current_user, req.customer_id, req.scheme_amounts, invoice_total
+        )
+        outstanding = _round2(max(0.0, invoice_total - scheme_total))
+
+        # Same profit definition and gating as a real sale.
+        margin = BillingCalculationEngine.realized_profit_or_loss(
+            invoice_total, breakdown.tax_rate_percent, breakdown.gst_applied, item.purchase_cost
+        )
+        label = _pl_label(margin)
+
+        q_id = f"qtn_{uuid.uuid4().hex[:12]}"
+        quotation = Quotation(
+            id=q_id,
+            tenant_id=current_user.tenant_id,
+            quotation_number=QuotationService._quotation_number(),
+            inventory_item_id=item.id,  # reference only — NEVER marked SOLD
+            product_code=item.product_code,
+            product_name=item.product_name,
+            customer_id=req.customer_id,
+            customer_name=req.customer_name,
+            customer_phone=req.customer_phone,
+            gst_applied=breakdown.gst_applied,
+            final_amount=invoice_total,
+            scheme_amount_total=scheme_total,
+            outstanding_amount=outstanding,
+            breakdown_json=breakdown.model_dump(mode="json"),
+            scheme_breakdown_json={"items": [p.model_dump(mode="json") for p in preview]} if preview else None,
+            estimated_gross_margin=margin,
+            profit_or_loss_label=label,
+            note=req.note,
+            created_by=current_user.id,
+        )
+        await QuotationRepository.create(db, quotation)
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="QUOTATION_CREATE",
+            target_entity="quotations",
+            target_id=q_id,
+            before_state=None,
+            after_state={
+                "quotation_number": quotation.quotation_number,
+                "product_code": item.product_code,
+                "final_amount": invoice_total,
+                "scheme_amount_total": scheme_total,
+                "outstanding_amount": outstanding,
+            },
+        )
+
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            raise ConflictException("Could not generate a unique quotation number. Please try again.")
+
+        quotation = await QuotationRepository.get_by_id(db, q_id, current_user.tenant_id)
+        return QuotationService._to_response(quotation, current_user, breakdown, preview)
+
+    @staticmethod
+    async def get_quotation(db: AsyncSession, current_user: User, quotation_id: str) -> QuotationResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        q = await QuotationRepository.get_by_id(db, quotation_id, current_user.tenant_id)
+        if not q:
+            raise ResourceNotFoundException(f"Quotation '{quotation_id}' not found")
+        return QuotationService._rebuild_view(q, current_user)
+
+    @staticmethod
+    async def list_quotations(db: AsyncSession, current_user: User) -> QuotationListResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        rows = await QuotationRepository.list_by_tenant(db, current_user.tenant_id)
+        return QuotationListResponse(
+            quotations=[QuotationService._rebuild_view(q, current_user) for q in rows],
+            total=len(rows),
+        )

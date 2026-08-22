@@ -25,6 +25,7 @@ from app.schemas.billing import (
     BillDraftCreateRequest,
     BillDraftUpdateRequest,
     BillDraftFinalizeRequest,
+    QuotationCreateRequest,
 )
 from app.services.billing_service import (
     VendorService,
@@ -34,6 +35,7 @@ from app.services.billing_service import (
     SalePaymentService,
     SaleReturnService,
     BillDraftService,
+    QuotationService,
     _is_privileged,
 )
 from app.schemas.catalogue import InventoryPublishRequest, InventoryBulkPublishRequest
@@ -408,6 +410,65 @@ async def get_sale_quote(
     )
     return StandardSuccessResponse(
         success=True, message="Quote calculated successfully", data=quote.model_dump(mode="json")
+    )
+
+
+# ─── Phase 4 — Quotation ("sample bill" that does not sell) ───
+
+@router.post(
+    "/billing/quotation",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Generate A Quotation / Sample Bill (Admin/Staff)",
+    description=(
+        "Generates a full quotation bill for a customer using the same pricing engine a real sale "
+        "uses. The item is NOT marked sold and no scheme balance is spent — any scheme_amounts are a "
+        "read-only preview. Staff see a profit/loss word, not the number."
+    ),
+)
+async def create_quotation(
+    req: QuotationCreateRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    quotation = await QuotationService.generate(db, current_user, req)
+    return StandardSuccessResponse(
+        success=True, message="Quotation generated successfully",
+        data={"quotation": quotation.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/billing/quotations",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List Quotations (Admin/Staff)",
+)
+async def list_quotations(
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await QuotationService.list_quotations(db, current_user)
+    return StandardSuccessResponse(
+        success=True, message="Quotations retrieved successfully", data=result.model_dump(mode="json")
+    )
+
+
+@router.get(
+    "/billing/quotations/{quotation_id}",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Quotation (Admin/Staff)",
+)
+async def get_quotation(
+    quotation_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    quotation = await QuotationService.get_quotation(db, current_user, quotation_id)
+    return StandardSuccessResponse(
+        success=True, message="Quotation retrieved successfully",
+        data={"quotation": quotation.model_dump(mode="json")},
     )
 
 

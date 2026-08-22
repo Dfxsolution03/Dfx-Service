@@ -16,6 +16,7 @@ from app.models.billing import (
     PAYMENT_SOURCE_REFUND,
     BillDraft,
     BILL_DRAFT_OPEN,
+    Quotation,
 )
 
 
@@ -674,4 +675,30 @@ class BillDraftRepository:
         if customer_id is not None:
             stmt = stmt.where(BillDraft.customer_id == customer_id)
         stmt = stmt.order_by(BillDraft.updated_at.desc())
+        return list((await db.execute(stmt)).scalars().all())
+
+
+class QuotationRepository:
+    """Phase 4 — persistence for quotations. Every read is tenant-scoped."""
+
+    @staticmethod
+    async def create(db: AsyncSession, row: Quotation) -> Quotation:
+        db.add(row)
+        return row
+
+    @staticmethod
+    async def get_by_id(db: AsyncSession, quotation_id: str, tenant_id: str) -> Optional[Quotation]:
+        stmt = select(Quotation).where(
+            Quotation.id == quotation_id, Quotation.tenant_id == tenant_id
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def list_by_tenant(
+        db: AsyncSession, tenant_id: str, customer_id: Optional[str] = None
+    ) -> List[Quotation]:
+        stmt = select(Quotation).where(Quotation.tenant_id == tenant_id)
+        if customer_id is not None:
+            stmt = stmt.where(Quotation.customer_id == customer_id)
+        stmt = stmt.order_by(Quotation.created_at.desc())
         return list((await db.execute(stmt)).scalars().all())

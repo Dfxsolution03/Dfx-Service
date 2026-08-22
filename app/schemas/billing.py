@@ -350,6 +350,10 @@ class SaleQuoteResponse(BaseModel):
     historical_profit_margin_percent: Optional[float] = None
     current_gold_value_profit_or_loss: Optional[float] = None
     current_gold_value_margin_percent: Optional[float] = None
+    # Phase 4 — direction only ("PROFIT"/"LOSS"/"BREAK_EVEN"), no rupee figure.
+    # This is what a Staff caller sees (they get the word, never the number);
+    # Admins get both this label and the numeric views above.
+    profit_or_loss_label: Optional[str] = None
 
 
 class SaleCreateRequest(BaseModel):
@@ -464,6 +468,9 @@ class SaleResponse(BaseModel):
     # Omitted for Staff-role callers.
     purchase_cost_snapshot: Optional[float] = None
     estimated_gross_margin: Optional[float] = None
+    # Phase 4 — direction-only label ("PROFIT"/"LOSS"/"BREAK_EVEN") of the gross
+    # margin, shown to Staff (who never see the numeric estimated_gross_margin).
+    profit_or_loss_label: Optional[str] = None
 
     sale_status: str = "COMPLETED"
     amount_refunded: float = 0.0
@@ -480,6 +487,79 @@ class SaleResponse(BaseModel):
 
 class SaleListResponse(BaseModel):
     sales: List[SaleResponse]
+    total: int
+
+
+# ─── Phase 4 — Quotation ("sample bill" that does not sell) ───
+
+class QuotationCreateRequest(BaseModel):
+    """Generate a quotation. Same pricing inputs as a real sale (so the printed
+    figures match a future finalize), plus an OPTIONAL read-only scheme preview.
+    Nothing is sold and no scheme balance is spent."""
+    product_code: str = Field(..., min_length=1, max_length=50)
+    customer_id: Optional[str] = Field(None, max_length=50)
+    customer_name: Optional[str] = Field(None, max_length=150)
+    customer_phone: Optional[str] = Field(None, max_length=20)
+    discount_amount: float = Field(0, ge=0)
+    customer_price: Optional[float] = Field(None, ge=0)
+    making_charge_value: Optional[float] = Field(None, ge=0)
+    wastage_value: Optional[float] = Field(None, ge=0)
+    gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
+    gst_applied: bool = True
+    # Optional {enrollment_id: amount} the customer intends to apply from their
+    # scheme balances. Previewed read-only (capped by available balance and by
+    # the invoice); requires customer_id.
+    scheme_amounts: Optional[Dict[str, float]] = None
+    note: Optional[str] = Field(None, max_length=255)
+
+    @model_validator(mode="after")
+    def _customer_identified(self) -> "QuotationCreateRequest":
+        if not self.customer_id and not self.customer_name:
+            raise ValueError("Provide either customer_id or customer_name to identify the buyer")
+        if self.scheme_amounts and not self.customer_id:
+            raise ValueError("scheme_amounts requires an existing customer_id")
+        return self
+
+
+class QuotationSchemePreviewItem(BaseModel):
+    enrollment_id: str
+    enrollment_number: str
+    requested_amount: float
+    available_balance: float
+    applied_amount: float
+
+
+class QuotationResponse(BaseModel):
+    id: str
+    tenant_id: str
+    quotation_number: str
+    inventory_item_id: Optional[str] = None
+    product_code: str
+    product_name: str
+    customer_id: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    breakdown: PriceBreakdown
+    gst_applied: bool
+    # invoice cost = breakdown.final_amount; scheme_amount_total previewed;
+    # outstanding = final_amount - scheme_amount_total.
+    final_amount: float
+    scheme_amount_total: float = 0.0
+    outstanding_amount: float
+    scheme_preview: List[QuotationSchemePreviewItem] = Field(default_factory=list)
+    # Profit/loss, gated exactly like a sale: number for Admin only, label for all.
+    estimated_gross_margin: Optional[float] = None
+    profit_or_loss_label: Optional[str] = None
+    note: Optional[str] = None
+    created_by: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class QuotationListResponse(BaseModel):
+    quotations: List[QuotationResponse]
     total: int
 
 
