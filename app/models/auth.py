@@ -127,7 +127,6 @@ class User(Base, TimestampMixin):
     customer_code: Mapped[Optional[str]] = mapped_column(String(32), index=True, nullable=True)
     member_since: Mapped[Optional[str]] = mapped_column(String(50), nullable=True)
     avatar_url: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    date_of_birth: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False)
     # Staff-only module access grants — comma-separated STAFF_MODULE keys
     # (see app/core/constants.py). Same "plain Text, manual (de)serialization
