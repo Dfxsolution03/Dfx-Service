@@ -64,6 +64,15 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
+    # Phase 7 — Push notifications (FCM/APNs). Default "noop": with no provider
+    # configured the backend registers device tokens and records in-app
+    # notifications but never fakes a push delivery. Set PUSH_PROVIDER=fcm and
+    # supply the two FCM values (service-account JSON + project id) in the
+    # deployment environment to enable real delivery.
+    PUSH_PROVIDER: str = "noop"  # noop|fcm
+    FCM_PROJECT_ID: Optional[str] = None
+    FCM_CREDENTIALS_JSON: Optional[str] = None
+
     # SuperAdmin Initial Seed Configuration
     SUPERADMIN_EMAIL: str = "superadmin@dfxsolution.com"
     SUPERADMIN_PASSWORD: str = INSECURE_SUPERADMIN_PASSWORD_DEFAULT

@@ -5,6 +5,7 @@ from app.core.database import get_async_db
 from app.models.auth import User
 from app.permissions.dependencies import get_current_user
 from app.schemas.auth import StandardSuccessResponse
+from app.schemas.notification import DeviceRegisterRequest, DeviceUnregisterRequest
 from app.services.notification_service import NotificationService
 
 router = APIRouter()
@@ -104,4 +105,47 @@ async def mark_as_read(
         success=True,
         message="Notification marked as read",
         data={"notification": item.model_dump(mode="json")},
+    )
+
+
+# ─── Phase 7 — push device registration (Customer) ───
+
+@router.post(
+    "/customer/notifications/devices",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Register Push Device (Customer)",
+    description="Registers (or re-registers) the caller's FCM/APNs/Expo device token so overdue and "
+                "other push notifications can be delivered. Idempotent per device token.",
+)
+async def register_device(
+    req: DeviceRegisterRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    device = await NotificationService.register_device(db, current_user, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Device registered for push notifications",
+        data={"device": device.model_dump(mode="json")},
+    )
+
+
+@router.post(
+    "/customer/notifications/devices/unregister",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Unregister Push Device (Customer)",
+    description="Deactivates one of the caller's device tokens (logout / token rotation).",
+)
+async def unregister_device(
+    req: DeviceUnregisterRequest,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_async_db),
+):
+    await NotificationService.unregister_device(db, current_user, req.token)
+    return StandardSuccessResponse(
+        success=True,
+        message="Device unregistered",
+        data={},
     )

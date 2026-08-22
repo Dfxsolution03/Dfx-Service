@@ -1,6 +1,6 @@
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import String, Text, Boolean, Integer, DateTime, ForeignKey
+from sqlalchemy import String, Text, Boolean, Integer, DateTime, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.models.base import Base, TimestampMixin
@@ -59,3 +59,31 @@ class NotificationCampaign(Base, TimestampMixin):
     recipient_count: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     sent_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+
+
+class DeviceToken(Base, TimestampMixin):
+    """Phase 7 — a customer's registered push device (FCM/APNs/Expo).
+
+    One row per (tenant, token): re-registering the same token updates its
+    owner/platform/provider and reactivates it, so a token is never duplicated.
+    A row here is only a delivery ADDRESS — actual push delivery happens through
+    push_service and is real only when a provider is configured; a token never
+    implies or fakes a send.
+    """
+    __tablename__ = "device_tokens"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "token", name="uq_device_tokens_tenant_token"),
+    )
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    user_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    token: Mapped[str] = mapped_column(String(512), nullable=False)
+    platform: Mapped[str] = mapped_column(String(20), nullable=False)  # ANDROID|IOS|WEB
+    provider: Mapped[str] = mapped_column(String(20), nullable=False, default="FCM")  # FCM|APNS|EXPO
+    is_active: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True, index=True)
+    last_seen_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
