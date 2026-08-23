@@ -323,7 +323,7 @@ class ReportService:
             evidence=totals,
         )]
 
-        top_products = await ReportService.get_top_products(db, current_user, d_from, d_to, "revenue", 1)
+        top_products = await TopProductsService.get_top_products(db, current_user, d_from, d_to, "revenue", 1)
         if top_products["items"]:
             tp = top_products["items"][0]
             insights.append(InsightItem(
