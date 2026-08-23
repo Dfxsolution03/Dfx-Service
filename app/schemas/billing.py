@@ -490,6 +490,8 @@ class SaleListResponse(BaseModel):
     sales: List[SaleResponse]
     total: int
     total_gold_weight_grams: float = 0.0
+    # Sum of (final_amount - amount_paid) across the whole filtered set.
+    total_outstanding: float = 0.0
 
 
 # ─── Phase 4 — Quotation ("sample bill" that does not sell) ───

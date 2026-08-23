@@ -607,6 +607,7 @@ async def list_sales(
             "sales": [s.model_dump(mode="json") for s in result.sales],
             "total": result.total,
             "total_gold_weight_grams": result.total_gold_weight_grams,
+            "total_outstanding": result.total_outstanding,
         },
     )
 

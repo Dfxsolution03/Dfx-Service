@@ -90,6 +90,9 @@ class TopCustomersResponse(BaseModel):
 class EnrollmentTrendPoint(BaseModel):
     period_label: str
     new_enrollments: int
+    # Sum of estimated maturity value of enrollments started in this bucket, so
+    # the dashboard Collections chart can plot a Maturity metric. Estimate only.
+    maturity_amount: float = 0.0
 
 
 class EnrollmentSummaryResponse(BaseModel):
@@ -137,6 +140,10 @@ class SalesTrendPoint(BaseModel):
     period_label: str
     total_amount: float
     sale_count: int
+    # Per-bucket profit (sum of realized gross margin) and gold weight sold, so
+    # the dashboard Sales Trend chart can switch metric without more endpoints.
+    profit: float = 0.0
+    gold_weight_grams: float = 0.0
 
 
 class SalesTrendResponse(BaseModel):

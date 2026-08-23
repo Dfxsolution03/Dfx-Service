@@ -180,8 +180,17 @@ class ReportRepository:
         bucket = (
             func.date_trunc("month", SchemeEnrollment.joined_date) if group_by_month else SchemeEnrollment.joined_date
         )
+        # Estimated maturity = selected monthly amount × selected duration.
+        # Legacy enrollments with null tier snapshot contribute 0 (honest estimate).
+        maturity = func.coalesce(SchemeEnrollment.selected_monthly_amount, 0.0) * func.coalesce(
+            SchemeEnrollment.selected_duration_months, 0
+        )
         stmt = (
-            select(bucket.label("bucket"), func.count(SchemeEnrollment.id).label("new_enrollments"))
+            select(
+                bucket.label("bucket"),
+                func.count(SchemeEnrollment.id).label("new_enrollments"),
+                func.coalesce(func.sum(maturity), 0.0).label("maturity_amount"),
+            )
             .where(
                 SchemeEnrollment.tenant_id == tenant_id,
                 SchemeEnrollment.joined_date >= date_from,
@@ -191,7 +200,14 @@ class ReportRepository:
             .order_by(bucket)
         )
         rows = (await db.execute(stmt)).all()
-        return [{"bucket": row.bucket, "new_enrollments": int(row.new_enrollments)} for row in rows]
+        return [
+            {
+                "bucket": row.bucket,
+                "new_enrollments": int(row.new_enrollments),
+                "maturity_amount": float(row.maturity_amount),
+            }
+            for row in rows
+        ]
 
     # ─── Gold Rate ───
 
@@ -386,6 +402,8 @@ class ReportRepository:
                 bucket.label("bucket"),
                 func.coalesce(func.sum(Sale.final_amount), 0.0).label("total_amount"),
                 func.count(Sale.id).label("sale_count"),
+                func.coalesce(func.sum(Sale.estimated_gross_margin), 0.0).label("profit"),
+                func.coalesce(func.sum(Sale.gross_weight_grams), 0.0).label("gold_weight_grams"),
             )
             .where(
                 Sale.tenant_id == tenant_id,
@@ -398,7 +416,13 @@ class ReportRepository:
         )
         rows = (await db.execute(stmt)).all()
         return [
-            {"bucket": r.bucket, "total_amount": float(r.total_amount), "sale_count": int(r.sale_count)}
+            {
+                "bucket": r.bucket,
+                "total_amount": float(r.total_amount),
+                "sale_count": int(r.sale_count),
+                "profit": float(r.profit),
+                "gold_weight_grams": float(r.gold_weight_grams),
+            }
             for r in rows
         ]
 

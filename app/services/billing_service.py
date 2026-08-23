@@ -1204,7 +1204,7 @@ class SaleService:
     ) -> SaleListResponse:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
-        sales, total, total_gold_weight_grams = await SaleRepository.list_by_tenant(
+        sales, total, total_gold_weight_grams, total_outstanding = await SaleRepository.list_by_tenant(
             db, current_user.tenant_id, page, limit, search, date_from, date_to,
             payment_status, sale_status, customer_id, product_code, category,
         )
@@ -1220,7 +1220,10 @@ class SaleService:
         for row, sale in zip(rows, sales):
             row.customer_code = codes.get(sale.customer_id) if sale.customer_id else None
 
-        return SaleListResponse(sales=rows, total=total, total_gold_weight_grams=total_gold_weight_grams)
+        return SaleListResponse(
+            sales=rows, total=total, total_gold_weight_grams=total_gold_weight_grams,
+            total_outstanding=round(total_outstanding, 2),
+        )
 
     @staticmethod
     def _resolve_period_range(

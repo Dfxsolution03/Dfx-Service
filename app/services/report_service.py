@@ -184,6 +184,8 @@ class ReportService:
                     period_label=_label_bucket(row["bucket"], group_by_month),
                     total_amount=round(row["total_amount"], 2),
                     sale_count=row["sale_count"],
+                    profit=round(row.get("profit", 0.0), 2),
+                    gold_weight_grams=round(row.get("gold_weight_grams", 0.0), 3),
                 )
                 for row in rows
             ],
@@ -478,6 +480,7 @@ class ReportService:
                 EnrollmentTrendPoint(
                     period_label=_label_bucket(row["bucket"], group_by_month),
                     new_enrollments=row["new_enrollments"],
+                    maturity_amount=round(row.get("maturity_amount", 0.0), 2),
                 )
                 for row in trend_rows
             ],

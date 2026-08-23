@@ -262,21 +262,26 @@ class SaleRepository:
 
         count_stmt = select(func.count(Sale.id))
         sum_stmt = select(func.coalesce(func.sum(Sale.net_gold_weight_grams), 0.0))
+        # Outstanding is always final_amount - amount_paid; aggregate it across
+        # the whole filtered set (not just the page) for the dashboard KPI.
+        outstanding_stmt = select(func.coalesce(func.sum(Sale.final_amount - Sale.amount_paid), 0.0))
         list_stmt = select(Sale)
         for cond in conditions:
             count_stmt = count_stmt.where(cond)
             sum_stmt = sum_stmt.where(cond)
+            outstanding_stmt = outstanding_stmt.where(cond)
             list_stmt = list_stmt.where(cond)
 
         total = int((await db.execute(count_stmt)).scalar_one())
         total_gold_weight_grams = float((await db.execute(sum_stmt)).scalar_one())
+        total_outstanding = float((await db.execute(outstanding_stmt)).scalar_one())
         list_stmt = (
             list_stmt.order_by(Sale.sale_timestamp.desc())
             .offset((page - 1) * limit)
             .limit(limit)
         )
         rows = (await db.execute(list_stmt)).scalars().all()
-        return list(rows), total, total_gold_weight_grams
+        return list(rows), total, total_gold_weight_grams, total_outstanding
 
     @staticmethod
     async def list_by_customer(
