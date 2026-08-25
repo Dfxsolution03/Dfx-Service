@@ -7,10 +7,11 @@ from app.core.database import get_async_db
 from app.models.auth import User
 from app.permissions.dependencies import require_admin_or_staff_module
 from app.schemas.auth import StandardSuccessResponse
-from app.schemas.report import ReportPeriod
+from app.schemas.report import ReportPeriod, AiAnalysisRequest
 from app.schemas.export import ExportFormat
 from app.services.report_service import ReportService, TopProductsService, DashboardCardsService
 from app.services.collection_service import CollectionsReadService
+from app.services.ai_analyst_service import AiAnalystService
 
 router = APIRouter()
 
@@ -389,4 +390,31 @@ async def get_scheme_insights(
     return StandardSuccessResponse(
         success=True, message="Scheme insights retrieved successfully",
         data={"insights": data.model_dump(mode="json")},
+    )
+
+
+# ─── Phase 2A — AI Analyst ───
+
+@router.post(
+    "/reports/ai-analysis",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Insight Engine (Admin/Staff-reports)",
+    description="Deterministic DFX insight engine (no external AI). Interprets the authoritative "
+                "business or scheme report aggregates for the selected period and returns structured, "
+                "prioritised insights and recommendations. Returns available=false with an "
+                "'Insufficient data' note when the period has no comparable activity — never "
+                "fabricated figures.",
+)
+async def post_ai_analysis(
+    body: AiAnalysisRequest,
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await AiAnalystService.analyze(
+        db, current_user, body.domain, body.period, body.date_from, body.date_to
+    )
+    return StandardSuccessResponse(
+        success=True, message="AI analysis completed",
+        data={"analysis": data.model_dump(mode="json")},
     )

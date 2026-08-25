@@ -184,7 +184,42 @@ class DashboardSummaryResponse(BaseModel):
     total_customers_growth_percent: Optional[float] = None
 
 
+# ─── Phase 2A — AI Analyst ───
+
+class AiAnalysisRequest(BaseModel):
+    domain: Literal["BUSINESS", "SCHEME"]
+    period: Optional[ReportPeriod] = None
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+
+
+class AiRecommendedAction(BaseModel):
+    priority: Literal["HIGH", "MEDIUM", "LOW"]
+    title: str
+    explanation: str
+    # Supporting metric/value, when the underlying data provides one.
+    metric: Optional[str] = None
+
+
+class AiAnalysisResponse(BaseModel):
+    domain: Literal["BUSINESS", "SCHEME"]
+    range: "DateRangeInfo"
+    # False when the AI provider is not configured, data is insufficient, or the
+    # provider call failed — the frontend renders an "unavailable" panel and the
+    # rest of Reports keeps working. `note` explains which.
+    available: bool
+    executive_summary: str = ""
+    key_findings: List[str] = []
+    opportunities: List[str] = []
+    risks: List[str] = []
+    recommended_actions: List[AiRecommendedAction] = []
+    generated_at: Optional[str] = None
+    model: Optional[str] = None
+    note: Optional[str] = None
+
+
 # Resolve the forward references to DateRangeInfo used by the Phase 6 models
 # declared above it.
 TopCustomersBySalesResponse.model_rebuild()
 InsightsResponse.model_rebuild()
+AiAnalysisResponse.model_rebuild()
