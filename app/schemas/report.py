@@ -218,6 +218,26 @@ class AiAnalysisResponse(BaseModel):
     note: Optional[str] = None
 
 
+# ─── Birthday intelligence (Reports Analytics) ───
+
+class BirthdayCustomer(BaseModel):
+    customer_id: str
+    customer_name: Optional[str] = None
+    customer_code: Optional[str] = None
+    # Calendar birthday as MM-DD (birth year is intentionally not exposed).
+    birthday: str
+    days_until_birthday: int
+
+
+class BirthdaySummaryResponse(BaseModel):
+    window_days: int
+    total_with_dob: int
+    today_count: int
+    upcoming_count: int
+    today: List[BirthdayCustomer]
+    upcoming: List[BirthdayCustomer]
+
+
 # Resolve the forward references to DateRangeInfo used by the Phase 6 models
 # declared above it.
 TopCustomersBySalesResponse.model_rebuild()

@@ -21,6 +21,8 @@ from app.schemas.report import (
     DashboardSummaryResponse,
     SalesTrendPoint,
     SalesTrendResponse,
+    BirthdayCustomer,
+    BirthdaySummaryResponse,
     CategorySalesItem,
     SalesByCategoryResponse,
     TopCustomerBySalesItem,
@@ -286,6 +288,46 @@ class ReportService:
             detail=f"{len(upcoming)} top {module} customer(s) have a birthday within "
                    f"{BIRTHDAY_WINDOW_DAYS} days ({names}) — a chance to send a complimentary gift.",
             evidence={"window_days": BIRTHDAY_WINDOW_DAYS, "customers": upcoming},
+        )
+
+    @staticmethod
+    async def get_birthday_summary(
+        db: AsyncSession, current_user: User, window_days: int = BIRTHDAY_WINDOW_DAYS,
+    ) -> BirthdaySummaryResponse:
+        """Reports Analytics — real customer-birthday intelligence for the tenant.
+        Reuses the stored User.date_of_birth (no new source) and the existing
+        month/day matcher. Returns today's birthdays and those within the window;
+        never fabricates a customer or a count. Names are exposed only to the
+        report-permitted caller enforced at the endpoint."""
+        tenant_id = ReportService._require_tenant(current_user)
+        window_days = max(1, min(window_days, 90))
+        today = _today_ist()
+        rows = await ReportRepository.get_customers_with_dob(db, tenant_id)
+
+        today_list: list = []
+        upcoming: list = []
+        for r in rows:
+            days = _next_birthday_days(r["date_of_birth"], today, window_days)
+            if days is None:
+                continue
+            item = BirthdayCustomer(
+                customer_id=r["customer_id"],
+                customer_name=r["customer_name"],
+                customer_code=r["customer_code"],
+                birthday=r["date_of_birth"].strftime("%m-%d"),
+                days_until_birthday=days,
+            )
+            (today_list if days == 0 else upcoming).append(item)
+
+        upcoming.sort(key=lambda x: x.days_until_birthday)
+        today_list.sort(key=lambda x: (x.customer_name or ""))
+        return BirthdaySummaryResponse(
+            window_days=window_days,
+            total_with_dob=len(rows),
+            today_count=len(today_list),
+            upcoming_count=len(upcoming),
+            today=today_list,
+            upcoming=upcoming,
         )
 
     @staticmethod

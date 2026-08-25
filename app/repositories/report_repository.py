@@ -156,6 +156,31 @@ class ReportRepository:
             for r in rows
         ]
 
+    @staticmethod
+    async def get_customers_with_dob(db: AsyncSession, tenant_id: str) -> List[dict]:
+        """All Customer-role users for a tenant that have a real date_of_birth on
+        file (NULL excluded). Tenant-scoped. The day-window filtering is done in
+        the service from these stored dates — no fabrication here."""
+        stmt = (
+            select(User.id, User.name, User.customer_code, User.date_of_birth)
+            .join(Role, Role.id == User.role_id)
+            .where(
+                User.tenant_id == tenant_id,
+                Role.name == ROLE_CUSTOMER,
+                User.date_of_birth.is_not(None),
+            )
+        )
+        rows = (await db.execute(stmt)).all()
+        return [
+            {
+                "customer_id": r.id,
+                "customer_name": r.name,
+                "customer_code": r.customer_code,
+                "date_of_birth": r.date_of_birth,
+            }
+            for r in rows
+        ]
+
     # ─── Enrollments ───
 
     @staticmethod

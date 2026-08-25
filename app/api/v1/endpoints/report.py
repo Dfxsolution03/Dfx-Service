@@ -393,6 +393,27 @@ async def get_scheme_insights(
     )
 
 
+@router.get(
+    "/reports/birthdays",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Customer Birthday Intelligence (Admin/Staff-reports)",
+    description="Real customer-birthday intelligence for the tenant from stored DOBs: today's "
+                "birthdays and those within the window (default 30 days), with counts. Names are "
+                "returned only to report-permitted callers. Never fabricates counts.",
+)
+async def get_birthdays(
+    window_days: int = Query(30, ge=1, le=90),
+    current_user: User = Depends(require_admin_or_staff_module("reports")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_birthday_summary(db, current_user, window_days)
+    return StandardSuccessResponse(
+        success=True, message="Birthday intelligence retrieved successfully",
+        data={"summary": data.model_dump(mode="json")},
+    )
+
+
 # ─── Phase 2A — AI Analyst ───
 
 @router.post(
