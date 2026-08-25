@@ -2,7 +2,7 @@ from datetime import datetime
 from typing import Literal
 from pydantic import BaseModel, Field
 
-NotificationType = Literal["SCHEME", "PAYMENT", "SUPPORT", "KYC", "ANNOUNCEMENT", "GENERAL"]
+NotificationType = Literal["SCHEME", "PAYMENT", "SUPPORT", "KYC", "ANNOUNCEMENT", "GENERAL", "BIRTHDAY"]
 
 DevicePlatform = Literal["ANDROID", "IOS", "WEB"]
 PushProviderName = Literal["FCM", "APNS", "EXPO"]

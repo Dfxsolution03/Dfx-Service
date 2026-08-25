@@ -167,6 +167,10 @@ class Settings(BaseSettings):
     # Phase 7 — overdue reminder scheduler. Off by default (deploy opts in).
     ENABLE_COLLECTION_REMINDERS: bool = False
     COLLECTION_REMINDER_INTERVAL_HOURS: int = 24
+    # Customer birthday wishes — inert unless enabled (default false, like the
+    # other schedulers). Runs once daily at this IST hour.
+    ENABLE_BIRTHDAY_NOTIFICATIONS: bool = False
+    BIRTHDAY_NOTIFICATION_HOUR_IST: int = 9
     MARKET_RATE_PROVIDER: str = "METALPRICEAPI"
     MARKET_RATE_SYNC_INTERVAL_MINUTES: int = 10
     MARKET_RATE_FETCH_TIMEOUT_SECONDS: int = 10

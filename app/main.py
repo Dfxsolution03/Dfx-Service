@@ -59,6 +59,12 @@ async def lifespan(app: FastAPI):
         get_collection_scheduler().start()
         logger.info("Collection reminder scheduler started.")
 
+    # Customer birthday wishes scheduler. Inert unless explicitly enabled.
+    if settings.ENABLE_BIRTHDAY_NOTIFICATIONS:
+        from app.scheduler.birthday_notification_scheduler import get_scheduler as get_birthday_scheduler
+        get_birthday_scheduler().start()
+        logger.info("Birthday notification scheduler started.")
+
     yield
 
     # Shutdown tasks
