@@ -291,41 +291,83 @@ class ReportService:
         )
 
     @staticmethod
+    async def _high_value_map(db, current_user, domain, period, date_from, date_to) -> dict:
+        """customer_id -> domain value for the existing top-customer ranking
+        (BUSINESS: sale spend; SCHEME: scheme investment). Membership in this map
+        = high-value in that domain. Reuses the existing ranking queries — no new
+        financial calculation. Bounded to the top 20."""
+        tenant_id = ReportService._require_tenant(current_user)
+        d_from, d_to, _ = _resolve_range(period or "this_year", date_from, date_to)
+        if domain == "BUSINESS":
+            rows = await ReportRepository.get_top_customers_by_sales(db, tenant_id, d_from, d_to, 20)
+            return {r["customer_id"]: r["total_spent"] for r in rows if r.get("customer_id")}
+        rows = await ReportRepository.get_top_enrollments_by_investment(db, tenant_id, d_from, d_to, 50)
+        # One customer can hold several enrollments — sum their investment.
+        agg: dict = {}
+        for r in rows:
+            cid = r.get("customer_id")
+            if cid:
+                agg[cid] = agg.get(cid, 0.0) + float(r["total_invested"])
+        top = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:20]
+        return dict(top)
+
+    @staticmethod
     async def get_birthday_summary(
-        db: AsyncSession, current_user: User, window_days: int = BIRTHDAY_WINDOW_DAYS,
+        db: AsyncSession,
+        current_user: User,
+        domain: str = "BUSINESS",
+        period: Optional[str] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        window_days: int = BIRTHDAY_WINDOW_DAYS,
     ) -> BirthdaySummaryResponse:
-        """Reports Analytics — real customer-birthday intelligence for the tenant.
+        """Reports Analytics — domain-aware customer-birthday intelligence.
         Reuses the stored User.date_of_birth (no new source) and the existing
-        month/day matcher. Returns today's birthdays and those within the window;
-        never fabricates a customer or a count. Names are exposed only to the
-        report-permitted caller enforced at the endpoint."""
+        month/day matcher, and flags high-value customers using the existing
+        domain top-customer ranking (BUSINESS spend / SCHEME investment). Never
+        fabricates a customer, count, or value; birth year is not exposed. Names
+        are exposed only to the report-permitted caller enforced at the endpoint.
+        No complimentary benefit is defined here — only the opportunity is
+        surfaced."""
         tenant_id = ReportService._require_tenant(current_user)
         window_days = max(1, min(window_days, 90))
         today = _today_ist()
         rows = await ReportRepository.get_customers_with_dob(db, tenant_id)
+        hv = await ReportService._high_value_map(db, current_user, domain, period, date_from, date_to)
 
         today_list: list = []
         upcoming: list = []
+        priority_count = 0
         for r in rows:
             days = _next_birthday_days(r["date_of_birth"], today, window_days)
             if days is None:
                 continue
+            cid = r["customer_id"]
+            is_priority = cid in hv
+            if is_priority:
+                priority_count += 1
             item = BirthdayCustomer(
-                customer_id=r["customer_id"],
+                customer_id=cid,
                 customer_name=r["customer_name"],
                 customer_code=r["customer_code"],
                 birthday=r["date_of_birth"].strftime("%m-%d"),
                 days_until_birthday=days,
+                value=hv.get(cid),
+                is_priority=is_priority,
             )
             (today_list if days == 0 else upcoming).append(item)
 
-        upcoming.sort(key=lambda x: x.days_until_birthday)
-        today_list.sort(key=lambda x: (x.customer_name or ""))
+        # Priority first, then soonest birthday, then name.
+        sort_key = lambda x: (not x.is_priority, x.days_until_birthday, x.customer_name or "")
+        upcoming.sort(key=sort_key)
+        today_list.sort(key=lambda x: (not x.is_priority, x.customer_name or ""))
         return BirthdaySummaryResponse(
+            domain=domain,
             window_days=window_days,
             total_with_dob=len(rows),
             today_count=len(today_list),
             upcoming_count=len(upcoming),
+            priority_count=priority_count,
             today=today_list,
             upcoming=upcoming,
         )

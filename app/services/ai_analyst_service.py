@@ -198,6 +198,11 @@ class AiAnalystService:
                 metric=f"{_inr(prev_profit)} → {_inr(cur_profit)} ({_pct(profit_growth)} down)",
             ))
 
+        AiAnalystService._birthday_notes(
+            await ReportService.get_birthday_summary(db, user, "BUSINESS", period, date_from, date_to),
+            "business", findings, opportunities, actions,
+        )
+
         summary = AiAnalystService._summary_line(
             "Business", rng.label, cur_rev, rev_growth, cur_cnt,
             gold=cur_gold, profit=cur_profit if privileged else None,
@@ -292,6 +297,11 @@ class AiAnalystService:
                 metric=f"{_pct(cg)} down",
             ))
 
+        AiAnalystService._birthday_notes(
+            await ReportService.get_birthday_summary(db, user, "SCHEME", period, date_from, date_to),
+            "scheme", findings, opportunities, actions,
+        )
+
         summary = AiAnalystService._summary_line(
             "Scheme", rng.label, payments.total_revenue, cg, enrollments.active_count,
             outstanding=payments.outstanding_dues,
@@ -318,6 +328,31 @@ class AiAnalystService:
             if outstanding:
                 s += f", {_inr(outstanding)} outstanding"
         return s + "."
+
+    @staticmethod
+    def _birthday_notes(bday, kind: str, findings, opportunities, actions) -> None:
+        """Fold real birthday-opportunity facts into the insight lists. Counts
+        only — no fabricated benefit, no invented eligibility."""
+        today_pri = sum(1 for c in bday.today if c.is_priority)
+        if today_pri:
+            findings.append(f"{today_pri} high-value {kind} customer(s) have a birthday today.")
+        if bday.priority_count:
+            findings.append(
+                f"{bday.priority_count} high-value {kind} customer(s) have a birthday within {bday.window_days} days."
+            )
+            opportunities.append(
+                f"Contact priority birthday customers before their birthday and consider a complimentary gesture."
+            )
+            actions.append(AiRecommendedAction(
+                priority="HIGH" if today_pri else "MEDIUM",
+                title="Reach out to priority birthday customers",
+                explanation="High-value customers with an imminent birthday — a timely relationship touchpoint.",
+                metric=f"{bday.priority_count} within {bday.window_days} days",
+            ))
+        elif (bday.today_count + bday.upcoming_count) > 0:
+            opportunities.append(
+                f"{bday.today_count + bday.upcoming_count} customer birthday(s) within {bday.window_days} days — an outreach opportunity."
+            )
 
     @staticmethod
     def _build(domain, rng, summary, findings, opportunities, risks, actions) -> AiAnalysisResponse:

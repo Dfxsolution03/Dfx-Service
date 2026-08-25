@@ -227,13 +227,21 @@ class BirthdayCustomer(BaseModel):
     # Calendar birthday as MM-DD (birth year is intentionally not exposed).
     birthday: str
     days_until_birthday: int
+    # Domain-scoped value + priority. `value` is the customer's business spend
+    # (BUSINESS) or scheme investment (SCHEME) from the existing top-customer
+    # ranking; None when the customer is not in the high-value ranking (shown as
+    # "—", never fabricated as 0). is_priority = high-value in this domain.
+    value: Optional[float] = None
+    is_priority: bool = False
 
 
 class BirthdaySummaryResponse(BaseModel):
+    domain: Literal["BUSINESS", "SCHEME"]
     window_days: int
     total_with_dob: int
     today_count: int
     upcoming_count: int
+    priority_count: int
     today: List[BirthdayCustomer]
     upcoming: List[BirthdayCustomer]
 

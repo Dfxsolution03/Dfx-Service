@@ -398,16 +398,24 @@ async def get_scheme_insights(
     response_model=StandardSuccessResponse,
     status_code=status.HTTP_200_OK,
     summary="Customer Birthday Intelligence (Admin/Staff-reports)",
-    description="Real customer-birthday intelligence for the tenant from stored DOBs: today's "
-                "birthdays and those within the window (default 30 days), with counts. Names are "
-                "returned only to report-permitted callers. Never fabricates counts.",
+    description="Domain-aware customer-birthday intelligence from stored DOBs: today's and upcoming "
+                "birthdays within the window (default 30 days), each flagged as a priority "
+                "(high-value) opportunity using the existing BUSINESS spend / SCHEME investment "
+                "ranking. Names/values returned only to report-permitted callers. Never fabricates "
+                "counts or values; no complimentary benefit is defined.",
 )
 async def get_birthdays(
+    domain: str = Query("BUSINESS", pattern="^(BUSINESS|SCHEME)$"),
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
     window_days: int = Query(30, ge=1, le=90),
     current_user: User = Depends(require_admin_or_staff_module("reports")),
     db: AsyncSession = Depends(get_async_db),
 ):
-    data = await ReportService.get_birthday_summary(db, current_user, window_days)
+    data = await ReportService.get_birthday_summary(
+        db, current_user, domain, period, date_from, date_to, window_days
+    )
     return StandardSuccessResponse(
         success=True, message="Birthday intelligence retrieved successfully",
         data={"summary": data.model_dump(mode="json")},
