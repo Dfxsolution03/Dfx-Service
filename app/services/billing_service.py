@@ -777,6 +777,12 @@ class InventoryService:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
 
+        # Data-boundary enforcement: an item can never be created without a
+        # product image (schema requires it; guard again in case of a
+        # non-schema caller). Existing imageless items are untouched.
+        if not (req.image_storage_path or "").strip():
+            raise ValidationException("A product image is required to create an inventory item.")
+
         existing = await InventoryRepository.get_by_product_code(
             db, req.product_code, current_user.tenant_id
         )
@@ -841,6 +847,7 @@ class InventoryService:
             purchase_invoice_ref=req.purchase_invoice_ref,
             purchase_rate_per_gram=req.purchase_rate_per_gram,
             purchase_cost=req.purchase_cost,
+            image_storage_path=req.image_storage_path,
             stock_status="IN_STOCK",
             making_charge_type=making_type,
             making_charge_value=making_value,
@@ -1046,6 +1053,27 @@ class InventoryService:
         )
         return PriceLinePreviewResponse(
             breakdown=breakdown, purchase_cost=req.purchase_cost, profit_or_loss=profit_or_loss
+        )
+
+    @staticmethod
+    async def upload_staging_image(
+        current_user: User, file_bytes: bytes, file_name: str, content_type: str
+    ) -> str:
+        """Upload a product image BEFORE the item exists (mandatory-image
+        create flow). Same storage provider and same type allow-list as the
+        per-item upload — not a second upload system — returning the storage
+        path the caller then passes to create_item. Nothing is persisted to the
+        database here."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        if content_type not in ("image/jpeg", "image/png", "image/webp"):
+            raise ValidationException(f"Unsupported image type '{content_type}'. Allowed: JPEG, PNG, WebP.")
+        provider = get_storage_provider()
+        return await provider.upload(
+            tenant_id=current_user.tenant_id,
+            file_name=file_name,
+            content_type=content_type,
+            file_bytes=file_bytes,
         )
 
     @staticmethod

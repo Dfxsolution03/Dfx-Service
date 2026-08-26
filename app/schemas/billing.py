@@ -161,6 +161,11 @@ class InventoryItemCreateRequest(BaseModel):
     # item, never silently assumed (see app/models/billing.py).
     tax_rate_percent: float = Field(..., ge=0, le=100)
     pricing_mode: Optional[PricingMode] = None
+    # Required — a product image is mandatory to create an item. The client
+    # uploads the file first (POST /billing/inventory/image, same storage
+    # provider as the per-item upload) and passes the returned storage path
+    # here. Enforced in BillingService.create_item at the data boundary.
+    image_storage_path: str = Field(..., min_length=1, max_length=500)
 
     @model_validator(mode="after")
     def _net_not_more_than_gross(self) -> "InventoryItemCreateRequest":

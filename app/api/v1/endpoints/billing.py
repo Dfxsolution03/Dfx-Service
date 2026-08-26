@@ -302,6 +302,33 @@ async def upload_inventory_item_image(
 
 
 @router.post(
+    "/billing/inventory/image",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Upload A Product Image Before Create (Admin)",
+    description="Mandatory-image create flow: upload the image first, then pass the returned image_storage_path to POST /billing/inventory.",
+)
+async def upload_inventory_staging_image(
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_admin_or_staff_module("billing_inventory")),
+):
+    content_type = file.content_type or ""
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise ValidationException("Uploaded file is empty.")
+    if len(file_bytes) > settings.MAX_UPLOAD_SIZE_BYTES:
+        max_mb = settings.MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)
+        raise ValidationException(f"Image exceeds the {max_mb}MB upload limit.")
+
+    storage_path = await InventoryService.upload_staging_image(
+        current_user, file_bytes, file.filename or "upload", content_type
+    )
+    return StandardSuccessResponse(
+        success=True, message="Image uploaded successfully", data={"image_storage_path": storage_path}
+    )
+
+
+@router.post(
     "/billing/inventory/publish-bulk",
     response_model=StandardSuccessResponse,
     status_code=status.HTTP_200_OK,
