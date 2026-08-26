@@ -344,6 +344,31 @@ class PriceBreakdown(BaseModel):
     final_amount: float
 
 
+class SafePriceReduction(BaseModel):
+    """One suggested charge trim to reach a lower customer-requested price.
+    GOLD_PROFIT lines are omitted entirely for Staff callers (internal margin)."""
+    component: str  # MAKING | WASTAGE | GOLD_PROFIT
+    charge_type: Optional[str] = None
+    reduce_amount: float  # rupees off this pre-tax line
+    from_value: Optional[float] = None  # current native value (₹ / ₹per-g / %)
+    to_value: Optional[float] = None    # native value after the trim
+
+
+class SafePriceGuidance(BaseModel):
+    """Historical-cost safe-price guidance for a customer-requested price.
+    minimum_safe_price is Admin-only (it would expose the break-even/cost to a
+    Staff caller) and is null for Staff. Staff still get status + safe/loss +
+    the Making/Wastage trims."""
+    status: str  # SAFE | ADJUSTABLE | NOT_ACHIEVABLE
+    is_loss: bool = False
+    requested_price: Optional[float] = None
+    minimum_safe_price: Optional[float] = None  # Admin-only
+    achievable_price: Optional[float] = None
+    residual_discount: Optional[float] = None
+    reductions: list[SafePriceReduction] = []
+    message: str = ""
+
+
 class SaleQuoteResponse(BaseModel):
     """Ephemeral — nothing is persisted. Backs the Selling screen's
     scan-and-preview step. profit_or_loss is backend-computed (subtotal
@@ -367,6 +392,9 @@ class SaleQuoteResponse(BaseModel):
     # This is what a Staff caller sees (they get the word, never the number);
     # Admins get both this label and the numeric views above.
     profit_or_loss_label: Optional[str] = None
+    # Phase 4 — safe-price / discount guidance for the entered customer price.
+    # Null when there is no purchase cost to judge against.
+    safe_price: Optional[SafePriceGuidance] = None
 
 
 class SaleCreateRequest(BaseModel):

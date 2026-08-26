@@ -94,6 +94,8 @@ from app.schemas.billing import (
     PriceLinePreviewRequest,
     PriceLinePreviewResponse,
     SaleQuoteResponse,
+    SafePriceGuidance,
+    SafePriceReduction,
     SaleCreateRequest,
     SaleResponse,
     SaleListResponse,
@@ -265,6 +267,129 @@ class BillingCalculationEngine:
             "historical_profit_margin_percent": hist_margin,
             "current_gold_value_profit_or_loss": current_pl,
             "current_gold_value_margin_percent": current_margin,
+        }
+
+    @staticmethod
+    def _component_native_to(charge_type, amount_after, net_gold_weight, gold_value):
+        """Given a target rupee amount for a making/wastage line, return the
+        native value in that line's own unit (₹ FIXED, ₹/g PER_GRAM, % of gold
+        value PERCENTAGE)."""
+        if charge_type == "FIXED":
+            return _round2(amount_after)
+        if charge_type == "PER_GRAM":
+            return _round2(amount_after / net_gold_weight) if net_gold_weight else 0.0
+        if charge_type == "PERCENTAGE":
+            return _round2(amount_after / gold_value * 100) if gold_value else 0.0
+        return None
+
+    @staticmethod
+    def safe_price_guidance(full: "PriceBreakdown", purchase_cost: Optional[float], requested_price: Optional[float]) -> Optional[dict]:
+        """Historical-cost safe-price guidance for a customer-requested price.
+
+        Safety boundary is HISTORICAL COST P/L >= 0 (break-even) per item:
+        net selling value (GST backed out) must cover the frozen purchase cost.
+        `full` is the breakdown at the item's full charges with NO discount and
+        NO customer_price override — i.e. the natural asking price.
+
+        Returns None when there is no purchase cost to judge against (guidance
+        cannot be computed without it). The rupee break-even / min-safe figures
+        it returns are Admin-only; the response layer masks them for Staff.
+
+        Reductions to reach a lower requested price are allocated across the
+        adjustable lines in a fixed order — Gold Profit, then Wastage, then
+        Making (trim pure store margin before customer-facing craftsmanship
+        charges). Any allocation that reaches the price without crossing
+        break-even is equally valid; this order is a deterministic UX choice,
+        not a profit rule. No line is ever cut below 0.
+        """
+        if purchase_cost is None:
+            return None
+        factor = (1 + full.tax_rate_percent / 100) if full.gst_applied else 1.0
+        break_even_final = _round2(purchase_cost * factor)
+        p_full = full.final_amount  # natural asking price (no discount)
+
+        if requested_price is None:
+            return {
+                "status": "SAFE",
+                "is_loss": False,
+                "requested_price": None,
+                "minimum_safe_price": break_even_final,
+                "achievable_price": None,
+                "reductions": [],
+                "message": "No customer price entered.",
+            }
+
+        eps = _MONEY_EPSILON
+        # LOSS: requested is below break-even — impossible without losing money.
+        if requested_price < break_even_final - eps:
+            return {
+                "status": "NOT_ACHIEVABLE",
+                "is_loss": True,
+                "requested_price": _round2(requested_price),
+                "minimum_safe_price": break_even_final,
+                "achievable_price": break_even_final,
+                "reductions": [],
+                "message": "Requested price cannot be offered without a loss.",
+            }
+        # At or above the natural asking price — already safe, no cut needed.
+        if requested_price >= p_full - eps:
+            return {
+                "status": "SAFE",
+                "is_loss": False,
+                "requested_price": _round2(requested_price),
+                "minimum_safe_price": break_even_final,
+                "achievable_price": _round2(requested_price),
+                "reductions": [],
+                "message": "Requested price is profitable.",
+            }
+
+        # ADJUSTABLE: trim charges to bring the asking price down to requested,
+        # never below break-even.
+        drop_final = p_full - requested_price
+        drop_pretax = drop_final / factor
+        gold_value = full.gold_value_amount
+        net_w = full.net_gold_weight_grams
+        remaining = drop_pretax
+        reductions = []
+        # (component, current pre-tax amount, type, current native value)
+        lines = [
+            ("GOLD_PROFIT", full.gold_profit_amount, "PERCENTAGE", full.gold_profit_percent),
+            ("WASTAGE", full.wastage_amount, full.wastage_type, full.wastage_value),
+            ("MAKING", full.making_charge_amount, full.making_charge_type, full.making_charge_value),
+        ]
+        for name, amount, ctype, cvalue in lines:
+            if remaining <= eps:
+                break
+            if amount <= eps:
+                continue
+            cut = min(remaining, amount)
+            remaining = _round2(remaining - cut)
+            amount_after = _round2(amount - cut)
+            if name == "GOLD_PROFIT":
+                to_value = _round2(amount_after / gold_value * 100) if gold_value else 0.0
+            else:
+                to_value = BillingCalculationEngine._component_native_to(ctype, amount_after, net_w, gold_value)
+            reductions.append({
+                "component": name,
+                "charge_type": ctype,
+                "reduce_amount": _round2(cut),           # ₹ off the pre-tax line
+                "from_value": _round2(cvalue) if cvalue is not None else None,
+                "to_value": to_value,
+            })
+        # If charge cuts alone cannot cover the drop (requested is below the
+        # all-charges-zero floor) the balance is an explicit discount — the sale
+        # is still >= break-even so it is safe, just not fully expressible as
+        # charge trims.
+        residual_discount = _round2(remaining * factor) if remaining > eps else 0.0
+        return {
+            "status": "ADJUSTABLE",
+            "is_loss": False,
+            "requested_price": _round2(requested_price),
+            "minimum_safe_price": break_even_final,
+            "achievable_price": _round2(requested_price),
+            "reductions": reductions,
+            "residual_discount": residual_discount,
+            "message": "Reduce the charges below to reach the requested price.",
         }
 
     @staticmethod
@@ -1082,6 +1207,17 @@ class SaleService:
             breakdown if privileged
             else breakdown.model_copy(update={"gold_profit_percent": None, "gold_profit_amount": None})
         )
+        # Safe-price / discount guidance (Historical Cost P/L >= 0 boundary).
+        # Judged against the natural asking price = the same charges with NO
+        # discount and NO customer_price override.
+        full = BillingCalculationEngine.calculate(
+            item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
+            0, gst_applied, None,
+            making_charge_value, wastage_value, gold_profit_percent,
+            making_charge_type, wastage_type,
+        )
+        raw_guidance = BillingCalculationEngine.safe_price_guidance(full, item.purchase_cost, customer_price)
+        safe_price = SaleService._project_safe_price(raw_guidance, privileged)
         return SaleQuoteResponse(
             inventory_item=InventoryService._build_response(item, current_user),
             breakdown=breakdown_out,
@@ -1091,6 +1227,29 @@ class SaleService:
             current_gold_value_profit_or_loss=views.get("current_gold_value_profit_or_loss"),
             current_gold_value_margin_percent=views.get("current_gold_value_margin_percent"),
             profit_or_loss_label=label if privileged else None,
+            safe_price=safe_price,
+        )
+
+    @staticmethod
+    def _project_safe_price(raw: Optional[dict], privileged: bool) -> Optional["SafePriceGuidance"]:
+        """Build the SafePriceGuidance response, masking for Staff: drop the
+        rupee break-even/min-safe figure and any GOLD_PROFIT reduction line
+        (internal margin), keeping only the SAFE/LOSS decision and the
+        customer-facing Making/Wastage trims."""
+        if raw is None:
+            return None
+        reductions = raw.get("reductions", [])
+        if not privileged:
+            reductions = [r for r in reductions if r.get("component") != "GOLD_PROFIT"]
+        return SafePriceGuidance(
+            status=raw["status"],
+            is_loss=raw["is_loss"],
+            requested_price=raw.get("requested_price"),
+            minimum_safe_price=raw.get("minimum_safe_price") if privileged else None,
+            achievable_price=raw.get("achievable_price"),
+            residual_discount=raw.get("residual_discount") if privileged else None,
+            reductions=[SafePriceReduction(**r) for r in reductions],
+            message=raw.get("message", ""),
         )
 
     @staticmethod
