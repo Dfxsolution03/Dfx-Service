@@ -580,12 +580,13 @@ class InventoryService:
             making_charge_value=item.making_charge_value,
             wastage_type=item.wastage_type,
             wastage_value=item.wastage_value,
-            gold_profit_percent=item.gold_profit_percent,
+            gold_profit_percent=item.gold_profit_percent if privileged else None,
             stone_charge_amount=item.stone_charge_amount,
             other_charges_amount=item.other_charges_amount,
             tax_rate_percent=item.tax_rate_percent,
             pricing_mode=item.pricing_mode,
             add_to_catalogue=item.add_to_catalogue,
+            catalogue_product_id=item.catalogue_product_id,
             created_by=item.created_by,
             created_at=item.created_at,
             updated_at=item.updated_at,
@@ -929,6 +930,8 @@ class SaleService:
             customer_phone=sale.customer_phone,
             product_code=sale.product_code,
             product_name=sale.product_name,
+            category=sale.inventory_item.category if sale.inventory_item else None,
+            subcategory=sale.inventory_item.subcategory if sale.inventory_item else None,
             vendor_name=sale.vendor_name,
             huid=sale.huid,
             purity=sale.purity,
@@ -946,8 +949,8 @@ class SaleService:
             wastage_type=sale.wastage_type,
             wastage_value=sale.wastage_value,
             wastage_amount=sale.wastage_amount,
-            gold_profit_percent=sale.gold_profit_percent,
-            gold_profit_amount=sale.gold_profit_amount,
+            gold_profit_percent=sale.gold_profit_percent if privileged else None,
+            gold_profit_amount=sale.gold_profit_amount if privileged else None,
             stone_charge_amount=sale.stone_charge_amount,
             other_charges_amount=sale.other_charges_amount,
             subtotal_before_tax=sale.subtotal_before_tax,
@@ -965,8 +968,11 @@ class SaleService:
             pricing_mode=sale.pricing_mode,
             purchase_cost_snapshot=sale.purchase_cost_snapshot if privileged else None,
             estimated_gross_margin=sale.estimated_gross_margin if privileged else None,
-            # Direction shown to everyone (incl. Staff, who never see the number).
-            profit_or_loss_label=_pl_label(sale.estimated_gross_margin),
+            # Privileged-only. The direction label plus a variable customer_price
+            # is a profit/cost oracle for Staff, so it is withheld entirely
+            # (Staff Financial Visibility baseline). Staff safe-price guidance
+            # is a separate, later, purpose-built response.
+            profit_or_loss_label=_pl_label(sale.estimated_gross_margin) if privileged else None,
             sale_timestamp=sale.sale_timestamp,
             created_by=sale.created_by,
             created_at=sale.created_at,
@@ -1019,15 +1025,23 @@ class SaleService:
         cp = all_views.get("current_gold_value_profit_or_loss")
         label = _pl_label(hp if hp is not None else cp)
         views = all_views if privileged else {}
+        # Mask internal store margin from the breakdown for Staff. Direct fields
+        # only — the granular component/subtotal breakdown can still be
+        # arithmetically reconciled; a fully Staff-safe quote projection is a
+        # later, purpose-built response.
+        breakdown_out = (
+            breakdown if privileged
+            else breakdown.model_copy(update={"gold_profit_percent": None, "gold_profit_amount": None})
+        )
         return SaleQuoteResponse(
             inventory_item=InventoryService._build_response(item, current_user),
-            breakdown=breakdown,
+            breakdown=breakdown_out,
             profit_or_loss=views.get("historical_profit_or_loss"),
             historical_profit_or_loss=views.get("historical_profit_or_loss"),
             historical_profit_margin_percent=views.get("historical_profit_margin_percent"),
             current_gold_value_profit_or_loss=views.get("current_gold_value_profit_or_loss"),
             current_gold_value_margin_percent=views.get("current_gold_value_margin_percent"),
-            profit_or_loss_label=label,
+            profit_or_loss_label=label if privileged else None,
         )
 
     @staticmethod
@@ -2368,6 +2382,13 @@ class QuotationService:
     @staticmethod
     def _to_response(q: Quotation, current_user: User, breakdown, preview) -> QuotationResponse:
         privileged = _is_privileged(current_user)
+        # Mask internal store margin in the printed breakdown and withhold the
+        # P/L label from Staff (Staff Financial Visibility baseline) — same
+        # treatment as SaleService.get_quote / SaleService._build_response.
+        breakdown_out = (
+            breakdown if privileged
+            else breakdown.model_copy(update={"gold_profit_percent": None, "gold_profit_amount": None})
+        )
         return QuotationResponse(
             id=q.id,
             tenant_id=q.tenant_id,
@@ -2378,14 +2399,14 @@ class QuotationService:
             customer_id=q.customer_id,
             customer_name=q.customer_name,
             customer_phone=q.customer_phone,
-            breakdown=breakdown,
+            breakdown=breakdown_out,
             gst_applied=q.gst_applied,
             final_amount=_round2(q.final_amount),
             scheme_amount_total=_round2(q.scheme_amount_total or 0),
             outstanding_amount=_round2(q.outstanding_amount),
             scheme_preview=preview,
             estimated_gross_margin=q.estimated_gross_margin if privileged else None,
-            profit_or_loss_label=q.profit_or_loss_label,
+            profit_or_loss_label=q.profit_or_loss_label if privileged else None,
             note=q.note,
             created_by=q.created_by,
             created_at=q.created_at,

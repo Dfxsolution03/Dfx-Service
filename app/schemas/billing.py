@@ -222,13 +222,19 @@ class InventoryItemResponse(BaseModel):
     making_charge_value: float
     wastage_type: str
     wastage_value: float
-    gold_profit_percent: float
+    # Internal store margin — masked (None) for Staff-role callers, same
+    # reasoning as purchase_cost above (Staff Financial Visibility baseline).
+    gold_profit_percent: Optional[float] = None
     stone_charge_amount: float
     other_charges_amount: float
     tax_rate_percent: float
     pricing_mode: Optional[PricingMode] = None
     # Phase 3 — whether this item has been published to the catalogue.
     add_to_catalogue: bool = False
+    # Phase 11 — the catalogue Product this physical piece is linked to (many
+    # pieces -> one listing). NULL when unpublished. Lets Inventory link to the
+    # listing without equating catalogue status to stock status.
+    catalogue_product_id: Optional[str] = None
     created_by: str
     created_at: datetime
     updated_at: datetime
@@ -319,8 +325,10 @@ class PriceBreakdown(BaseModel):
     wastage_type: str
     wastage_value: float
     wastage_amount: float
-    gold_profit_percent: float
-    gold_profit_amount: float
+    # Internal store margin — masked (None) for Staff-role callers at the
+    # response boundary; the engine always computes real values.
+    gold_profit_percent: Optional[float] = None
+    gold_profit_amount: Optional[float] = None
     stone_charge_amount: float
     other_charges_amount: float
 
@@ -427,6 +435,10 @@ class SaleResponse(BaseModel):
 
     product_code: str
     product_name: str
+    # Read live from the linked inventory item (retained after sale), not stored
+    # on the sale row. NULL for a sale whose item predates category capture.
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
     vendor_name: Optional[str] = None
     huid: Optional[str] = None
     purity: str
@@ -446,8 +458,10 @@ class SaleResponse(BaseModel):
     wastage_type: str
     wastage_value: float
     wastage_amount: float
-    gold_profit_percent: float
-    gold_profit_amount: float
+    # Internal store margin — masked (None) for Staff-role callers at the
+    # response boundary; the engine always computes real values.
+    gold_profit_percent: Optional[float] = None
+    gold_profit_amount: Optional[float] = None
     stone_charge_amount: float
     other_charges_amount: float
 

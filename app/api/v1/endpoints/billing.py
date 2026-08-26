@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_async_db
 from app.core.config import settings
 from app.models.auth import User, Tenant
-from app.permissions.dependencies import require_admin_or_staff_module
+from app.permissions.dependencies import require_admin, require_admin_or_staff_module
 from app.schemas.auth import StandardSuccessResponse
 from app.schemas.billing import (
     VendorCreateRequest,
@@ -61,7 +61,7 @@ router = APIRouter()
 )
 async def create_vendor(
     req: VendorCreateRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     vendor = await VendorService.create_vendor(db, current_user, req)
@@ -76,7 +76,7 @@ async def create_vendor(
 )
 async def list_vendors(
     search: Optional[str] = Query(None),
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     vendors = await VendorService.list_vendors(db, current_user, search)
@@ -94,7 +94,7 @@ async def list_vendors(
 async def update_vendor(
     vendor_id: str,
     req: VendorUpdateRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     vendor = await VendorService.update_vendor(db, current_user, vendor_id, req)
@@ -112,7 +112,7 @@ async def update_vendor(
     summary="Get Store Billing Defaults (Admin)",
 )
 async def get_store_defaults(
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await BillingDefaultsService.get_store_defaults(db, current_user)
@@ -128,7 +128,7 @@ async def get_store_defaults(
 )
 async def update_store_defaults(
     req: StoreDefaultsUpdateRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await BillingDefaultsService.update_store_defaults(db, current_user, req)
@@ -142,7 +142,7 @@ async def update_store_defaults(
     summary="List Category Pricing Defaults (Admin)",
 )
 async def list_category_defaults(
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     rows = await BillingDefaultsService.list_category_defaults(db, current_user)
@@ -160,7 +160,7 @@ async def list_category_defaults(
 )
 async def upsert_category_default(
     req: CategoryDefaultUpsertRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await BillingDefaultsService.upsert_category_default(db, current_user, req)
@@ -180,7 +180,7 @@ async def upsert_category_default(
 async def resolve_defaults(
     vendor_id: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await BillingDefaultsService.resolve_defaults(db, current_user, vendor_id, category)
@@ -375,7 +375,7 @@ async def bulk_purchase(
 )
 async def preview_price(
     req: PriceLinePreviewRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await InventoryService.preview_price(db, current_user, req)
