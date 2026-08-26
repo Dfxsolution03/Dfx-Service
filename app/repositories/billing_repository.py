@@ -85,8 +85,10 @@ class VendorRepository:
 class InventoryRepository:
     @staticmethod
     async def get_by_id(db: AsyncSession, item_id: str, tenant_id: str) -> Optional[InventoryItem]:
-        stmt = select(InventoryItem).where(
-            InventoryItem.id == item_id, InventoryItem.tenant_id == tenant_id
+        stmt = (
+            select(InventoryItem)
+            .options(selectinload(InventoryItem.catalogue_product))
+            .where(InventoryItem.id == item_id, InventoryItem.tenant_id == tenant_id)
         )
         result = await db.execute(stmt)
         return result.scalar_one_or_none()
@@ -95,8 +97,10 @@ class InventoryRepository:
     async def get_by_product_code(
         db: AsyncSession, product_code: str, tenant_id: str
     ) -> Optional[InventoryItem]:
-        stmt = select(InventoryItem).where(
-            InventoryItem.product_code == product_code, InventoryItem.tenant_id == tenant_id
+        stmt = (
+            select(InventoryItem)
+            .options(selectinload(InventoryItem.catalogue_product))
+            .where(InventoryItem.product_code == product_code, InventoryItem.tenant_id == tenant_id)
         )
         result = await db.execute(stmt)
         return result.scalar_one_or_none()
@@ -127,7 +131,7 @@ class InventoryRepository:
 
         count_stmt = select(func.count(InventoryItem.id))
         sum_stmt = select(func.coalesce(func.sum(InventoryItem.net_gold_weight_grams), 0.0))
-        list_stmt = select(InventoryItem)
+        list_stmt = select(InventoryItem).options(selectinload(InventoryItem.catalogue_product))
         for cond in conditions:
             count_stmt = count_stmt.where(cond)
             sum_stmt = sum_stmt.where(cond)

@@ -1,9 +1,12 @@
 from datetime import date, datetime
-from typing import Optional
+from typing import Optional, TYPE_CHECKING
 from sqlalchemy import String, Float, Date, DateTime, Boolean, ForeignKey, UniqueConstraint, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
+
+if TYPE_CHECKING:
+    from app.models.catalogue import Product
 
 # Bill draft (unfinished bill) lifecycle statuses. A draft is NEVER a Sale — it
 # lives in its own table and is excluded from every financial query.
@@ -224,6 +227,16 @@ class InventoryItem(Base, TimestampMixin):
     )
 
     tenant: Mapped["Tenant"] = relationship("Tenant")
+    # Reverse of the authoritative link Product.inventory_item_id (there is no
+    # column on this side). Read-only convenience so the response can expose the
+    # published catalogue product's id; at most one product per item
+    # (uq_products_tenant_inventory_item). Eager-loaded by InventoryRepository.
+    catalogue_product: Mapped[Optional["Product"]] = relationship(
+        "Product",
+        primaryjoin="foreign(Product.inventory_item_id) == InventoryItem.id",
+        viewonly=True,
+        uselist=False,
+    )
 
 
 class Sale(Base, TimestampMixin):
