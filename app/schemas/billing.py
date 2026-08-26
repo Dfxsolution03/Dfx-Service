@@ -144,11 +144,15 @@ class InventoryItemCreateRequest(BaseModel):
     purchase_rate_per_gram: Optional[float] = Field(None, ge=0)
     purchase_cost: Optional[float] = Field(None, ge=0)
 
-    making_charge_type: ChargeType = "PERCENTAGE"
-    making_charge_value: float = Field(0, ge=0)
-    wastage_type: ChargeType = "PERCENTAGE"
-    wastage_value: float = Field(0, ge=0)
-    gold_profit_percent: float = Field(0, ge=0, le=100)
+    # None = not supplied → inherit from the Vendor -> Category -> Store
+    # hierarchy at create time (see BillingService.create_item). An explicit 0
+    # is a configured value and is kept as-is. type is paired with its value:
+    # when the value is inherited, the resolved type comes with it.
+    making_charge_type: Optional[ChargeType] = None
+    making_charge_value: Optional[float] = Field(None, ge=0)
+    wastage_type: Optional[ChargeType] = None
+    wastage_value: Optional[float] = Field(None, ge=0)
+    gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
     # Absolute per-item charges (model columns NOT NULL default 0). Read
     # directly by BillingService.create_item, so they must exist on the request.
     stone_charge_amount: float = Field(0, ge=0)

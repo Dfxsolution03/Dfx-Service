@@ -652,6 +652,42 @@ class InventoryService:
             db, current_user, req.vendor_id, req.vendor_name
         )
 
+        # Resolve inherited pricing fields server-side (Vendor -> Category ->
+        # Store, field-by-field) so the item is snapshotted with the ACTUAL
+        # applicable values, never a form-default 0. A value supplied on the
+        # request (including an explicit 0) is kept; only None inherits.
+        resolved = await BillingDefaultsService.resolve_defaults(
+            db, current_user, vendor_id, req.category
+        )
+        if req.making_charge_value is not None:
+            making_type, making_value = req.making_charge_type, req.making_charge_value
+        else:
+            making_type, making_value = resolved.making_charge_type, resolved.making_charge_value
+        if req.wastage_value is not None:
+            wastage_type, wastage_value = req.wastage_type, req.wastage_value
+        else:
+            wastage_type, wastage_value = resolved.wastage_type, resolved.wastage_value
+        gold_profit = (
+            req.gold_profit_percent if req.gold_profit_percent is not None
+            else resolved.gold_profit_percent
+        )
+        # Nothing configured at any level — refuse rather than store a
+        # misleading 0. The columns are NOT NULL, so an unresolved field has no
+        # honest value to persist.
+        missing = [
+            name for name, val in (
+                ("making charge", making_value), ("making charge type", making_type),
+                ("wastage", wastage_value), ("wastage type", wastage_type),
+                ("gold profit", gold_profit),
+            ) if val is None
+        ]
+        if missing:
+            raise ValidationException(
+                "No value supplied and no Vendor/Category/Store default configured for: "
+                + ", ".join(missing)
+                + ". Configure a default or provide the value."
+            )
+
         item_id = f"iv_{uuid.uuid4().hex[:12]}"
         item = InventoryItem(
             id=item_id,
@@ -671,11 +707,11 @@ class InventoryService:
             purchase_rate_per_gram=req.purchase_rate_per_gram,
             purchase_cost=req.purchase_cost,
             stock_status="IN_STOCK",
-            making_charge_type=req.making_charge_type,
-            making_charge_value=req.making_charge_value,
-            wastage_type=req.wastage_type,
-            wastage_value=req.wastage_value,
-            gold_profit_percent=req.gold_profit_percent,
+            making_charge_type=making_type,
+            making_charge_value=making_value,
+            wastage_type=wastage_type,
+            wastage_value=wastage_value,
+            gold_profit_percent=gold_profit,
             stone_charge_amount=req.stone_charge_amount,
             other_charges_amount=req.other_charges_amount,
             tax_rate_percent=req.tax_rate_percent,
