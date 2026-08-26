@@ -2,6 +2,7 @@ from datetime import date, datetime
 from typing import List, Optional, Tuple
 from sqlalchemy import select, update, func, or_, case
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.orm import selectinload
 
 from app.core.constants import SALE_STATUS_COMPLETED, INSPECTION_PENDING
 from app.models.billing import (
@@ -197,7 +198,13 @@ class SaleRepository:
 
     @staticmethod
     async def get_by_id(db: AsyncSession, sale_id: str, tenant_id: str) -> Optional[Sale]:
-        stmt = select(Sale).where(Sale.id == sale_id, Sale.tenant_id == tenant_id)
+        # Eager-load the linked inventory item so the response builder can read
+        # its category/subcategory without an async lazy-load (MissingGreenlet).
+        stmt = (
+            select(Sale)
+            .options(selectinload(Sale.inventory_item))
+            .where(Sale.id == sale_id, Sale.tenant_id == tenant_id)
+        )
         result = await db.execute(stmt)
         return result.scalar_one_or_none()
 
@@ -265,7 +272,9 @@ class SaleRepository:
         # Outstanding is always final_amount - amount_paid; aggregate it across
         # the whole filtered set (not just the page) for the dashboard KPI.
         outstanding_stmt = select(func.coalesce(func.sum(Sale.final_amount - Sale.amount_paid), 0.0))
-        list_stmt = select(Sale)
+        # Eager-load inventory_item so _build_response can read its
+        # category/subcategory without an async lazy-load (MissingGreenlet).
+        list_stmt = select(Sale).options(selectinload(Sale.inventory_item))
         for cond in conditions:
             count_stmt = count_stmt.where(cond)
             sum_stmt = sum_stmt.where(cond)
