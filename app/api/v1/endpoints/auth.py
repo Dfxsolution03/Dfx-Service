@@ -13,6 +13,7 @@ from app.permissions.dependencies import get_current_user
 from app.schemas.auth import (
     UserRegisterRequest,
     UserLoginRequest,
+    GoogleLoginRequest,
     TokenResponseData,
     RefreshTokenRequest,
     LogoutRequest,
@@ -68,6 +69,7 @@ async def customer_signup(
         phone=user.phone,
         kyc_status=user.kyc_status,
         member_since=user.member_since,
+        date_of_birth=user.date_of_birth,
         is_active=user.is_active,
     )
     return StandardSuccessResponse(
@@ -93,6 +95,31 @@ async def user_login(
     return StandardSuccessResponse(
         success=True,
         message="Authentication successful",
+        data=token_data.model_dump(),
+    )
+
+
+@router.post(
+    "/auth/google",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Sign in with Google",
+    description=(
+        "Verifies a Google OAuth ID token server-side (signature, issuer, audience, "
+        "expiry) and returns JWT Access & Refresh Tokens. Identity is taken from the "
+        "verified token claims, never from the request body. A first-time Google "
+        "account also requires `tenant_id`."
+    ),
+)
+async def google_login(
+    req: GoogleLoginRequest,
+    db: AsyncSession = Depends(get_async_db),
+    _rate_limit: None = Depends(rate_limit_login),
+):
+    token_data = await AuthService.google_login(db, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Google sign-in successful",
         data=token_data.model_dump(),
     )
 
@@ -239,6 +266,7 @@ async def get_my_profile(
         phone=current_user.phone,
         kyc_status=current_user.kyc_status,
         member_since=current_user.member_since,
+        date_of_birth=current_user.date_of_birth,
         is_active=current_user.is_active,
         permissions=[m.strip() for m in (current_user.staff_permissions or "").split(",") if m.strip()],
     )

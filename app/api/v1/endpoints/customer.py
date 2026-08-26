@@ -18,6 +18,8 @@ from app.schemas.customer import (
     BranchCreateRequest,
     BranchUpdateRequest,
     BranchStatusUpdateRequest,
+    AdminCustomerCreateRequest,
+    AdminCustomerUpdateRequest,
 )
 from app.services.customer_service import CustomerService
 
@@ -348,6 +350,51 @@ async def change_password(
 
 
 # 6. Admin Customer Management (Phase 6C / Module 33)
+@router.post(
+    "/admin/customers",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Create Customer (Admin)",
+    description=(
+        "Manually create a customer in the admin's own tenant — supports walk-in "
+        "customers with no mobile/email. Generates a Customer ID; an optional "
+        "scheme_id also creates a linked enrollment and returns its Enrollment ID."
+    ),
+)
+async def create_customer_admin(
+    req: AdminCustomerCreateRequest,
+    current_user: User = Depends(require_admin_or_staff_module("customers")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await CustomerService.create_customer_admin(db, current_user, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Customer created successfully",
+        data={"customer": result.model_dump()},
+    )
+
+
+@router.put(
+    "/admin/customers/{customer_id}",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Update Customer (Admin)",
+    description="Edit an own-tenant customer's name/phone/email/password/active status.",
+)
+async def update_customer_admin(
+    customer_id: str,
+    req: AdminCustomerUpdateRequest,
+    current_user: User = Depends(require_admin_or_staff_module("customers")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    customer = await CustomerService.update_customer_admin(db, current_user, customer_id, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Customer updated successfully",
+        data={"customer": customer.model_dump()},
+    )
+
+
 @router.get(
     "/admin/customers",
     response_model=StandardSuccessResponse,

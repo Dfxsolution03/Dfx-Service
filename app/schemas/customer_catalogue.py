@@ -21,10 +21,14 @@ class CustomerProductListItem(BaseModel):
     name: str
     description: Optional[str] = None
     category: Optional[str] = None
+    sub_category: Optional[str] = None
     purity: Optional[str] = None
     price: Optional[float] = None
     weight_grams: Optional[float] = None
     primary_image_path: Optional[str] = None
+    tags: List[str] = []
+    making_charge_discount_label: Optional[str] = None
+    making_charge_discount_percent: Optional[float] = None
 
     class Config:
         from_attributes = True
@@ -35,11 +39,14 @@ class CustomerProductDetailResponse(BaseModel):
     name: str
     description: Optional[str] = None
     category: Optional[str] = None
+    sub_category: Optional[str] = None
     sku: Optional[str] = None
     purity: Optional[str] = None
     price: Optional[float] = None
     weight_grams: Optional[float] = None
     tags: List[str] = []
+    making_charge_discount_label: Optional[str] = None
+    making_charge_discount_percent: Optional[float] = None
     images: List[CustomerProductImageResponse] = []
 
     class Config:

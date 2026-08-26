@@ -9,15 +9,51 @@ from app.models.catalogue import Product, ProductImage, CatalogueDesign
 class CatalogueRepository:
     # -- Products ---------------------------------------------------------
     @staticmethod
-    async def get_products_by_tenant(db: AsyncSession, tenant_id: str) -> List[Product]:
+    async def get_products_by_tenant(
+        db: AsyncSession,
+        tenant_id: str,
+        category: Optional[str] = None,
+        purity: Optional[str] = None,
+        sub_category: Optional[str] = None,
+    ) -> List[Product]:
         stmt = (
             select(Product)
             .options(selectinload(Product.images))
-            .where(Product.tenant_id == tenant_id, Product.is_active == True)  # noqa: E712
-            .order_by(Product.created_at.desc())
+            # Admin/staff listing intentionally returns inactive products too —
+            # the Catalogue Studio needs to see and re-activate them. The
+            # customer-facing path filters is_active in
+            # CustomerCatalogueRepository, which is a separate module.
+            .where(Product.tenant_id == tenant_id)
         )
+        # Phase 3 — optional admin filters (case-insensitive exact match, same
+        # free-text values stored on the product). Omitted filters are ignored.
+        if category:
+            stmt = stmt.where(func.lower(Product.category) == category.lower())
+        if purity:
+            stmt = stmt.where(func.lower(Product.purity) == purity.lower())
+        if sub_category:
+            stmt = stmt.where(func.lower(Product.sub_category) == sub_category.lower())
+        stmt = stmt.order_by(Product.created_at.desc())
         result = await db.execute(stmt)
         return list(result.unique().scalars().all())
+
+    @staticmethod
+    async def get_product_by_inventory_item(
+        db: AsyncSession, inventory_item_id: str, tenant_id: str
+    ) -> Optional[Product]:
+        """The catalogue product published from a given inventory item, if any.
+        Tenant-scoped; used to make publishing idempotent (re-publish updates
+        the same product instead of creating a duplicate)."""
+        stmt = (
+            select(Product)
+            .options(selectinload(Product.images))
+            .where(
+                Product.inventory_item_id == inventory_item_id,
+                Product.tenant_id == tenant_id,
+            )
+        )
+        result = await db.execute(stmt)
+        return result.unique().scalar_one_or_none()
 
     @staticmethod
     async def get_product_by_id(

@@ -64,6 +64,15 @@ class Settings(BaseSettings):
     ACCESS_TOKEN_EXPIRE_MINUTES: int = 30
     REFRESH_TOKEN_EXPIRE_DAYS: int = 7
 
+    # Phase 7 — Push notifications (FCM/APNs). Default "noop": with no provider
+    # configured the backend registers device tokens and records in-app
+    # notifications but never fakes a push delivery. Set PUSH_PROVIDER=fcm and
+    # supply the two FCM values (service-account JSON + project id) in the
+    # deployment environment to enable real delivery.
+    PUSH_PROVIDER: str = "noop"  # noop|fcm
+    FCM_PROJECT_ID: Optional[str] = None
+    FCM_CREDENTIALS_JSON: Optional[str] = None
+
     # SuperAdmin Initial Seed Configuration
     SUPERADMIN_EMAIL: str = "superadmin@dfxsolution.com"
     SUPERADMIN_PASSWORD: str = INSECURE_SUPERADMIN_PASSWORD_DEFAULT
@@ -76,6 +85,29 @@ class Settings(BaseSettings):
     ROTATE_SUPERADMIN_CREDENTIALS: bool = False
     NEW_SUPERADMIN_EMAIL: Optional[str] = None
     NEW_SUPERADMIN_PASSWORD: Optional[str] = None
+
+    # Google Sign-In — the OAuth 2.0 client IDs whose ID tokens this backend
+    # will accept as the `aud` claim. Comma-separated, or a JSON list.
+    #
+    # For this app that is the Google Cloud **Web application** client ID: both
+    # the Android and iOS clients pass it as `serverClientId`, so the tokens
+    # they mint are addressed to it. Add the iOS client ID as a second entry
+    # only if an iOS build is ever configured without a serverClientId.
+    #
+    # Empty (the default) switches Google sign-in OFF: with nothing to validate
+    # `aud` against there is no safe way to accept a token, so the endpoint
+    # returns a configuration error rather than trusting one. This is not a
+    # secret — client IDs are public by design and ship inside the mobile app.
+    GOOGLE_OAUTH_CLIENT_IDS: Union[List[str], str] = []
+
+    @field_validator("GOOGLE_OAUTH_CLIENT_IDS", mode="before")
+    @classmethod
+    def assemble_google_client_ids(cls, v: Union[str, List[str]]) -> Union[List[str], str]:
+        if isinstance(v, str) and not v.startswith("["):
+            return [i.strip() for i in v.split(",") if i.strip()]
+        elif isinstance(v, str) and v.startswith("["):
+            return json.loads(v)
+        return v
 
     # Module 18 — Authentication Hardening: reset/verification token lifetimes.
     PASSWORD_RESET_TOKEN_EXPIRE_MINUTES: int = 30
@@ -135,6 +167,10 @@ class Settings(BaseSettings):
     # Phase 7 — overdue reminder scheduler. Off by default (deploy opts in).
     ENABLE_COLLECTION_REMINDERS: bool = False
     COLLECTION_REMINDER_INTERVAL_HOURS: int = 24
+    # Customer birthday wishes — inert unless enabled (default false, like the
+    # other schedulers). Runs once daily at this IST hour.
+    ENABLE_BIRTHDAY_NOTIFICATIONS: bool = False
+    BIRTHDAY_NOTIFICATION_HOUR_IST: int = 9
     MARKET_RATE_PROVIDER: str = "METALPRICEAPI"
     MARKET_RATE_SYNC_INTERVAL_MINUTES: int = 10
     MARKET_RATE_FETCH_TIMEOUT_SECONDS: int = 10
@@ -143,6 +179,15 @@ class Settings(BaseSettings):
     METALPRICEAPI_KEY: str = ""
     IBJA_API_KEY: str = ""
     GOLDAPI_KEY: str = ""
+
+    # How stale a tenant's last published rate may be before the customer
+    # endpoint stops serving it (see GoldRateService.get_customer_today_rate).
+    # A store that hasn't entered today's rate yet should still show
+    # yesterday's rather than nothing, but a rate from last week is
+    # misinformation on a screen customers value their holdings from — past
+    # this many days the endpoint reports the rate as unavailable instead.
+    # Three days covers a weekend plus a public holiday.
+    CUSTOMER_RATE_FALLBACK_MAX_AGE_DAYS: int = 3
 
     # SuperAdmin Integrations — providers with no credentials yet. Same
     # convention as SMTP_HOST/SUPABASE_URL above: empty string means

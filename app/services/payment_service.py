@@ -9,7 +9,7 @@ from app.repositories.payment_repository import PaymentRepository
 from app.models.enrollment import CONTRIBUTABLE_STATUSES
 from app.repositories.enrollment_repository import EnrollmentRepository
 from app.repositories.audit_repository import AuditRepository
-from app.services.enrollment_service import _add_months
+from app.services.enrollment_service import _add_months, resolve_enrollment_terms
 from app.exceptions.base import (
     ResourceNotFoundException, ForbiddenException, ConflictException, ValidationException,
 )
@@ -145,17 +145,21 @@ class PaymentService:
         scheme = await SchemeRepository.get_scheme_by_id(db, enrollment.scheme_id, tenant_id)
         if scheme is None:
             raise ResourceNotFoundException(f"Scheme ID '{enrollment.scheme_id}' not found")
-        duration = scheme.duration_months
+        # Resolve the enrollment's OWN terms — its selected-tier snapshot when it
+        # has one, else the scheme base. A tier edit must never change the monthly
+        # amount or duration an already-enrolled customer pays against.
+        eff_monthly, eff_duration = resolve_enrollment_terms(enrollment, scheme)
+        duration = eff_duration
 
         # Advance contributions must pay the exact monthly amount × months so
         # coverage and rupees stay reconciled. A plain 1-month contribution keeps
         # its historical freedom (partial monthly amounts still allowed).
         if months > 1:
-            expected = _round2(scheme.monthly_amount * months)
+            expected = _round2(eff_monthly * months)
             if _round2(req.amount) != expected:
                 raise ValidationException(
                     f"A {months}-month advance must be exactly {expected} "
-                    f"({scheme.monthly_amount} × {months}); got {req.amount}"
+                    f"({eff_monthly} × {months}); got {req.amount}"
                 )
 
         # Coverage only advances for a SUCCESSFUL contribution. Capacity is

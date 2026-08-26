@@ -7,10 +7,11 @@ from app.core.database import get_async_db
 from app.models.auth import User
 from app.permissions.dependencies import require_admin_or_staff_module
 from app.schemas.auth import StandardSuccessResponse
-from app.schemas.report import ReportPeriod
+from app.schemas.report import ReportPeriod, AiAnalysisRequest
 from app.schemas.export import ExportFormat
 from app.services.report_service import ReportService, TopProductsService, DashboardCardsService
 from app.services.collection_service import CollectionsReadService
+from app.services.ai_analyst_service import AiAnalystService
 
 router = APIRouter()
 
@@ -113,6 +114,52 @@ async def get_payment_summary(
         success=True,
         message="Payment summary retrieved successfully",
         data={"summary": data.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/reports/sales-trend",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Business Sales Trend (Admin)",
+    description="COMPLETED-sale revenue time-series (day buckets, month buckets for long ranges) "
+                "over a named period or explicit range. Feeds the Admin Dashboard Sales Trend chart.",
+)
+async def get_sales_trend(
+    period: Optional[ReportPeriod] = Query(None, description="today | this_week | this_month | this_year"),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_sales_trend(db, current_user, period, date_from, date_to)
+    return StandardSuccessResponse(
+        success=True,
+        message="Sales trend retrieved successfully",
+        data={"report": data.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/reports/sales-by-category",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Business Sales by Category (Admin)",
+    description="COMPLETED-sale revenue grouped by the linked inventory item's category, with "
+                "backend-computed percentage share. Feeds the Admin Dashboard Top Selling Categories donut.",
+)
+async def get_sales_by_category(
+    period: Optional[ReportPeriod] = Query(None, description="today | this_week | this_month | this_year"),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_sales_by_category(db, current_user, period, date_from, date_to)
+    return StandardSuccessResponse(
+        success=True,
+        message="Sales by category retrieved successfully",
+        data={"report": data.model_dump(mode="json")},
     )
 
 
@@ -236,6 +283,29 @@ async def export_reports_summary(
 
 
 @router.get(
+    "/reports/export/scheme-collections",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Export Scheme Collections (Admin)",
+    description="Collections page 'Generate Report' — per-scheme collection totals for the range plus an Overall Collection total, as CSV, Excel, or Markdown. Reuses /reports/scheme-summary figures.",
+)
+async def export_scheme_collections(
+    format: ExportFormat = Query("excel"),
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    file = await ReportService.export_scheme_collections(db, current_user, period, date_from, date_to, format)
+    return StandardSuccessResponse(
+        success=True,
+        message="Export generated successfully",
+        data={"export": file.model_dump(mode="json")},
+    )
+
+
+@router.get(
     "/reports/export/analytics-summary",
     response_model=StandardSuccessResponse,
     status_code=status.HTTP_200_OK,
@@ -272,4 +342,131 @@ async def export_dashboard_summary(
         success=True,
         message="Export generated successfully",
         data={"export": file.model_dump(mode="json")},
+    )
+
+
+# ─── Phase 6 — Business top customers + AI insights ───
+
+@router.get(
+    "/reports/top-customers/business",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Top Customers by Sales Spend (Admin)",
+    description="Ranks registered customers by total completed-sale spend within the range — the "
+                "business-side counterpart to the scheme Top Customers table.",
+)
+async def get_top_customers_business(
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    limit: int = Query(10, ge=1, le=50),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_top_customers_by_sales(db, current_user, period, date_from, date_to, limit)
+    return StandardSuccessResponse(
+        success=True, message="Top business customers retrieved successfully",
+        data={"report": data.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/reports/insights/business",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Business AI Insights (Admin)",
+    description="Data-grounded business insights (revenue, top product, top customer) with the "
+                "evidence behind each. Returns data_available=false and no invented figures when the "
+                "range has no sales.",
+)
+async def get_business_insights(
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_business_insights(db, current_user, period, date_from, date_to)
+    return StandardSuccessResponse(
+        success=True, message="Business insights retrieved successfully",
+        data={"insights": data.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/reports/insights/scheme",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Scheme AI Insights (Admin)",
+    description="Data-grounded scheme insights (enrollment activity, retention, collections, top "
+                "customer) with the evidence behind each. Returns data_available=false and no invented "
+                "figures when the range has no scheme activity.",
+)
+async def get_scheme_insights(
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_scheme_insights(db, current_user, period, date_from, date_to)
+    return StandardSuccessResponse(
+        success=True, message="Scheme insights retrieved successfully",
+        data={"insights": data.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/reports/birthdays",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Customer Birthday Intelligence (Admin/Staff-reports)",
+    description="Domain-aware customer-birthday intelligence from stored DOBs: today's and upcoming "
+                "birthdays within the window (default 30 days), each flagged as a priority "
+                "(high-value) opportunity using the existing BUSINESS spend / SCHEME investment "
+                "ranking. Names/values returned only to report-permitted callers. Never fabricates "
+                "counts or values; no complimentary benefit is defined.",
+)
+async def get_birthdays(
+    domain: str = Query("BUSINESS", pattern="^(BUSINESS|SCHEME)$"),
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    window_days: int = Query(30, ge=1, le=90),
+    current_user: User = Depends(require_admin_or_staff_module("reports")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await ReportService.get_birthday_summary(
+        db, current_user, domain, period, date_from, date_to, window_days
+    )
+    return StandardSuccessResponse(
+        success=True, message="Birthday intelligence retrieved successfully",
+        data={"summary": data.model_dump(mode="json")},
+    )
+
+
+# ─── Phase 2A — AI Analyst ───
+
+@router.post(
+    "/reports/ai-analysis",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Insight Engine (Admin/Staff-reports)",
+    description="Deterministic DFX insight engine (no external AI). Interprets the authoritative "
+                "business or scheme report aggregates for the selected period and returns structured, "
+                "prioritised insights and recommendations. Returns available=false with an "
+                "'Insufficient data' note when the period has no comparable activity — never "
+                "fabricated figures.",
+)
+async def post_ai_analysis(
+    body: AiAnalysisRequest,
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    data = await AiAnalystService.analyze(
+        db, current_user, body.domain, body.period, body.date_from, body.date_to
+    )
+    return StandardSuccessResponse(
+        success=True, message="AI analysis completed",
+        data={"analysis": data.model_dump(mode="json")},
     )

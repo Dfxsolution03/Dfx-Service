@@ -1,8 +1,44 @@
 from datetime import date
-from typing import List, Literal, Optional
-from pydantic import BaseModel
+from typing import Any, Dict, List, Literal, Optional
+from pydantic import BaseModel, Field
 
 ReportPeriod = Literal["today", "this_week", "this_month", "this_year"]
+
+
+# ─── Phase 6 — Business top customers + AI insights ───
+
+class TopCustomerBySalesItem(BaseModel):
+    customer_id: str
+    customer_name: Optional[str] = None
+    total_spent: float
+    bill_count: int
+
+
+class TopCustomersBySalesResponse(BaseModel):
+    range: "DateRangeInfo"
+    customers: List[TopCustomerBySalesItem]
+
+
+class InsightItem(BaseModel):
+    """One data-grounded insight. `evidence` carries the exact figures behind
+    the statement so the frontend can present it and the admin can trust it —
+    values are never fabricated (see InsightsResponse.data_available)."""
+    id: str
+    category: str
+    title: str
+    detail: str
+    severity: Literal["info", "positive", "warning"] = "info"
+    evidence: Dict[str, Any] = Field(default_factory=dict)
+
+
+class InsightsResponse(BaseModel):
+    range: "DateRangeInfo"
+    module: Literal["business", "scheme"]
+    # False when the range holds no underlying data — the response then carries
+    # a single explanatory insight and NO invented metrics.
+    data_available: bool
+    insights: List[InsightItem] = Field(default_factory=list)
+    note: Optional[str] = None
 
 
 class DateRangeInfo(BaseModel):
@@ -54,6 +90,9 @@ class TopCustomersResponse(BaseModel):
 class EnrollmentTrendPoint(BaseModel):
     period_label: str
     new_enrollments: int
+    # Sum of estimated maturity value of enrollments started in this bucket, so
+    # the dashboard Collections chart can plot a Maturity metric. Estimate only.
+    maturity_amount: float = 0.0
 
 
 class EnrollmentSummaryResponse(BaseModel):
@@ -97,6 +136,39 @@ class SchemeSummaryResponse(BaseModel):
     schemes: List[SchemeSummaryItem]
 
 
+class SalesTrendPoint(BaseModel):
+    period_label: str
+    total_amount: float
+    sale_count: int
+    # Per-bucket profit (sum of realized gross margin) and gold weight sold, so
+    # the dashboard Sales Trend chart can switch metric without more endpoints.
+    profit: float = 0.0
+    gold_weight_grams: float = 0.0
+
+
+class SalesTrendResponse(BaseModel):
+    """Business sales revenue time-series for the Admin Dashboard Sales Trend
+    chart. Day buckets for short ranges, month buckets for long ones."""
+    range: DateRangeInfo
+    trend: List[SalesTrendPoint]
+
+
+class CategorySalesItem(BaseModel):
+    category: str
+    total_sales: float
+    bill_count: int
+    # Share of total_sales in the range, 0..100, backend-computed so the
+    # frontend never divides/ fabricates a percentage.
+    percentage: float
+
+
+class SalesByCategoryResponse(BaseModel):
+    """Category breakdown for the Admin Dashboard Top Selling Categories donut."""
+    range: DateRangeInfo
+    total_sales: float
+    categories: List[CategorySalesItem]
+
+
 class DashboardSummaryResponse(BaseModel):
     """Composed from the same repository methods as the other report responses.
     Built in Module 12 as a reusable foundation; consumed for the first time
@@ -110,3 +182,72 @@ class DashboardSummaryResponse(BaseModel):
     # Added Module 13 — see ReportRepository.get_customer_count.
     total_customers: int
     total_customers_growth_percent: Optional[float] = None
+
+
+# ─── Phase 2A — AI Analyst ───
+
+class AiAnalysisRequest(BaseModel):
+    domain: Literal["BUSINESS", "SCHEME"]
+    period: Optional[ReportPeriod] = None
+    date_from: Optional[date] = None
+    date_to: Optional[date] = None
+
+
+class AiRecommendedAction(BaseModel):
+    priority: Literal["HIGH", "MEDIUM", "LOW"]
+    title: str
+    explanation: str
+    # Supporting metric/value, when the underlying data provides one.
+    metric: Optional[str] = None
+
+
+class AiAnalysisResponse(BaseModel):
+    domain: Literal["BUSINESS", "SCHEME"]
+    range: "DateRangeInfo"
+    # False when the AI provider is not configured, data is insufficient, or the
+    # provider call failed — the frontend renders an "unavailable" panel and the
+    # rest of Reports keeps working. `note` explains which.
+    available: bool
+    executive_summary: str = ""
+    key_findings: List[str] = []
+    opportunities: List[str] = []
+    risks: List[str] = []
+    recommended_actions: List[AiRecommendedAction] = []
+    generated_at: Optional[str] = None
+    model: Optional[str] = None
+    note: Optional[str] = None
+
+
+# ─── Birthday intelligence (Reports Analytics) ───
+
+class BirthdayCustomer(BaseModel):
+    customer_id: str
+    customer_name: Optional[str] = None
+    customer_code: Optional[str] = None
+    # Calendar birthday as MM-DD (birth year is intentionally not exposed).
+    birthday: str
+    days_until_birthday: int
+    # Domain-scoped value + priority. `value` is the customer's business spend
+    # (BUSINESS) or scheme investment (SCHEME) from the existing top-customer
+    # ranking; None when the customer is not in the high-value ranking (shown as
+    # "—", never fabricated as 0). is_priority = high-value in this domain.
+    value: Optional[float] = None
+    is_priority: bool = False
+
+
+class BirthdaySummaryResponse(BaseModel):
+    domain: Literal["BUSINESS", "SCHEME"]
+    window_days: int
+    total_with_dob: int
+    today_count: int
+    upcoming_count: int
+    priority_count: int
+    today: List[BirthdayCustomer]
+    upcoming: List[BirthdayCustomer]
+
+
+# Resolve the forward references to DateRangeInfo used by the Phase 6 models
+# declared above it.
+TopCustomersBySalesResponse.model_rebuild()
+InsightsResponse.model_rebuild()
+AiAnalysisResponse.model_rebuild()

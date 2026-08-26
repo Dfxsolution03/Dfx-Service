@@ -15,6 +15,7 @@ from app.core.constants import (
 )
 from app.models.auth import Tenant, Subscription, Role, Permission, RolePermission, User
 from app.models.customer import Branch
+from app.models.scheme import Scheme, SchemeTier
 
 
 async def seed_database() -> None:
@@ -120,6 +121,7 @@ async def seed_database() -> None:
         superadmin_email = settings.SUPERADMIN_EMAIL
         stmt_sa = select(User).where(User.email == superadmin_email)
         existing_sa = (await db.execute(stmt_sa)).scalar_one_or_none()
+        superadmin_id = existing_sa.id if existing_sa else "usr_superadmin"
         if not existing_sa:
             sa_user = User(
                 id="usr_superadmin",
@@ -134,6 +136,49 @@ async def seed_database() -> None:
                 is_active=True,
             )
             db.add(sa_user)
+            await db.flush()  # make usr_superadmin FK-usable for the default scheme below
+
+        # 6. Seed the default multi-tier scheme "Monthly Gold Saving Plan".
+        # Idempotent, keyed on (tenant_id, name); the five tiers are added only
+        # when missing (keyed on their amount+duration), so re-running the seed
+        # never duplicates the plan or its tiers. Maturity is amount x months —
+        # no bonus/interest. The scheme-level monthly_amount/duration_months hold
+        # the smallest tier so any legacy (tier-less) enrollment falls back sanely.
+        default_scheme_name = "Monthly Gold Saving Plan"
+        default_scheme = (await db.execute(
+            select(Scheme).where(
+                Scheme.tenant_id == tenant_id, Scheme.name == default_scheme_name
+            )
+        )).scalar_one_or_none()
+        if not default_scheme:
+            default_scheme = Scheme(
+                id="sch_default_gold",
+                tenant_id=tenant_id,
+                name=default_scheme_name,
+                description="Fixed monthly savings plan. Pick a tier; maturity = monthly amount x months.",
+                monthly_amount=1000.0,
+                duration_months=12,
+                bonus_description=None,
+                is_active=True,
+                created_by=superadmin_id,
+            )
+            db.add(default_scheme)
+            await db.flush()
+
+        default_tiers = [(1000.0, 12), (2000.0, 12), (5000.0, 12), (10000.0, 12), (15000.0, 12)]
+        existing_tiers = (await db.execute(
+            select(SchemeTier).where(SchemeTier.scheme_id == default_scheme.id)
+        )).scalars().all()
+        have = {(t.monthly_amount, t.duration_months) for t in existing_tiers}
+        for i, (amt, dur) in enumerate(default_tiers, start=1):
+            if (amt, dur) not in have:
+                db.add(SchemeTier(
+                    id=f"str_default_{i:02d}",
+                    scheme_id=default_scheme.id,
+                    monthly_amount=amt,
+                    duration_months=dur,
+                    is_active=True,
+                ))
 
         await db.commit()
         print("--> Database Seeding Complete!")

@@ -1,5 +1,5 @@
 from datetime import date, datetime
-from typing import Optional, List, Literal
+from typing import Optional, List, Literal, Dict
 from pydantic import BaseModel, Field, model_validator
 
 Purity = Literal["9K", "14K", "18K", "20K", "22K", "24K"]
@@ -144,15 +144,28 @@ class InventoryItemCreateRequest(BaseModel):
     purchase_rate_per_gram: Optional[float] = Field(None, ge=0)
     purchase_cost: Optional[float] = Field(None, ge=0)
 
-    making_charge_type: ChargeType = "PERCENTAGE"
-    making_charge_value: float = Field(0, ge=0)
-    wastage_type: ChargeType = "PERCENTAGE"
-    wastage_value: float = Field(0, ge=0)
-    gold_profit_percent: float = Field(0, ge=0, le=100)
+    # None = not supplied → inherit from the Vendor -> Category -> Store
+    # hierarchy at create time (see BillingService.create_item). An explicit 0
+    # is a configured value and is kept as-is. type is paired with its value:
+    # when the value is inherited, the resolved type comes with it.
+    making_charge_type: Optional[ChargeType] = None
+    making_charge_value: Optional[float] = Field(None, ge=0)
+    wastage_type: Optional[ChargeType] = None
+    wastage_value: Optional[float] = Field(None, ge=0)
+    gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
+    # Absolute per-item charges (model columns NOT NULL default 0). Read
+    # directly by BillingService.create_item, so they must exist on the request.
+    stone_charge_amount: float = Field(0, ge=0)
+    other_charges_amount: float = Field(0, ge=0)
     # Required, no default — a GST/tax rate must be a conscious choice per
     # item, never silently assumed (see app/models/billing.py).
     tax_rate_percent: float = Field(..., ge=0, le=100)
     pricing_mode: Optional[PricingMode] = None
+    # Required — a product image is mandatory to create an item. The client
+    # uploads the file first (POST /billing/inventory/image, same storage
+    # provider as the per-item upload) and passes the returned storage path
+    # here. Enforced in BillingService.create_item at the data boundary.
+    image_storage_path: str = Field(..., min_length=1, max_length=500)
 
     @model_validator(mode="after")
     def _net_not_more_than_gross(self) -> "InventoryItemCreateRequest":
@@ -184,6 +197,8 @@ class InventoryItemUpdateRequest(BaseModel):
     wastage_type: Optional[ChargeType] = None
     wastage_value: Optional[float] = Field(None, ge=0)
     gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
+    stone_charge_amount: Optional[float] = Field(None, ge=0)
+    other_charges_amount: Optional[float] = Field(None, ge=0)
     tax_rate_percent: Optional[float] = Field(None, ge=0, le=100)
     pricing_mode: Optional[PricingMode] = None
 
@@ -216,11 +231,19 @@ class InventoryItemResponse(BaseModel):
     making_charge_value: float
     wastage_type: str
     wastage_value: float
-    gold_profit_percent: float
+    # Internal store margin — masked (None) for Staff-role callers, same
+    # reasoning as purchase_cost above (Staff Financial Visibility baseline).
+    gold_profit_percent: Optional[float] = None
     stone_charge_amount: float
     other_charges_amount: float
     tax_rate_percent: float
     pricing_mode: Optional[PricingMode] = None
+    # Phase 3 — whether this item has been published to the catalogue.
+    add_to_catalogue: bool = False
+    # Phase 11 — the catalogue Product this physical piece is linked to (many
+    # pieces -> one listing). NULL when unpublished. Lets Inventory link to the
+    # listing without equating catalogue status to stock status.
+    catalogue_product_id: Optional[str] = None
     created_by: str
     created_at: datetime
     updated_at: datetime
@@ -232,6 +255,7 @@ class InventoryItemResponse(BaseModel):
 class InventoryItemListResponse(BaseModel):
     items: List[InventoryItemResponse]
     total: int
+    total_gold_weight_grams: float = 0.0
 
 
 # =============================================================================
@@ -256,6 +280,8 @@ class BulkPurchaseLineItem(BaseModel):
     wastage_type: ChargeType = "PERCENTAGE"
     wastage_value: float = Field(0, ge=0)
     gold_profit_percent: float = Field(0, ge=0, le=100)
+    stone_charge_amount: float = Field(0, ge=0)
+    other_charges_amount: float = Field(0, ge=0)
     tax_rate_percent: float = Field(..., ge=0, le=100)
     pricing_mode: Optional[PricingMode] = None
 
@@ -308,8 +334,10 @@ class PriceBreakdown(BaseModel):
     wastage_type: str
     wastage_value: float
     wastage_amount: float
-    gold_profit_percent: float
-    gold_profit_amount: float
+    # Internal store margin — masked (None) for Staff-role callers at the
+    # response boundary; the engine always computes real values.
+    gold_profit_percent: Optional[float] = None
+    gold_profit_amount: Optional[float] = None
     stone_charge_amount: float
     other_charges_amount: float
 
@@ -319,6 +347,31 @@ class PriceBreakdown(BaseModel):
     tax_amount: float
     discount_amount: float
     final_amount: float
+
+
+class SafePriceReduction(BaseModel):
+    """One suggested charge trim to reach a lower customer-requested price.
+    GOLD_PROFIT lines are omitted entirely for Staff callers (internal margin)."""
+    component: str  # MAKING | WASTAGE | GOLD_PROFIT
+    charge_type: Optional[str] = None
+    reduce_amount: float  # rupees off this pre-tax line
+    from_value: Optional[float] = None  # current native value (₹ / ₹per-g / %)
+    to_value: Optional[float] = None    # native value after the trim
+
+
+class SafePriceGuidance(BaseModel):
+    """Historical-cost safe-price guidance for a customer-requested price.
+    minimum_safe_price is Admin-only (it would expose the break-even/cost to a
+    Staff caller) and is null for Staff. Staff still get status + safe/loss +
+    the Making/Wastage trims."""
+    status: str  # SAFE | ADJUSTABLE | NOT_ACHIEVABLE
+    is_loss: bool = False
+    requested_price: Optional[float] = None
+    minimum_safe_price: Optional[float] = None  # Admin-only
+    achievable_price: Optional[float] = None
+    residual_discount: Optional[float] = None
+    reductions: list[SafePriceReduction] = []
+    message: str = ""
 
 
 class SaleQuoteResponse(BaseModel):
@@ -340,6 +393,13 @@ class SaleQuoteResponse(BaseModel):
     historical_profit_margin_percent: Optional[float] = None
     current_gold_value_profit_or_loss: Optional[float] = None
     current_gold_value_margin_percent: Optional[float] = None
+    # Phase 4 — direction only ("PROFIT"/"LOSS"/"BREAK_EVEN"), no rupee figure.
+    # This is what a Staff caller sees (they get the word, never the number);
+    # Admins get both this label and the numeric views above.
+    profit_or_loss_label: Optional[str] = None
+    # Phase 4 — safe-price / discount guidance for the entered customer price.
+    # Null when there is no purchase cost to judge against.
+    safe_price: Optional[SafePriceGuidance] = None
 
 
 class SaleCreateRequest(BaseModel):
@@ -355,8 +415,12 @@ class SaleCreateRequest(BaseModel):
     customer_price: Optional[float] = Field(None, ge=0)
     # Per-bill overrides — let the Admin adjust the bill in the Selling
     # screen before confirming. Omitted means "use the item's own value";
-    # the InventoryItem row itself is never mutated by a sale.
+    # the InventoryItem row itself is never mutated by a sale. A value
+    # override MUST carry its own type so a FIXED amount is never applied as a
+    # PERCENTAGE (or vice-versa).
+    making_charge_type: Optional[ChargeType] = None
     making_charge_value: Optional[float] = Field(None, ge=0)
+    wastage_type: Optional[ChargeType] = None
     wastage_value: Optional[float] = Field(None, ge=0)
     gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
     gst_applied: bool = True
@@ -412,6 +476,10 @@ class SaleResponse(BaseModel):
 
     product_code: str
     product_name: str
+    # Read live from the linked inventory item (retained after sale), not stored
+    # on the sale row. NULL for a sale whose item predates category capture.
+    category: Optional[str] = None
+    subcategory: Optional[str] = None
     vendor_name: Optional[str] = None
     huid: Optional[str] = None
     purity: str
@@ -431,8 +499,10 @@ class SaleResponse(BaseModel):
     wastage_type: str
     wastage_value: float
     wastage_amount: float
-    gold_profit_percent: float
-    gold_profit_amount: float
+    # Internal store margin — masked (None) for Staff-role callers at the
+    # response boundary; the engine always computes real values.
+    gold_profit_percent: Optional[float] = None
+    gold_profit_amount: Optional[float] = None
     stone_charge_amount: float
     other_charges_amount: float
 
@@ -454,6 +524,9 @@ class SaleResponse(BaseModel):
     # Omitted for Staff-role callers.
     purchase_cost_snapshot: Optional[float] = None
     estimated_gross_margin: Optional[float] = None
+    # Phase 4 — direction-only label ("PROFIT"/"LOSS"/"BREAK_EVEN") of the gross
+    # margin, shown to Staff (who never see the numeric estimated_gross_margin).
+    profit_or_loss_label: Optional[str] = None
 
     sale_status: str = "COMPLETED"
     amount_refunded: float = 0.0
@@ -470,6 +543,86 @@ class SaleResponse(BaseModel):
 
 class SaleListResponse(BaseModel):
     sales: List[SaleResponse]
+    total: int
+    total_gold_weight_grams: float = 0.0
+    # Sum of (final_amount - amount_paid) across the whole filtered set.
+    total_outstanding: float = 0.0
+
+
+# ─── Phase 4 — Quotation ("sample bill" that does not sell) ───
+
+class QuotationCreateRequest(BaseModel):
+    """Generate a quotation. Same pricing inputs as a real sale (so the printed
+    figures match a future finalize), plus an OPTIONAL read-only scheme preview.
+    Nothing is sold and no scheme balance is spent."""
+    product_code: str = Field(..., min_length=1, max_length=50)
+    customer_id: Optional[str] = Field(None, max_length=50)
+    customer_name: Optional[str] = Field(None, max_length=150)
+    customer_phone: Optional[str] = Field(None, max_length=20)
+    discount_amount: float = Field(0, ge=0)
+    customer_price: Optional[float] = Field(None, ge=0)
+    # A value override MUST carry its own type (FIXED / PERCENTAGE) so it is
+    # never reinterpreted against the item's stored type.
+    making_charge_type: Optional[ChargeType] = None
+    making_charge_value: Optional[float] = Field(None, ge=0)
+    wastage_type: Optional[ChargeType] = None
+    wastage_value: Optional[float] = Field(None, ge=0)
+    gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
+    gst_applied: bool = True
+    # Optional {enrollment_id: amount} the customer intends to apply from their
+    # scheme balances. Previewed read-only (capped by available balance and by
+    # the invoice); requires customer_id.
+    scheme_amounts: Optional[Dict[str, float]] = None
+    note: Optional[str] = Field(None, max_length=255)
+
+    @model_validator(mode="after")
+    def _customer_identified(self) -> "QuotationCreateRequest":
+        if not self.customer_id and not self.customer_name:
+            raise ValueError("Provide either customer_id or customer_name to identify the buyer")
+        if self.scheme_amounts and not self.customer_id:
+            raise ValueError("scheme_amounts requires an existing customer_id")
+        return self
+
+
+class QuotationSchemePreviewItem(BaseModel):
+    enrollment_id: str
+    enrollment_number: str
+    requested_amount: float
+    available_balance: float
+    applied_amount: float
+
+
+class QuotationResponse(BaseModel):
+    id: str
+    tenant_id: str
+    quotation_number: str
+    inventory_item_id: Optional[str] = None
+    product_code: str
+    product_name: str
+    customer_id: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    breakdown: PriceBreakdown
+    gst_applied: bool
+    # invoice cost = breakdown.final_amount; scheme_amount_total previewed;
+    # outstanding = final_amount - scheme_amount_total.
+    final_amount: float
+    scheme_amount_total: float = 0.0
+    outstanding_amount: float
+    scheme_preview: List[QuotationSchemePreviewItem] = Field(default_factory=list)
+    # Profit/loss, gated exactly like a sale: number for Admin only, label for all.
+    estimated_gross_margin: Optional[float] = None
+    profit_or_loss_label: Optional[str] = None
+    note: Optional[str] = None
+    created_by: str
+    created_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class QuotationListResponse(BaseModel):
+    quotations: List[QuotationResponse]
     total: int
 
 
@@ -681,6 +834,10 @@ class BillingPeriodSummary(BaseModel):
     cash_collected: float = 0.0
     scheme_redemption: float = 0.0
     refunds_paid: float = 0.0
+    # Payment-method split of cash_collected ONLY (e.g. {"CASH": 5000, "UPI":
+    # 2000}). Scheme settlements and refunds are excluded upstream, so these
+    # parts sum to cash_collected and scheme credit is never counted as money in.
+    collected_by_method: Dict[str, float] = Field(default_factory=dict)
     # Receivables position over the period (active COMPLETED sales only).
     total_paid: float = 0.0
     total_outstanding: float = 0.0
@@ -749,3 +906,100 @@ class PriceLinePreviewResponse(BaseModel):
 # declared after it; resolve it once at import time so the first request never
 # pays for (or trips over) a lazy rebuild.
 SaleResponse.model_rebuild()
+
+
+# =============================================================================
+# Bill Drafts (unfinished bills) — server-side, multiple per user
+# =============================================================================
+
+class BillDraftCreateRequest(BaseModel):
+    """Editable INPUTS of an unfinished bill. No computed money is accepted —
+    every amount is recomputed by the backend on finalize."""
+    product_code: str = Field(..., min_length=1, max_length=50)
+    customer_id: Optional[str] = Field(None, max_length=50)
+    customer_name: Optional[str] = Field(None, max_length=150)
+    customer_phone: Optional[str] = Field(None, max_length=20)
+    customer_query: Optional[str] = Field(None, max_length=150)
+    customer_price: Optional[float] = Field(None, ge=0)
+    gst_applied: bool = True
+    making_charge_value: Optional[float] = Field(None, ge=0)
+    wastage_value: Optional[float] = Field(None, ge=0)
+    gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
+    discount_amount: float = Field(0, ge=0)
+    payment_method: PaymentMethod = "CASH"
+    payment_status: PaymentStatus = "PAID"
+    initial_payment: Optional[float] = Field(None, ge=0)
+    # {enrollment_id: amount} — selection only, never applied until finalize.
+    scheme_amounts: Optional[Dict[str, float]] = None
+    note: Optional[str] = Field(None, max_length=255)
+
+
+class BillDraftUpdateRequest(BaseModel):
+    """All optional — partial update of an OPEN draft."""
+    product_code: Optional[str] = Field(None, min_length=1, max_length=50)
+    customer_id: Optional[str] = Field(None, max_length=50)
+    customer_name: Optional[str] = Field(None, max_length=150)
+    customer_phone: Optional[str] = Field(None, max_length=20)
+    customer_query: Optional[str] = Field(None, max_length=150)
+    customer_price: Optional[float] = Field(None, ge=0)
+    gst_applied: Optional[bool] = None
+    making_charge_value: Optional[float] = Field(None, ge=0)
+    wastage_value: Optional[float] = Field(None, ge=0)
+    gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
+    discount_amount: Optional[float] = Field(None, ge=0)
+    payment_method: Optional[PaymentMethod] = None
+    payment_status: Optional[PaymentStatus] = None
+    initial_payment: Optional[float] = Field(None, ge=0)
+    scheme_amounts: Optional[Dict[str, float]] = None
+    note: Optional[str] = Field(None, max_length=255)
+
+
+class BillDraftFinalizeRequest(BaseModel):
+    """Finalize an OPEN draft into exactly one Sale. otp_code is required only
+    when the draft carries scheme_amounts (scheme redemption is OTP-gated, same
+    as the live sell screen)."""
+    otp_code: Optional[str] = Field(None, min_length=4, max_length=10)
+
+
+class BillDraftResponse(BaseModel):
+    id: str
+    tenant_id: str
+    created_by: str
+    status: str
+    product_code: str
+    customer_id: Optional[str] = None
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    customer_query: Optional[str] = None
+    customer_price: Optional[float] = None
+    gst_applied: bool
+    making_charge_value: Optional[float] = None
+    wastage_value: Optional[float] = None
+    gold_profit_percent: Optional[float] = None
+    discount_amount: float
+    payment_method: str
+    payment_status: str
+    initial_payment: Optional[float] = None
+    scheme_amounts: Optional[Dict[str, float]] = None
+    note: Optional[str] = None
+    finalized_sale_id: Optional[str] = None
+    created_at: datetime
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True
+
+
+class BillDraftListItem(BaseModel):
+    """Lean row for the Unfinished Bills list."""
+    id: str
+    status: str
+    product_code: str
+    customer_name: Optional[str] = None
+    customer_phone: Optional[str] = None
+    created_by: str
+    note: Optional[str] = None
+    updated_at: datetime
+
+    class Config:
+        from_attributes = True

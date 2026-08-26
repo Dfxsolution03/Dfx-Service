@@ -1,7 +1,7 @@
 from typing import List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
-from sqlalchemy.orm import joinedload
+from sqlalchemy.orm import joinedload, selectinload
 
 from app.models.scheme import Scheme, SchemeRequest, SCHEME_REQUEST_REQUESTED
 
@@ -11,7 +11,12 @@ class SchemeRepository:
     async def get_schemes_by_tenant(
         db: AsyncSession, tenant_id: str, active_only: bool = False
     ) -> List[Scheme]:
-        stmt = select(Scheme).where(Scheme.tenant_id == tenant_id)
+        # Eager-load tiers so responses and enrollment tier-selection can read
+        # scheme.tiers without an async lazy-load. selectinload keeps it to one
+        # extra batched query and never fans out the scheme rows.
+        stmt = select(Scheme).options(selectinload(Scheme.tiers)).where(
+            Scheme.tenant_id == tenant_id
+        )
         if active_only:
             stmt = stmt.where(Scheme.is_active == True)
         stmt = stmt.order_by(Scheme.created_at.desc())
@@ -22,7 +27,7 @@ class SchemeRepository:
     async def get_scheme_by_id(
         db: AsyncSession, scheme_id: str, tenant_id: str
     ) -> Optional[Scheme]:
-        stmt = select(Scheme).where(
+        stmt = select(Scheme).options(selectinload(Scheme.tiers)).where(
             Scheme.id == scheme_id,
             Scheme.tenant_id == tenant_id,
         )

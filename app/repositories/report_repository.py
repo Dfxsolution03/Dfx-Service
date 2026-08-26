@@ -9,7 +9,8 @@ from app.models.scheme import Scheme
 from app.models.goldrate import GoldRate
 from app.models.passbook import PassbookEntry
 from app.models.auth import User, Role
-from app.core.constants import ROLE_CUSTOMER
+from app.models.billing import Sale, InventoryItem
+from app.core.constants import ROLE_CUSTOMER, SALE_STATUS_COMPLETED
 
 
 class ReportRepository:
@@ -134,6 +135,52 @@ class ReportRepository:
             for row in rows
         ]
 
+    @staticmethod
+    async def get_dobs_for_customers(
+        db: AsyncSession, tenant_id: str, customer_ids: List[str]
+    ) -> List[dict]:
+        """Phase 10 — the date_of_birth for the given customers (tenant-scoped).
+        Rows with a NULL DOB are excluded outright, so a customer with no
+        birthday on file can never appear in a birthday insight. Returns real
+        stored data only — no fabrication."""
+        if not customer_ids:
+            return []
+        stmt = select(User.id, User.name, User.date_of_birth).where(
+            User.tenant_id == tenant_id,
+            User.id.in_(customer_ids),
+            User.date_of_birth.is_not(None),
+        )
+        rows = (await db.execute(stmt)).all()
+        return [
+            {"customer_id": r.id, "customer_name": r.name, "date_of_birth": r.date_of_birth}
+            for r in rows
+        ]
+
+    @staticmethod
+    async def get_customers_with_dob(db: AsyncSession, tenant_id: str) -> List[dict]:
+        """All Customer-role users for a tenant that have a real date_of_birth on
+        file (NULL excluded). Tenant-scoped. The day-window filtering is done in
+        the service from these stored dates — no fabrication here."""
+        stmt = (
+            select(User.id, User.name, User.customer_code, User.date_of_birth)
+            .join(Role, Role.id == User.role_id)
+            .where(
+                User.tenant_id == tenant_id,
+                Role.name == ROLE_CUSTOMER,
+                User.date_of_birth.is_not(None),
+            )
+        )
+        rows = (await db.execute(stmt)).all()
+        return [
+            {
+                "customer_id": r.id,
+                "customer_name": r.name,
+                "customer_code": r.customer_code,
+                "date_of_birth": r.date_of_birth,
+            }
+            for r in rows
+        ]
+
     # ─── Enrollments ───
 
     @staticmethod
@@ -158,8 +205,17 @@ class ReportRepository:
         bucket = (
             func.date_trunc("month", SchemeEnrollment.joined_date) if group_by_month else SchemeEnrollment.joined_date
         )
+        # Estimated maturity = selected monthly amount × selected duration.
+        # Legacy enrollments with null tier snapshot contribute 0 (honest estimate).
+        maturity = func.coalesce(SchemeEnrollment.selected_monthly_amount, 0.0) * func.coalesce(
+            SchemeEnrollment.selected_duration_months, 0
+        )
         stmt = (
-            select(bucket.label("bucket"), func.count(SchemeEnrollment.id).label("new_enrollments"))
+            select(
+                bucket.label("bucket"),
+                func.count(SchemeEnrollment.id).label("new_enrollments"),
+                func.coalesce(func.sum(maturity), 0.0).label("maturity_amount"),
+            )
             .where(
                 SchemeEnrollment.tenant_id == tenant_id,
                 SchemeEnrollment.joined_date >= date_from,
@@ -169,7 +225,14 @@ class ReportRepository:
             .order_by(bucket)
         )
         rows = (await db.execute(stmt)).all()
-        return [{"bucket": row.bucket, "new_enrollments": int(row.new_enrollments)} for row in rows]
+        return [
+            {
+                "bucket": row.bucket,
+                "new_enrollments": int(row.new_enrollments),
+                "maturity_amount": float(row.maturity_amount),
+            }
+            for row in rows
+        ]
 
     # ─── Gold Rate ───
 
@@ -277,6 +340,150 @@ class ReportRepository:
         result = await db.execute(stmt)
         return int(result.scalar_one())
 
+
+    # ─── Phase 6 — Business (sales) analytics primitives ───
+
+    @staticmethod
+    async def get_top_customers_by_sales(
+        db: AsyncSession, tenant_id: str, date_from: date, date_to: date, limit: int
+    ) -> List[dict]:
+        """Rank customers by total COMPLETED-sale spend within the range — the
+        business-side counterpart to get_top_enrollments_by_investment. Walk-in
+        sales (customer_id NULL) are excluded; only registered customers rank."""
+        start = datetime.combine(date_from, datetime.min.time())
+        end = datetime.combine(date_to, datetime.max.time())
+        stmt = (
+            select(
+                Sale.customer_id.label("customer_id"),
+                Sale.customer_name.label("customer_name"),
+                func.coalesce(func.sum(Sale.final_amount), 0.0).label("total_spent"),
+                func.count(Sale.id).label("bill_count"),
+            )
+            .where(
+                Sale.tenant_id == tenant_id,
+                Sale.customer_id.isnot(None),
+                (Sale.sale_status == SALE_STATUS_COMPLETED) | (Sale.sale_status.is_(None)),
+                Sale.sale_timestamp >= start,
+                Sale.sale_timestamp <= end,
+            )
+            .group_by(Sale.customer_id, Sale.customer_name)
+            .order_by(func.sum(Sale.final_amount).desc())
+            .limit(limit)
+        )
+        rows = (await db.execute(stmt)).all()
+        return [
+            {
+                "customer_id": r.customer_id,
+                "customer_name": r.customer_name,
+                "total_spent": round(float(r.total_spent), 2),
+                "bill_count": int(r.bill_count),
+            }
+            for r in rows
+        ]
+
+    @staticmethod
+    async def get_sales_totals(
+        db: AsyncSession, tenant_id: str, date_from: date, date_to: date
+    ) -> dict:
+        """Range totals over COMPLETED sales: revenue, bill count, and distinct
+        registered-customer count. The single source for the business insights'
+        headline numbers — nothing is fabricated when there are no sales."""
+        start = datetime.combine(date_from, datetime.min.time())
+        end = datetime.combine(date_to, datetime.max.time())
+        stmt = select(
+            func.coalesce(func.sum(Sale.final_amount), 0.0).label("revenue"),
+            func.count(Sale.id).label("bill_count"),
+            func.count(func.distinct(Sale.customer_id)).label("customer_count"),
+        ).where(
+            Sale.tenant_id == tenant_id,
+            (Sale.sale_status == SALE_STATUS_COMPLETED) | (Sale.sale_status.is_(None)),
+            Sale.sale_timestamp >= start,
+            Sale.sale_timestamp <= end,
+        )
+        row = (await db.execute(stmt)).one()
+        return {
+            "revenue": round(float(row.revenue), 2),
+            "bill_count": int(row.bill_count),
+            "customer_count": int(row.customer_count),
+        }
+
+    # ─── Dashboard — Business sales aggregations (Module 13 Dashboard) ───
+
+    @staticmethod
+    async def get_sales_trend(
+        db: AsyncSession, tenant_id: str, date_from: date, date_to: date, group_by_month: bool
+    ) -> List[dict]:
+        """Sales revenue grouped by day (or month for long ranges) over the
+        sale-date axis. COMPLETED sales only, so returns/cancellations never
+        inflate a bucket. Same bucketing convention as get_payment_trend."""
+        start = datetime.combine(date_from, datetime.min.time())
+        end = datetime.combine(date_to, datetime.max.time())
+        bucket = (
+            func.date_trunc("month", Sale.sale_timestamp)
+            if group_by_month
+            else func.date_trunc("day", Sale.sale_timestamp)
+        )
+        stmt = (
+            select(
+                bucket.label("bucket"),
+                func.coalesce(func.sum(Sale.final_amount), 0.0).label("total_amount"),
+                func.count(Sale.id).label("sale_count"),
+                func.coalesce(func.sum(Sale.estimated_gross_margin), 0.0).label("profit"),
+                func.coalesce(func.sum(Sale.gross_weight_grams), 0.0).label("gold_weight_grams"),
+            )
+            .where(
+                Sale.tenant_id == tenant_id,
+                Sale.sale_status == SALE_STATUS_COMPLETED,
+                Sale.sale_timestamp >= start,
+                Sale.sale_timestamp <= end,
+            )
+            .group_by(bucket)
+            .order_by(bucket)
+        )
+        rows = (await db.execute(stmt)).all()
+        return [
+            {
+                "bucket": r.bucket,
+                "total_amount": float(r.total_amount),
+                "sale_count": int(r.sale_count),
+                "profit": float(r.profit),
+                "gold_weight_grams": float(r.gold_weight_grams),
+            }
+            for r in rows
+        ]
+
+    @staticmethod
+    async def get_sales_by_category(
+        db: AsyncSession, tenant_id: str, date_from: date, date_to: date
+    ) -> List[dict]:
+        """Sales revenue grouped by the linked inventory item's category.
+        COMPLETED sales only; NULL categories fold into 'Uncategorized'.
+        Percentage is computed by the caller (ReportService)."""
+        start = datetime.combine(date_from, datetime.min.time())
+        end = datetime.combine(date_to, datetime.max.time())
+        cat = func.coalesce(InventoryItem.category, "Uncategorized")
+        stmt = (
+            select(
+                cat.label("category"),
+                func.coalesce(func.sum(Sale.final_amount), 0.0).label("total_sales"),
+                func.count(Sale.id).label("bill_count"),
+            )
+            .select_from(Sale)
+            .join(InventoryItem, Sale.inventory_item_id == InventoryItem.id)
+            .where(
+                Sale.tenant_id == tenant_id,
+                Sale.sale_status == SALE_STATUS_COMPLETED,
+                Sale.sale_timestamp >= start,
+                Sale.sale_timestamp <= end,
+            )
+            .group_by(cat)
+            .order_by(func.sum(Sale.final_amount).desc())
+        )
+        rows = (await db.execute(stmt)).all()
+        return [
+            {"category": r.category, "total_sales": float(r.total_sales), "bill_count": int(r.bill_count)}
+            for r in rows
+        ]
 
 # ─── Phase 6 — Top Products (authoritative Sale aggregation) ───
 from app.models.billing import Sale  # noqa: E402

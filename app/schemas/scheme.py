@@ -1,6 +1,51 @@
 from datetime import datetime
-from typing import Optional
-from pydantic import BaseModel, Field
+from typing import List, Optional
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+
+# ─── Scheme Tier Plans ───
+
+class SchemeTierInput(BaseModel):
+    """One tier supplied on scheme create/update. Maturity is derived, never
+    supplied — it is always monthly_amount x duration_months."""
+    monthly_amount: float = Field(..., gt=0, le=10000000)
+    duration_months: int = Field(..., gt=0, le=360)
+    is_active: bool = True
+
+
+class SchemeTierResponse(BaseModel):
+    id: str
+    scheme_id: str
+    monthly_amount: float
+    duration_months: int
+    is_active: bool
+    # Derived: monthly_amount x duration_months. No bonus/interest/appreciation.
+    maturity_amount: float = 0.0
+
+    class Config:
+        from_attributes = True
+
+    @model_validator(mode="after")
+    def _compute_maturity(self):
+        self.maturity_amount = round(self.monthly_amount * self.duration_months, 2)
+        return self
+
+
+def _reject_duplicate_tiers(v):
+    """A scheme may not list the same (monthly_amount, duration_months) twice —
+    that is one tier, not two. Enforced here at the API layer and again by a DB
+    unique constraint (uq_scheme_tiers_scheme_amount_duration)."""
+    if v is None:
+        return v
+    seen = set()
+    for t in v:
+        key = (t.monthly_amount, t.duration_months)
+        if key in seen:
+            raise ValueError(
+                f"Duplicate tier: {t.monthly_amount} x {t.duration_months} months is listed more than once"
+            )
+        seen.add(key)
+    return v
 
 
 class SchemeCreateRequest(BaseModel):
@@ -9,6 +54,10 @@ class SchemeCreateRequest(BaseModel):
     monthly_amount: float = Field(..., gt=0, le=10000000, description="Minimum monthly installment in INR")
     duration_months: int = Field(..., gt=0, le=360, description="Scheme tenure in months")
     bonus_description: Optional[str] = Field(None, max_length=255, description="e.g. '8% bonus on maturity'")
+    # Optional selectable tiers. Omit for a single-plan scheme (legacy behaviour).
+    tiers: Optional[List[SchemeTierInput]] = None
+
+    _validate_tiers = field_validator("tiers")(_reject_duplicate_tiers)
 
 
 class SchemeUpdateRequest(BaseModel):
@@ -18,6 +67,12 @@ class SchemeUpdateRequest(BaseModel):
     duration_months: Optional[int] = Field(None, gt=0, le=360)
     bonus_description: Optional[str] = Field(None, max_length=255)
     is_active: Optional[bool] = None
+    # When provided, the tier set is reconciled: matching (amount, duration)
+    # tiers keep their identity, new ones are added, and any existing tier not in
+    # the list is DEACTIVATED (never deleted). Omit to leave tiers untouched.
+    tiers: Optional[List[SchemeTierInput]] = None
+
+    _validate_tiers = field_validator("tiers")(_reject_duplicate_tiers)
 
 
 class SchemeResponse(BaseModel):
@@ -32,6 +87,8 @@ class SchemeResponse(BaseModel):
     created_by: str
     created_at: datetime
     updated_at: datetime
+    # Full tier grid (active + inactive) for the admin.
+    tiers: List[SchemeTierResponse] = []
 
     class Config:
         from_attributes = True
@@ -44,6 +101,8 @@ class CustomerSchemeResponse(BaseModel):
     monthly_amount: float
     duration_months: int
     bonus_description: Optional[str] = None
+    # Only ACTIVE tiers are offered to the customer to select from.
+    tiers: List[SchemeTierResponse] = []
 
     class Config:
         from_attributes = True

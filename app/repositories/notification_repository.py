@@ -1,11 +1,47 @@
+import uuid
+from datetime import datetime, timezone, date
 from typing import List, Optional
 from sqlalchemy import select, func, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.notification import Notification
+from app.models.notification import Notification, DeviceToken
+from app.models.auth import User, Role
+from app.core.constants import ROLE_CUSTOMER
 
 
 class NotificationRepository:
+    @staticmethod
+    async def list_customers_with_dob(db: AsyncSession, tenant_id: Optional[str] = None) -> List[dict]:
+        """Customer-role users with a real DOB, across all tenants (or one).
+        Used by the birthday-wishes job; the day-of-year match is done in the
+        service via the shared matcher. Real stored data only."""
+        stmt = (
+            select(User.id, User.tenant_id, User.name, User.date_of_birth)
+            .join(Role, Role.id == User.role_id)
+            .where(Role.name == ROLE_CUSTOMER, User.date_of_birth.is_not(None))
+        )
+        if tenant_id:
+            stmt = stmt.where(User.tenant_id == tenant_id)
+        rows = (await db.execute(stmt)).all()
+        return [
+            {"user_id": r.id, "tenant_id": r.tenant_id, "name": r.name, "date_of_birth": r.date_of_birth}
+            for r in rows
+        ]
+
+    @staticmethod
+    async def birthday_notified_since(
+        db: AsyncSession, tenant_id: str, user_id: str, since: datetime
+    ) -> bool:
+        """True if a BIRTHDAY notification was already created for this user at or
+        after `since` — the daily idempotency guard so one customer gets at most
+        one birthday wish per birthday, regardless of domain or re-runs."""
+        stmt = select(func.count(Notification.id)).where(
+            Notification.tenant_id == tenant_id,
+            Notification.user_id == user_id,
+            Notification.type == "BIRTHDAY",
+            Notification.created_at >= since,
+        )
+        return (await db.execute(stmt)).scalar_one() > 0
     @staticmethod
     async def get_by_user(db: AsyncSession, user_id: str, tenant_id: str) -> List[Notification]:
         stmt = (
@@ -55,3 +91,64 @@ class NotificationRepository:
             .values(is_read=True)
         )
         await db.execute(stmt)
+
+
+class DeviceTokenRepository:
+    """Phase 7 — push device registrations. Every read/write is tenant-scoped."""
+
+    @staticmethod
+    async def get_by_token(db: AsyncSession, tenant_id: str, token: str) -> Optional[DeviceToken]:
+        stmt = select(DeviceToken).where(
+            DeviceToken.tenant_id == tenant_id, DeviceToken.token == token
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def upsert(
+        db: AsyncSession, tenant_id: str, user_id: str, token: str, platform: str, provider: str
+    ) -> DeviceToken:
+        """Register or re-register a token. Idempotent per (tenant, token): an
+        existing row is re-pointed at the current user/platform/provider and
+        reactivated (a phone re-installing keeps one row, never duplicates)."""
+        row = await DeviceTokenRepository.get_by_token(db, tenant_id, token)
+        now = datetime.now(timezone.utc)
+        if row:
+            row.user_id = user_id
+            row.platform = platform
+            row.provider = provider
+            row.is_active = True
+            row.last_seen_at = now
+            return row
+        row = DeviceToken(
+            id=f"dvt_{uuid.uuid4().hex[:12]}",
+            tenant_id=tenant_id,
+            user_id=user_id,
+            token=token,
+            platform=platform,
+            provider=provider,
+            is_active=True,
+            last_seen_at=now,
+        )
+        db.add(row)
+        return row
+
+    @staticmethod
+    async def list_active_for_user(
+        db: AsyncSession, tenant_id: str, user_id: str
+    ) -> List[DeviceToken]:
+        stmt = select(DeviceToken).where(
+            DeviceToken.tenant_id == tenant_id,
+            DeviceToken.user_id == user_id,
+            DeviceToken.is_active.is_(True),
+        )
+        return list((await db.execute(stmt)).scalars().all())
+
+    @staticmethod
+    async def deactivate(db: AsyncSession, tenant_id: str, user_id: str, token: str) -> bool:
+        """Deactivate one of the caller's tokens (logout / token rotation).
+        Returns True if a row was affected."""
+        row = await DeviceTokenRepository.get_by_token(db, tenant_id, token)
+        if not row or row.user_id != user_id:
+            return False
+        row.is_active = False
+        return True

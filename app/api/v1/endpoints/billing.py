@@ -7,7 +7,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.database import get_async_db
 from app.core.config import settings
 from app.models.auth import User, Tenant
-from app.permissions.dependencies import require_admin_or_staff_module
+from app.permissions.dependencies import require_admin, require_admin_or_staff_module
 from app.schemas.auth import StandardSuccessResponse
 from app.schemas.billing import (
     VendorCreateRequest,
@@ -22,6 +22,10 @@ from app.schemas.billing import (
     SalePaymentCreateRequest,
     SaleReturnCreateRequest,
     SaleReturnInspectionRequest,
+    BillDraftCreateRequest,
+    BillDraftUpdateRequest,
+    BillDraftFinalizeRequest,
+    QuotationCreateRequest,
 )
 from app.services.billing_service import (
     VendorService,
@@ -30,7 +34,12 @@ from app.services.billing_service import (
     SaleService,
     SalePaymentService,
     SaleReturnService,
+    BillDraftService,
+    QuotationService,
+    _is_privileged,
 )
+from app.schemas.catalogue import InventoryPublishRequest, InventoryBulkPublishRequest
+from app.services.catalogue_service import CatalogueService
 from app.services.enrollment_service import SchemeBalanceService
 from app.services.otp_service import OtpService
 from app.schemas.enrollment import MultiSchemeRedeemRequest
@@ -52,7 +61,7 @@ router = APIRouter()
 )
 async def create_vendor(
     req: VendorCreateRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     vendor = await VendorService.create_vendor(db, current_user, req)
@@ -67,7 +76,7 @@ async def create_vendor(
 )
 async def list_vendors(
     search: Optional[str] = Query(None),
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     vendors = await VendorService.list_vendors(db, current_user, search)
@@ -85,7 +94,7 @@ async def list_vendors(
 async def update_vendor(
     vendor_id: str,
     req: VendorUpdateRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     vendor = await VendorService.update_vendor(db, current_user, vendor_id, req)
@@ -103,7 +112,7 @@ async def update_vendor(
     summary="Get Store Billing Defaults (Admin)",
 )
 async def get_store_defaults(
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await BillingDefaultsService.get_store_defaults(db, current_user)
@@ -119,7 +128,7 @@ async def get_store_defaults(
 )
 async def update_store_defaults(
     req: StoreDefaultsUpdateRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await BillingDefaultsService.update_store_defaults(db, current_user, req)
@@ -133,7 +142,7 @@ async def update_store_defaults(
     summary="List Category Pricing Defaults (Admin)",
 )
 async def list_category_defaults(
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     rows = await BillingDefaultsService.list_category_defaults(db, current_user)
@@ -151,7 +160,7 @@ async def list_category_defaults(
 )
 async def upsert_category_default(
     req: CategoryDefaultUpsertRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await BillingDefaultsService.upsert_category_default(db, current_user, req)
@@ -171,7 +180,7 @@ async def upsert_category_default(
 async def resolve_defaults(
     vendor_id: Optional[str] = Query(None),
     category: Optional[str] = Query(None),
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await BillingDefaultsService.resolve_defaults(db, current_user, vendor_id, category)
@@ -191,7 +200,7 @@ async def resolve_defaults(
 )
 async def create_inventory_item(
     req: InventoryItemCreateRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_inventory")),
     db: AsyncSession = Depends(get_async_db),
 ):
     item = await InventoryService.create_item(db, current_user, req)
@@ -213,14 +222,18 @@ async def list_inventory_items(
     stock_status: Optional[str] = Query(None, description="IN_STOCK | SOLD | INACTIVE"),
     category: Optional[str] = Query(None),
     vendor_id: Optional[str] = Query(None),
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_inventory")),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await InventoryService.list_items(db, current_user, page, limit, search, stock_status, category, vendor_id)
     return StandardSuccessResponse(
         success=True,
         message="Inventory items retrieved successfully",
-        data={"items": [i.model_dump(mode="json") for i in result.items], "total": result.total},
+        data={
+            "items": [i.model_dump(mode="json") for i in result.items],
+            "total": result.total,
+            "total_gold_weight_grams": result.total_gold_weight_grams,
+        },
     )
 
 
@@ -232,7 +245,7 @@ async def list_inventory_items(
 )
 async def get_inventory_item(
     item_id: str,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_inventory")),
     db: AsyncSession = Depends(get_async_db),
 ):
     item = await InventoryService.get_item(db, current_user, item_id)
@@ -251,7 +264,7 @@ async def get_inventory_item(
 async def update_inventory_item(
     item_id: str,
     req: InventoryItemUpdateRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_inventory")),
     db: AsyncSession = Depends(get_async_db),
 ):
     item = await InventoryService.update_item(db, current_user, item_id, req)
@@ -269,7 +282,7 @@ async def update_inventory_item(
 async def upload_inventory_item_image(
     item_id: str,
     file: UploadFile = File(...),
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_inventory")),
     db: AsyncSession = Depends(get_async_db),
 ):
     content_type = file.content_type or ""
@@ -289,6 +302,78 @@ async def upload_inventory_item_image(
 
 
 @router.post(
+    "/billing/inventory/image",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Upload A Product Image Before Create (Admin)",
+    description="Mandatory-image create flow: upload the image first, then pass the returned image_storage_path to POST /billing/inventory.",
+)
+async def upload_inventory_staging_image(
+    file: UploadFile = File(...),
+    current_user: User = Depends(require_admin_or_staff_module("billing_inventory")),
+):
+    content_type = file.content_type or ""
+    file_bytes = await file.read()
+    if not file_bytes:
+        raise ValidationException("Uploaded file is empty.")
+    if len(file_bytes) > settings.MAX_UPLOAD_SIZE_BYTES:
+        max_mb = settings.MAX_UPLOAD_SIZE_BYTES // (1024 * 1024)
+        raise ValidationException(f"Image exceeds the {max_mb}MB upload limit.")
+
+    storage_path = await InventoryService.upload_staging_image(
+        current_user, file_bytes, file.filename or "upload", content_type
+    )
+    return StandardSuccessResponse(
+        success=True, message="Image uploaded successfully", data={"image_storage_path": storage_path}
+    )
+
+
+@router.post(
+    "/billing/inventory/publish-bulk",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Publish Inventory Items To Catalogue In Bulk (Admin)",
+    description="Publishes many inventory items to the catalogue. Each item needs its own catalogue "
+                "image; items that fail validation are reported individually and do not roll back the rest.",
+)
+async def publish_inventory_bulk(
+    req: InventoryBulkPublishRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing_inventory")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await CatalogueService.publish_inventory_bulk(db, current_user, req)
+    return StandardSuccessResponse(
+        success=True,
+        message=f"Published {result.published_count}, failed {result.failed_count}",
+        data=result.model_dump(mode="json"),
+    )
+
+
+@router.post(
+    "/billing/inventory/{item_id}/publish",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Publish Inventory Item To Catalogue (Admin)",
+    description="Publishes (or idempotently re-publishes) one inventory item to the catalogue. "
+                "SELLING_COST is server-calculated (client price rejected); CATALOGUE_COST is the "
+                "admin's manual price. A catalogue image is mandatory; duplicate publishing updates "
+                "the same linked product instead of creating a new one.",
+)
+async def publish_inventory_item(
+    item_id: str,
+    req: InventoryPublishRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing_inventory")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    product = await CatalogueService.publish_inventory_item(db, current_user, item_id, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Inventory item published to catalogue",
+        data={"product": product.model_dump(mode="json")},
+    )
+
+
+@router.post(
     "/billing/inventory/bulk-purchase",
     response_model=StandardSuccessResponse,
     status_code=status.HTTP_201_CREATED,
@@ -297,7 +382,7 @@ async def upload_inventory_item_image(
 )
 async def bulk_purchase(
     req: BulkPurchaseRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_inventory")),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await InventoryService.bulk_create_items(db, current_user, req)
@@ -317,7 +402,7 @@ async def bulk_purchase(
 )
 async def preview_price(
     req: PriceLinePreviewRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await InventoryService.preview_price(db, current_user, req)
@@ -347,15 +432,77 @@ async def get_sale_quote(
     making_charge_value: Optional[float] = Query(None, ge=0),
     wastage_value: Optional[float] = Query(None, ge=0),
     gold_profit_percent: Optional[float] = Query(None, ge=0, le=100),
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    making_charge_type: Optional[str] = Query(None, description="FIXED | PER_GRAM | PERCENTAGE — required when overriding making_charge_value"),
+    wastage_type: Optional[str] = Query(None, description="FIXED | PER_GRAM | PERCENTAGE — required when overriding wastage_value"),
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
     db: AsyncSession = Depends(get_async_db),
 ):
     quote = await SaleService.get_quote(
         db, current_user, product_code, discount_amount, gst_applied, customer_price,
         making_charge_value, wastage_value, gold_profit_percent,
+        making_charge_type, wastage_type,
     )
     return StandardSuccessResponse(
         success=True, message="Quote calculated successfully", data=quote.model_dump(mode="json")
+    )
+
+
+# ─── Phase 4 — Quotation ("sample bill" that does not sell) ───
+
+@router.post(
+    "/billing/quotation",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Generate A Quotation / Sample Bill (Admin/Staff)",
+    description=(
+        "Generates a full quotation bill for a customer using the same pricing engine a real sale "
+        "uses. The item is NOT marked sold and no scheme balance is spent — any scheme_amounts are a "
+        "read-only preview. Staff see a profit/loss word, not the number."
+    ),
+)
+async def create_quotation(
+    req: QuotationCreateRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    quotation = await QuotationService.generate(db, current_user, req)
+    return StandardSuccessResponse(
+        success=True, message="Quotation generated successfully",
+        data={"quotation": quotation.model_dump(mode="json")},
+    )
+
+
+@router.get(
+    "/billing/quotations",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List Quotations (Admin/Staff)",
+)
+async def list_quotations(
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await QuotationService.list_quotations(db, current_user)
+    return StandardSuccessResponse(
+        success=True, message="Quotations retrieved successfully", data=result.model_dump(mode="json")
+    )
+
+
+@router.get(
+    "/billing/quotations/{quotation_id}",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Quotation (Admin/Staff)",
+)
+async def get_quotation(
+    quotation_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    quotation = await QuotationService.get_quotation(db, current_user, quotation_id)
+    return StandardSuccessResponse(
+        success=True, message="Quotation retrieved successfully",
+        data={"quotation": quotation.model_dump(mode="json")},
     )
 
 
@@ -371,7 +518,7 @@ async def get_sale_quote(
 )
 async def create_sale(
     req: SaleCreateRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
     db: AsyncSession = Depends(get_async_db),
 ):
     sale = await SaleService.create_sale(db, current_user, req)
@@ -391,7 +538,7 @@ async def get_billing_dashboard_summary(
     period: Optional[str] = None,
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_inventory", "billing_new_sale", "billing_sales_history")),
     db: AsyncSession = Depends(get_async_db),
 ):
     summary = await SaleService.get_dashboard_summary(db, current_user, period, date_from, date_to)
@@ -411,7 +558,7 @@ async def get_business_summary(
     period: Optional[str] = None,
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_inventory", "billing_new_sale", "billing_sales_history")),
     db: AsyncSession = Depends(get_async_db),
 ):
     summary = await SaleService.get_business_summary(db, current_user, period, date_from, date_to)
@@ -436,7 +583,7 @@ async def get_receivables_summary(
     period: Optional[str] = None,
     date_from: Optional[date] = None,
     date_to: Optional[date] = None,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_inventory", "billing_new_sale", "billing_sales_history")),
     db: AsyncSession = Depends(get_async_db),
 ):
     summary = await SaleService.get_receivables_summary(db, current_user, period, date_from, date_to)
@@ -471,16 +618,27 @@ async def list_sales(
         pattern="^(COMPLETED|RETURNED|CANCELLED)$",
         description="Omit for ALL. The sale lifecycle, independent of the payment status.",
     ),
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    customer_id: Optional[str] = Query(None, description="Exact customer filter."),
+    product_code: Optional[str] = Query(None, description="Exact product-code filter."),
+    category: Optional[str] = Query(
+        None, description="Product category filter (resolved via the linked inventory item)."
+    ),
+    current_user: User = Depends(require_admin_or_staff_module("billing_sales_history")),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await SaleService.list_sales(
-        db, current_user, page, limit, search, date_from, date_to, payment_status, sale_status
+        db, current_user, page, limit, search, date_from, date_to, payment_status, sale_status,
+        customer_id, product_code, category,
     )
     return StandardSuccessResponse(
         success=True,
         message="Sales retrieved successfully",
-        data={"sales": [s.model_dump(mode="json") for s in result.sales], "total": result.total},
+        data={
+            "sales": [s.model_dump(mode="json") for s in result.sales],
+            "total": result.total,
+            "total_gold_weight_grams": result.total_gold_weight_grams,
+            "total_outstanding": result.total_outstanding,
+        },
     )
 
 
@@ -509,7 +667,7 @@ async def download_sales_history_excel(
         None, pattern="^(PAID|PARTIAL|PENDING|REFUNDED|PARTIALLY_REFUNDED)$"
     ),
     sale_status: Optional[str] = Query(None, pattern="^(COMPLETED|RETURNED|CANCELLED)$"),
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_sales_history")),
     db: AsyncSession = Depends(get_async_db),
 ):
     sales, payments_by_sale, period_label, sel_from, sel_to = await SaleService.list_for_export(
@@ -517,7 +675,8 @@ async def download_sales_history_excel(
     )
     tenant = (await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))).scalar_one_or_none()
     xlsx_bytes = billing_export_service.build_sales_history_excel(
-        sales, payments_by_sale, tenant, period_label, payment_status or "ALL"
+        sales, payments_by_sale, tenant, period_label, payment_status or "ALL",
+        include_internal=_is_privileged(current_user),
     )
     filename = f"sales-history-{sel_from.isoformat()}-to-{sel_to.isoformat()}.xlsx"
     return Response(
@@ -562,7 +721,7 @@ async def export_ca_xlsx(
 )
 async def list_sale_payments(
     sale_id: str,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale", "billing_sales_history")),
     db: AsyncSession = Depends(get_async_db),
 ):
     history = await SalePaymentService.get_history(db, current_user, sale_id)
@@ -588,7 +747,7 @@ async def list_sale_payments(
 async def record_sale_payment(
     sale_id: str,
     req: SalePaymentCreateRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
     db: AsyncSession = Depends(get_async_db),
 ):
     history = await SalePaymentService.record_payment(db, current_user, sale_id, req)
@@ -616,7 +775,7 @@ async def record_sale_payment(
 )
 async def request_redemption_otp(
     sale_id: str,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await OtpService.create_redemption_challenge(db, current_user, sale_id)
@@ -645,7 +804,7 @@ async def request_redemption_otp(
 async def redeem_schemes_against_sale(
     sale_id: str,
     req: MultiSchemeRedeemRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
     db: AsyncSession = Depends(get_async_db),
 ):
     # Phase 5 gate: the customer-app OTP must verify (and is consumed) before any
@@ -673,7 +832,7 @@ async def redeem_schemes_against_sale(
 )
 async def get_inventory_item_return(
     inventory_item_id: str,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
     db: AsyncSession = Depends(get_async_db),
 ):
     record = await SaleReturnService.get_for_inventory_item(db, current_user, inventory_item_id)
@@ -699,7 +858,7 @@ async def get_inventory_item_return(
 )
 async def preview_sale_return(
     sale_id: str,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
     db: AsyncSession = Depends(get_async_db),
 ):
     preview = await SaleReturnService.preview(db, current_user, sale_id)
@@ -718,7 +877,7 @@ async def preview_sale_return(
 )
 async def get_sale_return(
     sale_id: str,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
     db: AsyncSession = Depends(get_async_db),
 ):
     record = await SaleReturnService.get_for_sale(db, current_user, sale_id)
@@ -748,7 +907,7 @@ async def get_sale_return(
 async def return_sale(
     sale_id: str,
     req: SaleReturnCreateRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
     db: AsyncSession = Depends(get_async_db),
 ):
     record = await SaleReturnService.process_return(db, current_user, sale_id, req)
@@ -773,7 +932,7 @@ async def return_sale(
 async def inspect_sale_return(
     sale_id: str,
     req: SaleReturnInspectionRequest,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
     db: AsyncSession = Depends(get_async_db),
 ):
     record = await SaleReturnService.record_inspection(db, current_user, sale_id, req)
@@ -792,7 +951,7 @@ async def inspect_sale_return(
 )
 async def get_sale(
     sale_id: str,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale", "billing_sales_history")),
     db: AsyncSession = Depends(get_async_db),
 ):
     sale = await SaleService.get_sale(db, current_user, sale_id)
@@ -808,7 +967,7 @@ async def get_sale(
 )
 async def download_invoice_pdf(
     sale_id: str,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale", "billing_sales_history")),
     db: AsyncSession = Depends(get_async_db),
 ):
     sale = await SaleService.get_sale_orm(db, current_user, sale_id)
@@ -828,7 +987,7 @@ async def download_invoice_pdf(
 )
 async def download_invoice_excel(
     sale_id: str,
-    current_user: User = Depends(require_admin_or_staff_module("billing")),
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale", "billing_sales_history")),
     db: AsyncSession = Depends(get_async_db),
 ):
     sale = await SaleService.get_sale_orm(db, current_user, sale_id)
@@ -838,4 +997,123 @@ async def download_invoice_excel(
         content=xlsx_bytes,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
         headers={"Content-Disposition": f'attachment; filename="{sale.invoice_number}.xlsx"'},
+    )
+
+
+
+# =============================================================================
+# Bill Drafts (unfinished bills)
+# =============================================================================
+@router.post(
+    "/billing/drafts",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Save Unfinished Bill (Admin/Staff)",
+    description="Saves an unfinished bill (draft). A draft is never a Sale and never touches "
+                "inventory, scheme balances or any financial total until finalized. Multiple "
+                "drafts may exist at once.",
+)
+async def create_bill_draft(
+    req: BillDraftCreateRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    draft = await BillDraftService.create_draft(db, current_user, req)
+    return StandardSuccessResponse(
+        success=True, message="Unfinished bill saved", data={"draft": draft.model_dump(mode="json")}
+    )
+
+
+@router.get(
+    "/billing/drafts",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="List Unfinished Bills (Admin/Staff)",
+    description="Admin sees all tenant drafts; Staff sees only their own. Optional filters: "
+                "status, product_code (resume by code), customer_id.",
+)
+async def list_bill_drafts(
+    status_filter: Optional[str] = Query(None, alias="status"),
+    product_code: Optional[str] = Query(None),
+    customer_id: Optional[str] = Query(None),
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    drafts = await BillDraftService.list_drafts(db, current_user, status_filter, product_code, customer_id)
+    return StandardSuccessResponse(
+        success=True,
+        message="Unfinished bills retrieved",
+        data={"drafts": [d.model_dump(mode="json") for d in drafts]},
+    )
+
+
+@router.get(
+    "/billing/drafts/{draft_id}",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Get Unfinished Bill (Admin/Staff)",
+)
+async def get_bill_draft(
+    draft_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    draft = await BillDraftService.get_draft(db, current_user, draft_id)
+    return StandardSuccessResponse(
+        success=True, message="Unfinished bill retrieved", data={"draft": draft.model_dump(mode="json")}
+    )
+
+
+@router.put(
+    "/billing/drafts/{draft_id}",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Edit Unfinished Bill (Admin/Staff)",
+)
+async def update_bill_draft(
+    draft_id: str,
+    req: BillDraftUpdateRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    draft = await BillDraftService.update_draft(db, current_user, draft_id, req)
+    return StandardSuccessResponse(
+        success=True, message="Unfinished bill updated", data={"draft": draft.model_dump(mode="json")}
+    )
+
+
+@router.delete(
+    "/billing/drafts/{draft_id}",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Discard Unfinished Bill (Admin/Staff)",
+)
+async def discard_bill_draft(
+    draft_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    await BillDraftService.discard_draft(db, current_user, draft_id)
+    return StandardSuccessResponse(success=True, message="Unfinished bill discarded", data={})
+
+
+@router.post(
+    "/billing/drafts/{draft_id}/finalize",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Finalize Unfinished Bill Into A Sale (Admin/Staff)",
+    description="Converts an OPEN draft into exactly one finalized Sale: recomputes pricing from "
+                "the live item and gold rate, marks inventory SOLD atomically, applies selected "
+                "scheme redemption (OTP-gated), and flips the draft to FINALIZED. Any failure "
+                "leaves the draft OPEN. A finalized draft cannot be finalized again.",
+)
+async def finalize_bill_draft(
+    draft_id: str,
+    req: BillDraftFinalizeRequest,
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    sale = await BillDraftService.finalize_draft(db, current_user, draft_id, req)
+    return StandardSuccessResponse(
+        success=True, message="Bill finalized", data={"sale": sale.model_dump(mode="json")}
     )

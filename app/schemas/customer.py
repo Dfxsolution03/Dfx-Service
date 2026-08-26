@@ -4,11 +4,21 @@ from typing import Optional, List
 from pydantic import BaseModel, EmailStr, Field, field_validator
 
 
+def _reject_future_dob(v: Optional[date]) -> Optional[date]:
+    """A date of birth cannot be in the future. Format/calendar validity is
+    enforced by the `date` type; no min/max age rule (business decision)."""
+    if v is not None and v > date.today():
+        raise ValueError("Date of birth cannot be in the future")
+    return v
+
+
 class ProfileUpdateRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=2, max_length=100)
     email: Optional[EmailStr] = None
     phone: Optional[str] = Field(None, min_length=10, max_length=15)
     avatar_url: Optional[str] = None
+    # Existing customers may have no DOB; they can add/update it here. Optional.
+    date_of_birth: Optional[date] = None
 
     @field_validator("phone")
     @classmethod
@@ -16,6 +26,8 @@ class ProfileUpdateRequest(BaseModel):
         if v and not re.match(r"^[6-9]\d{9}$", v):
             raise ValueError("Phone number must be a valid 10-digit Indian mobile number")
         return v
+
+    _dob_not_future = field_validator("date_of_birth")(_reject_future_dob)
 
 
 class CustomerProfileResponse(BaseModel):
@@ -27,6 +39,7 @@ class CustomerProfileResponse(BaseModel):
     phone: Optional[str]
     kyc_status: str
     member_since: Optional[str]
+    date_of_birth: Optional[date]
     avatar_url: Optional[str]
 
     class Config:
@@ -264,10 +277,69 @@ class AdminCustomerDetailResponse(BaseModel):
     phone: Optional[str]
     kyc_status: str
     member_since: Optional[str]
+    date_of_birth: Optional[date]
     avatar_url: Optional[str]
     is_active: bool
     enrollment_count: int
     total_invested: float
+
+
+class AdminCustomerCreateRequest(BaseModel):
+    """Admin-side manual customer creation (walk-in support). Phone AND email are
+    both optional — a walk-in with neither can still be created and gets a
+    Customer ID. The admin sets an initial password the customer can change
+    later. An optional scheme_id enrolls the new customer immediately, returning
+    the auto-generated Enrollment ID linked to this customer."""
+    name: str = Field(..., min_length=2, max_length=100)
+    phone: Optional[str] = Field(None, min_length=10, max_length=15)
+    email: Optional[EmailStr] = None
+    password: str = Field(..., min_length=8, max_length=72)
+    scheme_id: Optional[str] = Field(None, min_length=1)
+    # Required for a new customer (approved Phase-1 decision). Date only.
+    date_of_birth: date = Field(...)
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, v: Optional[str]) -> Optional[str]:
+        if v and not re.match(r"^[6-9]\d{9}$", v):
+            raise ValueError("Phone number must be a valid 10-digit Indian mobile number")
+        return v
+
+    _dob_not_future = field_validator("date_of_birth")(_reject_future_dob)
+
+
+class AdminCustomerUpdateRequest(BaseModel):
+    """Admin-side edit of an existing customer. All optional (partial update).
+    Password, when supplied, is re-hashed; name/phone/email/is_active edited in
+    place. tenant_id is never accepted — always the admin's own tenant."""
+    name: Optional[str] = Field(None, min_length=2, max_length=100)
+    phone: Optional[str] = Field(None, min_length=10, max_length=15)
+    email: Optional[EmailStr] = None
+    password: Optional[str] = Field(None, min_length=8, max_length=72)
+    is_active: Optional[bool] = None
+    date_of_birth: Optional[date] = None
+
+    @field_validator("phone")
+    @classmethod
+    def validate_phone(cls, v: Optional[str]) -> Optional[str]:
+        if v and not re.match(r"^[6-9]\d{9}$", v):
+            raise ValueError("Phone number must be a valid 10-digit Indian mobile number")
+        return v
+
+    _dob_not_future = field_validator("date_of_birth")(_reject_future_dob)
+
+
+class AdminCustomerCreateResponse(BaseModel):
+    """Result of manual customer creation — the generated Customer ID
+    (customer_code) and, when a scheme was chosen, the linked Enrollment ID."""
+    id: str
+    customer_code: Optional[str]
+    name: str
+    email: Optional[str]
+    phone: Optional[str]
+    is_active: bool
+    enrollment_id: Optional[str] = None
+    enrollment_number: Optional[str] = None
 
 
 # ─── Phase 1 — Customer 360 (read-only composition) ───
@@ -286,6 +358,7 @@ class CustomerOverviewProfile(BaseModel):
     avatar_url: Optional[str]
     is_active: bool
     member_since: Optional[str]
+    date_of_birth: Optional[date] = None
     created_at: Optional[datetime]
     # Derived at read time from the customer's own enrollments and sales —
     # deliberately NOT a stored customer_type column, so a walk-in who later

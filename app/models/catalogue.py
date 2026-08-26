@@ -1,5 +1,6 @@
+from datetime import date
 from typing import Optional, List
-from sqlalchemy import String, Text, Boolean, Integer, Float, ForeignKey
+from sqlalchemy import String, Text, Boolean, Integer, Float, Date, ForeignKey, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
@@ -7,6 +8,13 @@ from app.models.base import Base, TimestampMixin
 
 class Product(Base, TimestampMixin):
     __tablename__ = "products"
+    __table_args__ = (
+        # A single inventory item publishes to at most ONE catalogue product per
+        # tenant — this makes publishing idempotent and blocks duplicate products
+        # for the same source item. NULLs are distinct in Postgres, so standalone
+        # manual products (inventory_item_id IS NULL) are unaffected.
+        UniqueConstraint("tenant_id", "inventory_item_id", name="uq_products_tenant_inventory_item"),
+    )
 
     id: Mapped[str] = mapped_column(String(50), primary_key=True)
     tenant_id: Mapped[str] = mapped_column(
@@ -15,6 +23,9 @@ class Product(Base, TimestampMixin):
     name: Mapped[str] = mapped_column(String(150), nullable=False)
     description: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
+    # Phase 3 — catalogue sub-category (product header + admin filter). Free
+    # text, same "plain string, no closed enum" convention as category/purity.
+    sub_category: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     sku: Mapped[Optional[str]] = mapped_column(String(100), nullable=True)
     # Product Studio redesign — real jewellery commercial fields, added
     # additively (nullable, no backfill required) alongside the existing
@@ -32,9 +43,42 @@ class Product(Base, TimestampMixin):
     # preference this codebase already applies elsewhere — split/joined into
     # a List[str] at the schema/service boundary (see CatalogueService).
     tags: Mapped[Optional[str]] = mapped_column(String(500), nullable=True)
+    # Making-charge discount shown on the customer catalogue card (mobile reads
+    # making_charge_discount_label). Both nullable/additive — no existing row
+    # is affected.
+    making_charge_discount_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    making_charge_discount_label: Mapped[Optional[str]] = mapped_column(String(200), nullable=True)
+    # Per-tag display colour overrides for the Admin catalogue UI, stored as a
+    # JSON object string ({"BESTSELLER": "#C9A227", ...}) — same "plain string
+    # column, (de)serialised at the service boundary" convention `tags` and
+    # CatalogueDesign.canvas_json already follow. Added to production by
+    # emergency SQL and brought under Alembic control by revision 00ec5a9151da.
+    tag_colors: Mapped[Optional[str]] = mapped_column(String(1000), nullable=True)
     # Soft delete, same is_active-flag convention as Scheme/Branch — no
     # dedicated deleted_at column exists anywhere else in this codebase.
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, nullable=False, index=True)
+
+    # ─── Phase 3 — Inventory → Catalogue link + pricing snapshot ───
+    # The inventory item this product was published from. NULL for standalone
+    # manual products. ON DELETE SET NULL: deleting the inventory item never
+    # deletes or breaks the catalogue product (catalogue status is independent
+    # of inventory status). Unique per tenant (see __table_args__).
+    inventory_item_id: Mapped[Optional[str]] = mapped_column(
+        String(50), ForeignKey("inventory_items.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    # SELLING_COST  -> price is the server-calculated (BillingCalculationEngine)
+    #                  snapshot; never client-editable.
+    # CATALOGUE_COST-> price is an admin-entered manual value.
+    # NULL          -> legacy/standalone manual product (treated as manual).
+    pricing_source: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    # The server-calculated selling cost captured at publish time (SELLING_COST
+    # mode only). Kept alongside `price` so the computed figure is auditable even
+    # if `price` is later hand-edited. Never auto-refreshed on gold-rate change.
+    computed_selling_cost: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    # The date the price snapshot was taken (gold-rate effective date for
+    # SELLING_COST) — shown in the admin list as product price history.
+    price_effective_date: Mapped[Optional[date]] = mapped_column(Date, nullable=True)
+
     created_by: Mapped[str] = mapped_column(
         String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
     )

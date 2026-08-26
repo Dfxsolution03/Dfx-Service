@@ -13,6 +13,8 @@ from app.core.constants import (
     ROLE_STAFF,
     ROLE_SUPERADMIN,
     ROLE_PERMISSIONS_MAP,
+    STAFF_MODULE_BILLING,
+    BILLING_UMBRELLA_CHILDREN,
 )
 from app.exceptions.base import (
     UnauthorizedException,
@@ -137,6 +139,11 @@ def require_admin_or_staff_module(*modules: str) -> Callable:
             return current_user
         if role_name == ROLE_STAFF:
             granted = {m.strip() for m in (current_user.staff_permissions or "").split(",") if m.strip()}
+            # Legacy umbrella: a held "billing" grant satisfies every granular
+            # billing area (billing_inventory / billing_new_sale /
+            # billing_sales_history) without touching the stored row.
+            if STAFF_MODULE_BILLING in granted:
+                granted.update(BILLING_UMBRELLA_CHILDREN)
             if granted.intersection(modules):
                 return current_user
             raise ForbiddenException(

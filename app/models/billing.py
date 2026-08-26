@@ -1,9 +1,16 @@
 from datetime import date, datetime
 from typing import Optional
-from sqlalchemy import String, Float, Date, DateTime, Boolean, ForeignKey, UniqueConstraint
+from sqlalchemy import String, Float, Date, DateTime, Boolean, ForeignKey, UniqueConstraint, JSON
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.models.base import Base, TimestampMixin
+
+# Bill draft (unfinished bill) lifecycle statuses. A draft is NEVER a Sale — it
+# lives in its own table and is excluded from every financial query.
+BILL_DRAFT_OPEN = "OPEN"
+BILL_DRAFT_FINALIZED = "FINALIZED"
+BILL_DRAFT_DISCARDED = "DISCARDED"
+BILL_DRAFT_STATUSES = [BILL_DRAFT_OPEN, BILL_DRAFT_FINALIZED, BILL_DRAFT_DISCARDED]
 
 
 class Vendor(Base, TimestampMixin):
@@ -205,6 +212,12 @@ class InventoryItem(Base, TimestampMixin):
     # is treated as AUTO everywhere (see schemas/billing.py), so old
     # inventory needs no backfill.
     pricing_mode: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
+    # Phase 3 — whether this item has been published to the customer catalogue.
+    # Set True by the publish workflow (CatalogueService.publish_inventory_item);
+    # the authoritative link is Product.inventory_item_id. Default False so all
+    # pre-existing inventory stays inventory-only and needs no backfill.
+    add_to_catalogue: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False, index=True)
 
     created_by: Mapped[str] = mapped_column(
         String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
@@ -476,3 +489,129 @@ class SaleReturn(Base, TimestampMixin):
 
     tenant: Mapped["Tenant"] = relationship("Tenant")
     sale: Mapped["Sale"] = relationship("Sale")
+
+
+class BillDraft(Base, TimestampMixin):
+    """An unfinished bill (draft) held server-side so an Admin/Staff can save
+    several in-progress bills, resume them on any device, and finalize later.
+
+    A draft is NOT a Sale and lives in its own table: no dashboard, report,
+    sales-history, inventory-SOLD, scheme-balance or collection query ever reads
+    it, so a draft can never move a financial figure. Only stored values are the
+    Admin's editable INPUTS — never a computed money figure; every amount is
+    recomputed by the backend on finalize, so a stale draft can never resurrect
+    a stale price or gold rate. Finalization creates exactly one Sale (reusing
+    SaleService) and flips this row to FINALIZED with finalized_sale_id set; the
+    row is kept for audit and never reopened."""
+    __tablename__ = "bill_drafts"
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    # Owner (creator). Admin sees all tenant drafts; Staff only their own.
+    created_by: Mapped[str] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    status: Mapped[str] = mapped_column(String(20), nullable=False, default=BILL_DRAFT_OPEN, index=True)
+
+    # Item reference (never locked/marked SOLD by a draft) — code drives resume.
+    product_code: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+
+    # Buyer — walk-in (name/phone only) or an existing customer.
+    customer_id: Mapped[Optional[str]] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    customer_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    customer_phone: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+    customer_query: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+
+    # Editable pricing INPUTS only (no computed money is stored).
+    customer_price: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gst_applied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    making_charge_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    wastage_value: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    gold_profit_percent: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    discount_amount: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+
+    payment_method: Mapped[str] = mapped_column(String(20), nullable=False, default="CASH")
+    payment_status: Mapped[str] = mapped_column(String(20), nullable=False, default="PAID")
+    initial_payment: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+
+    # Admin's chosen scheme amounts: {enrollment_id: amount}. Selection only —
+    # never applied to a balance until finalize re-validates it live.
+    scheme_amounts: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+
+    # Set once, at finalize.
+    finalized_sale_id: Mapped[Optional[str]] = mapped_column(
+        String(50), ForeignKey("sales.id", ondelete="SET NULL"), nullable=True
+    )
+
+    tenant: Mapped["Tenant"] = relationship("Tenant")
+
+
+class Quotation(Base, TimestampMixin):
+    """Phase 4 — a QUOTATION ('sample bill') a customer is handed before buying.
+
+    A quotation is NOT a Sale: creating one NEVER marks its inventory item SOLD,
+    never spends any scheme balance, and (like BillDraft) lives in its own table
+    so no dashboard, report, sales-history, inventory-SOLD, scheme-balance or
+    collection query ever reads it — it can never move a financial figure.
+
+    Unlike a draft, it is a fully-computed, immutable snapshot: the whole price
+    breakdown (recomputed by BillingCalculationEngine at generation time) is
+    frozen in breakdown_json so the printed quotation is reproducible byte-for-
+    byte. Any scheme amounts are a read-only PREVIEW (what the customer's balance
+    WOULD cover, capped by their available balance and the invoice) captured in
+    scheme_breakdown_json — no SchemeRedemption row is ever written.
+    """
+    __tablename__ = "quotations"
+    __table_args__ = (
+        UniqueConstraint("tenant_id", "quotation_number", name="uq_quotations_tenant_number"),
+    )
+
+    id: Mapped[str] = mapped_column(String(50), primary_key=True)
+    tenant_id: Mapped[str] = mapped_column(
+        String(50), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    quotation_number: Mapped[str] = mapped_column(String(30), nullable=False)
+
+    # Reference only — SET NULL on item delete, and NEVER marked SOLD.
+    inventory_item_id: Mapped[Optional[str]] = mapped_column(
+        String(50), ForeignKey("inventory_items.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    product_code: Mapped[str] = mapped_column(String(50), nullable=False)
+    product_name: Mapped[str] = mapped_column(String(200), nullable=False)
+
+    customer_id: Mapped[Optional[str]] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="SET NULL"), nullable=True
+    )
+    customer_name: Mapped[Optional[str]] = mapped_column(String(150), nullable=True)
+    customer_phone: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
+    gst_applied: Mapped[bool] = mapped_column(Boolean, nullable=False, default=True)
+    # Invoice cost (item bill total from the engine), the previewed scheme total,
+    # and the resulting outstanding = final_amount - scheme_amount_total.
+    final_amount: Mapped[float] = mapped_column(Float, nullable=False)
+    scheme_amount_total: Mapped[float] = mapped_column(Float, nullable=False, default=0)
+    outstanding_amount: Mapped[float] = mapped_column(Float, nullable=False)
+
+    # Full PriceBreakdown snapshot + the scheme preview items. JSON, the same
+    # manual-serialisation convention BillDraft.scheme_amounts already uses.
+    breakdown_json: Mapped[dict] = mapped_column(JSON, nullable=False)
+    scheme_breakdown_json: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
+
+    # Frozen profit snapshot (same figure convention as Sale.estimated_gross_
+    # margin). The number is admin-only at the API layer; the label is the
+    # direction shown to Staff. Stored so a reprint is faithful without recompute.
+    estimated_gross_margin: Mapped[Optional[float]] = mapped_column(Float, nullable=True)
+    profit_or_loss_label: Mapped[Optional[str]] = mapped_column(String(20), nullable=True)
+
+    note: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
+    created_by: Mapped[str] = mapped_column(
+        String(50), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+
+    tenant: Mapped["Tenant"] = relationship("Tenant")

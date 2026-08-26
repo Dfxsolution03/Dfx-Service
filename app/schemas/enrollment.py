@@ -5,6 +5,10 @@ from pydantic import BaseModel, Field
 
 class EnrollmentCreateRequest(BaseModel):
     scheme_id: str = Field(..., min_length=1)
+    # Optional selected tier. When given it must belong to the scheme and be
+    # active; its (monthly_amount, duration_months) are snapshotted onto the
+    # enrollment. Omit to enroll on the scheme's base terms (legacy behaviour).
+    scheme_tier_id: Optional[str] = Field(None, min_length=1)
 
 
 class EnrollmentResponse(BaseModel):
@@ -22,6 +26,12 @@ class EnrollmentResponse(BaseModel):
     months_paid: int = 0
     next_due_date: Optional[date] = None
     remarks: Optional[str] = None
+    # Effective (resolved) terms of THIS enrollment: the selected tier snapshot
+    # when present, else the scheme's base terms. maturity_amount = monthly x duration.
+    scheme_tier_id: Optional[str] = None
+    monthly_amount: float = 0.0
+    duration_months: int = 0
+    maturity_amount: float = 0.0
     created_at: datetime
     updated_at: datetime
 
@@ -44,6 +54,12 @@ class CustomerEnrollmentResponse(BaseModel):
     maturity_date: date
     months_paid: int = 0
     next_due_date: Optional[date] = None
+    # Effective (resolved) terms of THIS enrollment — selected tier snapshot when
+    # present, else the scheme's base terms. maturity_amount = monthly x duration.
+    scheme_tier_id: Optional[str] = None
+    monthly_amount: float = 0.0
+    duration_months: int = 0
+    maturity_amount: float = 0.0
 
     class Config:
         from_attributes = True
@@ -81,8 +97,11 @@ class EnrollmentBalanceResponse(BaseModel):
     customer_id: str
     customer_name: str
     scheme_name: str
+    # Resolved terms of this enrollment (selected tier snapshot, else scheme base).
+    scheme_tier_id: Optional[str] = None
     monthly_amount: float
     duration_months: int
+    maturity_amount: float = 0.0
     successful_payment_count: int
     total_paid: float
     total_redeemed: float

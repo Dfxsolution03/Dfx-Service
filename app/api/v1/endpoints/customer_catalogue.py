@@ -29,12 +29,14 @@ async def list_products(
     price_max: Optional[float] = Query(None, ge=0, description="Phase 6C — maximum price filter"),
     weight_min: Optional[float] = Query(None, ge=0, description="Phase 6C — minimum weight (grams) filter"),
     weight_max: Optional[float] = Query(None, ge=0, description="Phase 6C — maximum weight (grams) filter"),
+    purity: Optional[str] = Query(None, description="Substring match on purity, e.g. '22K'"),
+    tag: Optional[str] = Query(None, description="Substring match against the product's comma-separated tags"),
     current_user: User = Depends(get_current_user),
     db: AsyncSession = Depends(get_async_db),
 ):
     products, pagination = await CustomerCatalogueService.list_products(
         db, current_user, page, limit, search, category, sort,
-        price_min, price_max, weight_min, weight_max,
+        price_min, price_max, weight_min, weight_max, purity, tag,
     )
     return StandardSuccessResponse(
         success=True,

@@ -19,6 +19,16 @@ from app.schemas.report import (
     SchemeSummaryResponse,
     SchemeSummaryItem,
     DashboardSummaryResponse,
+    SalesTrendPoint,
+    SalesTrendResponse,
+    BirthdayCustomer,
+    BirthdaySummaryResponse,
+    CategorySalesItem,
+    SalesByCategoryResponse,
+    TopCustomerBySalesItem,
+    TopCustomersBySalesResponse,
+    InsightItem,
+    InsightsResponse,
 )
 from app.schemas.export import ExportFileResponse, ExportFormat
 from app.services.export_service import ExportService, ExportColumn
@@ -87,6 +97,26 @@ def _end_of_day_ist(d: date) -> datetime:
     return datetime(d.year, d.month, d.day, 23, 59, 59, tzinfo=IST)
 
 
+BIRTHDAY_WINDOW_DAYS = 30  # Phase 10 — approved upcoming-birthday window.
+
+
+def _next_birthday_days(dob: date, today: date, window: int = BIRTHDAY_WINDOW_DAYS) -> Optional[int]:
+    """Days until the customer's NEXT birthday, matched on month+day only
+    (birth year ignored). Returns None when the next birthday is outside the
+    window. A Feb-29 birthday falls back to Feb-28 in non-leap years."""
+    def _bday(year: int) -> date:
+        try:
+            return date(year, dob.month, dob.day)
+        except ValueError:  # Feb 29 in a non-leap year
+            return date(year, dob.month, 28)
+
+    upcoming = _bday(today.year)
+    if upcoming < today:
+        upcoming = _bday(today.year + 1)
+    days = (upcoming - today).days
+    return days if 0 <= days <= window else None
+
+
 class ReportService:
     @staticmethod
     def _require_tenant(current_user: User) -> str:
@@ -135,6 +165,60 @@ class ReportService:
             ],
         )
 
+    # ─── Dashboard — Business sales aggregations (Module 13 Dashboard) ───
+
+    @staticmethod
+    async def get_sales_trend(
+        db: AsyncSession,
+        current_user: User,
+        period: Optional[str],
+        date_from: Optional[date],
+        date_to: Optional[date],
+    ) -> SalesTrendResponse:
+        tenant_id = ReportService._require_tenant(current_user)
+        d_from, d_to, label = _resolve_range(period, date_from, date_to)
+        group_by_month = (d_to - d_from).days > 31
+        rows = await ReportRepository.get_sales_trend(db, tenant_id, d_from, d_to, group_by_month)
+        return SalesTrendResponse(
+            range=DateRangeInfo(date_from=d_from, date_to=d_to, label=label),
+            trend=[
+                SalesTrendPoint(
+                    period_label=_label_bucket(row["bucket"], group_by_month),
+                    total_amount=round(row["total_amount"], 2),
+                    sale_count=row["sale_count"],
+                    profit=round(row.get("profit", 0.0), 2),
+                    gold_weight_grams=round(row.get("gold_weight_grams", 0.0), 3),
+                )
+                for row in rows
+            ],
+        )
+
+    @staticmethod
+    async def get_sales_by_category(
+        db: AsyncSession,
+        current_user: User,
+        period: Optional[str],
+        date_from: Optional[date],
+        date_to: Optional[date],
+    ) -> SalesByCategoryResponse:
+        tenant_id = ReportService._require_tenant(current_user)
+        d_from, d_to, label = _resolve_range(period, date_from, date_to)
+        rows = await ReportRepository.get_sales_by_category(db, tenant_id, d_from, d_to)
+        total = sum(r["total_sales"] for r in rows)
+        return SalesByCategoryResponse(
+            range=DateRangeInfo(date_from=d_from, date_to=d_to, label=label),
+            total_sales=round(total, 2),
+            categories=[
+                CategorySalesItem(
+                    category=r["category"],
+                    total_sales=round(r["total_sales"], 2),
+                    bill_count=r["bill_count"],
+                    percentage=round((r["total_sales"] / total) * 100, 1) if total else 0.0,
+                )
+                for r in rows
+            ],
+        )
+
     @staticmethod
     async def get_top_customers(
         db: AsyncSession,
@@ -153,6 +237,295 @@ class ReportService:
             range=DateRangeInfo(date_from=d_from, date_to=d_to, label=label),
             customers=[TopCustomerItem(**row) for row in rows],
         )
+
+    # ─── Phase 6 — Business top customers + AI insights ───
+
+    @staticmethod
+    async def get_top_customers_by_sales(
+        db: AsyncSession,
+        current_user: User,
+        period: Optional[str],
+        date_from: Optional[date],
+        date_to: Optional[date],
+        limit: int,
+    ) -> TopCustomersBySalesResponse:
+        tenant_id = ReportService._require_tenant(current_user)
+        d_from, d_to, label = _resolve_range(period, date_from, date_to)
+        rows = await ReportRepository.get_top_customers_by_sales(db, tenant_id, d_from, d_to, limit)
+        return TopCustomersBySalesResponse(
+            range=DateRangeInfo(date_from=d_from, date_to=d_to, label=label),
+            customers=[TopCustomerBySalesItem(**row) for row in rows],
+        )
+
+    @staticmethod
+    async def _birthday_insight(db, tenant_id, customer_rows, today, module):
+        """Phase 10 — build a birthday/complimentary insight from the customers
+        ALREADY ranked by the caller (business top customers / scheme top
+        customers). Looks up their real DOBs (NULL excluded) and keeps only
+        birthdays within the 30-day window. Returns None — never a fabricated
+        insight — when no eligible birthday exists."""
+        ids = list({r["customer_id"] for r in customer_rows if r.get("customer_id")})
+        if not ids:
+            return None
+        dobs = await ReportRepository.get_dobs_for_customers(db, tenant_id, ids)
+        upcoming = []
+        for row in dobs:
+            days = _next_birthday_days(row["date_of_birth"], today)
+            if days is not None:
+                upcoming.append({
+                    "customer_id": row["customer_id"],
+                    "customer_name": row["customer_name"],
+                    "birthday": row["date_of_birth"].strftime("%m-%d"),
+                    "days_until_birthday": days,
+                })
+        if not upcoming:
+            return None
+        upcoming.sort(key=lambda x: x["days_until_birthday"])
+        names = ", ".join((u["customer_name"] or "A customer") for u in upcoming[:5])
+        return InsightItem(
+            id="birthday_complimentary", category="birthday", severity="info",
+            title=f"Top {module} customer birthdays in the next {BIRTHDAY_WINDOW_DAYS} days",
+            detail=f"{len(upcoming)} top {module} customer(s) have a birthday within "
+                   f"{BIRTHDAY_WINDOW_DAYS} days ({names}) — a chance to send a complimentary gift.",
+            evidence={"window_days": BIRTHDAY_WINDOW_DAYS, "customers": upcoming},
+        )
+
+    @staticmethod
+    async def _high_value_map(db, current_user, domain, period, date_from, date_to) -> dict:
+        """customer_id -> domain value for the existing top-customer ranking
+        (BUSINESS: sale spend; SCHEME: scheme investment). Membership in this map
+        = high-value in that domain. Reuses the existing ranking queries — no new
+        financial calculation. Bounded to the top 20."""
+        tenant_id = ReportService._require_tenant(current_user)
+        d_from, d_to, _ = _resolve_range(period or "this_year", date_from, date_to)
+        if domain == "BUSINESS":
+            rows = await ReportRepository.get_top_customers_by_sales(db, tenant_id, d_from, d_to, 20)
+            return {r["customer_id"]: r["total_spent"] for r in rows if r.get("customer_id")}
+        rows = await ReportRepository.get_top_enrollments_by_investment(db, tenant_id, d_from, d_to, 50)
+        # One customer can hold several enrollments — sum their investment.
+        agg: dict = {}
+        for r in rows:
+            cid = r.get("customer_id")
+            if cid:
+                agg[cid] = agg.get(cid, 0.0) + float(r["total_invested"])
+        top = sorted(agg.items(), key=lambda kv: kv[1], reverse=True)[:20]
+        return dict(top)
+
+    @staticmethod
+    async def get_birthday_summary(
+        db: AsyncSession,
+        current_user: User,
+        domain: str = "BUSINESS",
+        period: Optional[str] = None,
+        date_from: Optional[date] = None,
+        date_to: Optional[date] = None,
+        window_days: int = BIRTHDAY_WINDOW_DAYS,
+    ) -> BirthdaySummaryResponse:
+        """Reports Analytics — domain-aware customer-birthday intelligence.
+        Reuses the stored User.date_of_birth (no new source) and the existing
+        month/day matcher, and flags high-value customers using the existing
+        domain top-customer ranking (BUSINESS spend / SCHEME investment). Never
+        fabricates a customer, count, or value; birth year is not exposed. Names
+        are exposed only to the report-permitted caller enforced at the endpoint.
+        No complimentary benefit is defined here — only the opportunity is
+        surfaced."""
+        tenant_id = ReportService._require_tenant(current_user)
+        window_days = max(1, min(window_days, 90))
+        today = _today_ist()
+        rows = await ReportRepository.get_customers_with_dob(db, tenant_id)
+        hv = await ReportService._high_value_map(db, current_user, domain, period, date_from, date_to)
+
+        today_list: list = []
+        upcoming: list = []
+        priority_count = 0
+        for r in rows:
+            days = _next_birthday_days(r["date_of_birth"], today, window_days)
+            if days is None:
+                continue
+            cid = r["customer_id"]
+            is_priority = cid in hv
+            if is_priority:
+                priority_count += 1
+            item = BirthdayCustomer(
+                customer_id=cid,
+                customer_name=r["customer_name"],
+                customer_code=r["customer_code"],
+                birthday=r["date_of_birth"].strftime("%m-%d"),
+                days_until_birthday=days,
+                value=hv.get(cid),
+                is_priority=is_priority,
+            )
+            (today_list if days == 0 else upcoming).append(item)
+
+        # Priority first, then soonest birthday, then name.
+        sort_key = lambda x: (not x.is_priority, x.days_until_birthday, x.customer_name or "")
+        upcoming.sort(key=sort_key)
+        today_list.sort(key=lambda x: (not x.is_priority, x.customer_name or ""))
+        return BirthdaySummaryResponse(
+            domain=domain,
+            window_days=window_days,
+            total_with_dob=len(rows),
+            today_count=len(today_list),
+            upcoming_count=len(upcoming),
+            priority_count=priority_count,
+            today=today_list,
+            upcoming=upcoming,
+        )
+
+    @staticmethod
+    async def get_business_insights(
+        db: AsyncSession,
+        current_user: User,
+        period: Optional[str],
+        date_from: Optional[date],
+        date_to: Optional[date],
+    ) -> InsightsResponse:
+        """Data-grounded business insights. Every figure comes from a real
+        aggregate over COMPLETED sales in the range; when there are none, the
+        response says so and invents nothing."""
+        tenant_id = ReportService._require_tenant(current_user)
+        d_from, d_to, label = _resolve_range(period, date_from, date_to)
+        rng = DateRangeInfo(date_from=d_from, date_to=d_to, label=label)
+
+        totals = await ReportRepository.get_sales_totals(db, tenant_id, d_from, d_to)
+        if totals["bill_count"] == 0:
+            return InsightsResponse(
+                range=rng, module="business", data_available=False,
+                insights=[InsightItem(
+                    id="no_business_data", category="coverage", severity="info",
+                    title="No sales in this period",
+                    detail="No completed sales were recorded in the selected range, so no business "
+                           "analytics can be computed.",
+                    evidence={"revenue": 0, "bill_count": 0},
+                )],
+                note="Insufficient data for the selected range.",
+            )
+
+        insights: list = [InsightItem(
+            id="revenue_overview", category="revenue", severity="positive",
+            title="Sales in this period",
+            detail=f"{totals['bill_count']} completed sale(s) totalling {totals['revenue']} "
+                   f"across {totals['customer_count']} registered customer(s).",
+            evidence=totals,
+        )]
+
+        top_products = await TopProductsService.get_top_products(db, current_user, d_from, d_to, "revenue", 1)
+        if top_products["items"]:
+            tp = top_products["items"][0]
+            insights.append(InsightItem(
+                id="top_product", category="product", severity="info",
+                title="Top-selling product",
+                detail=f"{tp['product_name']} led sales with {tp['units']} unit(s) and "
+                       f"{tp['revenue']} in revenue.",
+                evidence={"product_code": tp["product_code"], "units": tp["units"], "revenue": tp["revenue"]},
+            ))
+
+        # Top customers by spend — fetched once (top 10) and reused for both the
+        # single top-customer insight and the birthday scan (no new ranking).
+        top_customers = await ReportRepository.get_top_customers_by_sales(db, tenant_id, d_from, d_to, 10)
+        if top_customers:
+            tc = top_customers[0]
+            insights.append(InsightItem(
+                id="top_customer", category="customer", severity="info",
+                title="Top customer by spend",
+                detail=f"{tc['customer_name'] or 'A customer'} spent {tc['total_spent']} across "
+                       f"{tc['bill_count']} bill(s) — a candidate for loyalty recognition.",
+                evidence=tc,
+            ))
+            birthday = await ReportService._birthday_insight(
+                db, tenant_id, top_customers, _today_ist(), "business"
+            )
+            if birthday:
+                insights.append(birthday)
+
+        return InsightsResponse(range=rng, module="business", data_available=True, insights=insights)
+
+    @staticmethod
+    async def get_scheme_insights(
+        db: AsyncSession,
+        current_user: User,
+        period: Optional[str],
+        date_from: Optional[date],
+        date_to: Optional[date],
+    ) -> InsightsResponse:
+        """Data-grounded scheme insights, from real enrollment/collection
+        aggregates. Invents nothing when the range has no scheme activity."""
+        tenant_id = ReportService._require_tenant(current_user)
+        d_from, d_to, label = _resolve_range(period, date_from, date_to)
+        rng = DateRangeInfo(date_from=d_from, date_to=d_to, label=label)
+
+        pay = await ReportRepository.get_payment_totals(db, tenant_id, d_from, d_to)
+        status_counts = await ReportRepository.get_enrollment_status_counts(db, tenant_id)
+        active = status_counts[STATUS_ACTIVE]
+        completed = status_counts[STATUS_COMPLETED]
+        cancelled = status_counts[STATUS_CANCELLED]
+        total_decided = active + completed + cancelled
+
+        if total_decided == 0 and pay["success_count"] == 0:
+            return InsightsResponse(
+                range=rng, module="scheme", data_available=False,
+                insights=[InsightItem(
+                    id="no_scheme_data", category="coverage", severity="info",
+                    title="No scheme activity",
+                    detail="No enrollments or scheme collections exist for this range, so no scheme "
+                           "analytics can be computed.",
+                    evidence={"enrollments": 0, "collections": 0},
+                )],
+                note="Insufficient data for the selected range.",
+            )
+
+        insights: list = []
+        group_by_month = (d_to - d_from).days > 31
+        trend = await ReportRepository.get_new_enrollment_trend(db, tenant_id, d_from, d_to, group_by_month)
+        new_in_range = sum(r["new_enrollments"] for r in trend)
+        insights.append(InsightItem(
+            id="enrollment_activity", category="enrollment", severity="positive" if new_in_range else "info",
+            title="Enrollment activity",
+            detail=f"{new_in_range} new enrollment(s) in the period; {active} currently active.",
+            evidence={"new_enrollments": new_in_range, "active": active,
+                      "completed": completed, "cancelled": cancelled},
+        ))
+
+        if total_decided:
+            retention = round(((active + completed) / total_decided) * 100, 1)
+            insights.append(InsightItem(
+                id="retention", category="retention",
+                severity="warning" if retention < 50 else "positive",
+                title="Retention rate",
+                detail=f"{retention}% of decided enrollments are active or completed "
+                       f"(rather than cancelled).",
+                evidence={"retention_rate_percent": retention, "cancelled": cancelled},
+            ))
+
+        insights.append(InsightItem(
+            id="scheme_collections", category="collections",
+            severity="positive" if pay["success_amount"] > 0 else "info",
+            title="Scheme collections",
+            detail=f"{pay['success_amount']} collected across {pay['success_count']} successful "
+                   f"contribution(s) in the period.",
+            evidence={"success_amount": pay["success_amount"], "success_count": pay["success_count"]},
+        ))
+
+        # Top scheme customers by investment — fetched once (top 10) and reused
+        # for the single top-customer insight and the birthday scan.
+        top = await ReportRepository.get_top_enrollments_by_investment(db, tenant_id, d_from, d_to, 10)
+        if top:
+            t = top[0]
+            insights.append(InsightItem(
+                id="top_scheme_customer", category="customer", severity="info",
+                title="Top scheme customer",
+                detail=f"{t['customer_name']} invested {t['total_invested']} in "
+                       f"{t['scheme_name']} — a candidate for loyalty recognition.",
+                evidence={"customer_id": t["customer_id"], "scheme_name": t["scheme_name"],
+                          "total_invested": t["total_invested"]},
+            ))
+            birthday = await ReportService._birthday_insight(
+                db, tenant_id, top, _today_ist(), "scheme"
+            )
+            if birthday:
+                insights.append(birthday)
+
+        return InsightsResponse(range=rng, module="scheme", data_available=True, insights=insights)
 
     # ─── Enrollments ───
 
@@ -191,6 +564,7 @@ class ReportService:
                 EnrollmentTrendPoint(
                     period_label=_label_bucket(row["bucket"], group_by_month),
                     new_enrollments=row["new_enrollments"],
+                    maturity_amount=round(row.get("maturity_amount", 0.0), 2),
                 )
                 for row in trend_rows
             ],
@@ -309,6 +683,37 @@ class ReportService:
         return ExportService.generate(rows, columns, fmt, stem)
 
     @staticmethod
+    async def export_scheme_collections(
+        db: AsyncSession,
+        current_user: User,
+        period: Optional[str],
+        date_from: Optional[date],
+        date_to: Optional[date],
+        fmt: ExportFormat,
+    ) -> ExportFileResponse:
+        """Collections page 'Generate Report' — the per-scheme collection
+        totals for the selected range, plus an Overall Collection total row.
+        Reuses get_scheme_summary (same figures shown on-screen); no collection
+        math is reimplemented here."""
+        data = await ReportService.get_scheme_summary(db, current_user, period, date_from, date_to)
+        columns = [
+            ExportColumn("scheme_name", "Scheme"),
+            ExportColumn("active_enrollments", "Active Enrollments"),
+            ExportColumn("total_collected", "Total Collected (INR)"),
+        ]
+        rows = [
+            {"scheme_name": s.scheme_name, "active_enrollments": s.active_enrollments, "total_collected": s.total_collected}
+            for s in data.schemes
+        ]
+        rows.append({
+            "scheme_name": "OVERALL COLLECTION",
+            "active_enrollments": sum(s.active_enrollments for s in data.schemes),
+            "total_collected": round(sum(s.total_collected for s in data.schemes), 2),
+        })
+        stem = f"DFX_Solution_Collections_{data.range.date_from.isoformat()}_to_{data.range.date_to.isoformat()}"
+        return ExportService.generate(rows, columns, fmt, stem)
+
+    @staticmethod
     async def export_analytics_summary(
         db: AsyncSession,
         current_user: User,
@@ -421,7 +826,7 @@ from datetime import date as _date  # noqa: E402
 from sqlalchemy import select as _select, func as _func  # noqa: E402
 from app.models.auth import User as _User, Role as _Role  # noqa: E402
 from app.models.billing import InventoryItem as _Item  # noqa: E402
-from app.core.constants import ROLE_CUSTOMER as _ROLE_CUSTOMER, STOCK_STATUS_RETURNED_PENDING_INSPECTION as _PENDING_INSP  # noqa: E402
+from app.core.constants import ROLE_CUSTOMER as _ROLE_CUSTOMER, STOCK_STATUS_RETURNED_PENDING_INSPECTION as _PENDING_INSP, STOCK_STATUS_IN_STOCK as _IN_STOCK  # noqa: E402
 from app.repositories.collection_repository import CollectionRepository as _CollRepo  # noqa: E402
 from app.services.collection_service import REMINDER_WINDOW_DAYS as _WINDOW  # noqa: E402
 
@@ -446,8 +851,17 @@ class DashboardCardsService:
             .where(_Item.tenant_id == t, _Item.stock_status == _PENDING_INSP)
         )).scalar_one())
 
+        # Honest inventory metric — the data model has no quantity/reorder
+        # threshold, so there is no true "low stock"; we surface the sellable
+        # (IN_STOCK) item count instead.
+        items_in_stock = int((await db.execute(
+            _select(_func.count(_Item.id))
+            .where(_Item.tenant_id == t, _Item.stock_status == _IN_STOCK)
+        )).scalar_one())
+
         return {
             "overdue_enrollments": overdue,
             "pending_kyc": pending_kyc,
             "pending_inspection": pending_inspection,
+            "items_in_stock": items_in_stock,
         }

@@ -1,6 +1,6 @@
 import uuid
 from datetime import date, datetime, timedelta, timezone
-from typing import Optional
+from typing import Optional, List
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +35,11 @@ from app.models.billing import (
     PAYMENT_SOURCE_COUNTER,
     PAYMENT_SOURCE_REFUND,
     PAYMENT_SOURCE_SCHEME_REDEMPTION,
+    BillDraft,
+    BILL_DRAFT_OPEN,
+    BILL_DRAFT_FINALIZED,
+    BILL_DRAFT_DISCARDED,
+    Quotation,
 )
 from app.repositories.billing_repository import (
     VendorRepository,
@@ -44,10 +49,13 @@ from app.repositories.billing_repository import (
     SaleRepository,
     SalePaymentRepository,
     SaleReturnRepository,
+    BillDraftRepository,
+    QuotationRepository,
 )
 from app.repositories.enrollment_repository import EnrollmentRepository, SchemeRedemptionRepository
 from app.models.enrollment import (
     SchemeRedemption,
+    REDEEMABLE_STATUSES,
     STATUS_ACTIVE as ENR_ACTIVE,
     STATUS_CLOSED as ENR_CLOSED,
     STATUS_REDEEMED as ENR_REDEEMED,
@@ -75,12 +83,19 @@ from app.schemas.billing import (
     InventoryItemUpdateRequest,
     InventoryItemResponse,
     InventoryItemListResponse,
+    BillDraftCreateRequest,
+    BillDraftUpdateRequest,
+    BillDraftFinalizeRequest,
+    BillDraftResponse,
+    BillDraftListItem,
     BulkPurchaseRequest,
     BulkPurchaseResponse,
     PriceBreakdown,
     PriceLinePreviewRequest,
     PriceLinePreviewResponse,
     SaleQuoteResponse,
+    SafePriceGuidance,
+    SafePriceReduction,
     SaleCreateRequest,
     SaleResponse,
     SaleListResponse,
@@ -96,6 +111,10 @@ from app.schemas.billing import (
     BillingDashboardSummaryResponse,
     BusinessSummaryResponse,
     ReceivablesSummaryResponse,
+    QuotationCreateRequest,
+    QuotationResponse,
+    QuotationListResponse,
+    QuotationSchemePreviewItem,
 )
 
 _DEFAULT_FIELD_NAMES = [
@@ -122,6 +141,18 @@ def _charge_amount(charge_type: str, value: float, net_gold_weight_grams: float,
 
 def _round2(value: float) -> float:
     return round(value, 2)
+
+
+def _pl_label(value):
+    """Direction-only label for a profit/loss figure — the WORD a Staff user
+    sees instead of the rupee number (Phase 4). None when there is no figure."""
+    if value is None:
+        return None
+    if value > _MONEY_EPSILON:
+        return "PROFIT"
+    if value < -_MONEY_EPSILON:
+        return "LOSS"
+    return "BREAK_EVEN"
 
 
 # Money tolerance for float comparisons. Amounts are stored as Float and
@@ -239,6 +270,129 @@ class BillingCalculationEngine:
         }
 
     @staticmethod
+    def _component_native_to(charge_type, amount_after, net_gold_weight, gold_value):
+        """Given a target rupee amount for a making/wastage line, return the
+        native value in that line's own unit (₹ FIXED, ₹/g PER_GRAM, % of gold
+        value PERCENTAGE)."""
+        if charge_type == "FIXED":
+            return _round2(amount_after)
+        if charge_type == "PER_GRAM":
+            return _round2(amount_after / net_gold_weight) if net_gold_weight else 0.0
+        if charge_type == "PERCENTAGE":
+            return _round2(amount_after / gold_value * 100) if gold_value else 0.0
+        return None
+
+    @staticmethod
+    def safe_price_guidance(full: "PriceBreakdown", purchase_cost: Optional[float], requested_price: Optional[float]) -> Optional[dict]:
+        """Historical-cost safe-price guidance for a customer-requested price.
+
+        Safety boundary is HISTORICAL COST P/L >= 0 (break-even) per item:
+        net selling value (GST backed out) must cover the frozen purchase cost.
+        `full` is the breakdown at the item's full charges with NO discount and
+        NO customer_price override — i.e. the natural asking price.
+
+        Returns None when there is no purchase cost to judge against (guidance
+        cannot be computed without it). The rupee break-even / min-safe figures
+        it returns are Admin-only; the response layer masks them for Staff.
+
+        Reductions to reach a lower requested price are allocated across the
+        adjustable lines in a fixed order — Gold Profit, then Wastage, then
+        Making (trim pure store margin before customer-facing craftsmanship
+        charges). Any allocation that reaches the price without crossing
+        break-even is equally valid; this order is a deterministic UX choice,
+        not a profit rule. No line is ever cut below 0.
+        """
+        if purchase_cost is None:
+            return None
+        factor = (1 + full.tax_rate_percent / 100) if full.gst_applied else 1.0
+        break_even_final = _round2(purchase_cost * factor)
+        p_full = full.final_amount  # natural asking price (no discount)
+
+        if requested_price is None:
+            return {
+                "status": "SAFE",
+                "is_loss": False,
+                "requested_price": None,
+                "minimum_safe_price": break_even_final,
+                "achievable_price": None,
+                "reductions": [],
+                "message": "No customer price entered.",
+            }
+
+        eps = _MONEY_EPSILON
+        # LOSS: requested is below break-even — impossible without losing money.
+        if requested_price < break_even_final - eps:
+            return {
+                "status": "NOT_ACHIEVABLE",
+                "is_loss": True,
+                "requested_price": _round2(requested_price),
+                "minimum_safe_price": break_even_final,
+                "achievable_price": break_even_final,
+                "reductions": [],
+                "message": "Requested price cannot be offered without a loss.",
+            }
+        # At or above the natural asking price — already safe, no cut needed.
+        if requested_price >= p_full - eps:
+            return {
+                "status": "SAFE",
+                "is_loss": False,
+                "requested_price": _round2(requested_price),
+                "minimum_safe_price": break_even_final,
+                "achievable_price": _round2(requested_price),
+                "reductions": [],
+                "message": "Requested price is profitable.",
+            }
+
+        # ADJUSTABLE: trim charges to bring the asking price down to requested,
+        # never below break-even.
+        drop_final = p_full - requested_price
+        drop_pretax = drop_final / factor
+        gold_value = full.gold_value_amount
+        net_w = full.net_gold_weight_grams
+        remaining = drop_pretax
+        reductions = []
+        # (component, current pre-tax amount, type, current native value)
+        lines = [
+            ("GOLD_PROFIT", full.gold_profit_amount, "PERCENTAGE", full.gold_profit_percent),
+            ("WASTAGE", full.wastage_amount, full.wastage_type, full.wastage_value),
+            ("MAKING", full.making_charge_amount, full.making_charge_type, full.making_charge_value),
+        ]
+        for name, amount, ctype, cvalue in lines:
+            if remaining <= eps:
+                break
+            if amount <= eps:
+                continue
+            cut = min(remaining, amount)
+            remaining = _round2(remaining - cut)
+            amount_after = _round2(amount - cut)
+            if name == "GOLD_PROFIT":
+                to_value = _round2(amount_after / gold_value * 100) if gold_value else 0.0
+            else:
+                to_value = BillingCalculationEngine._component_native_to(ctype, amount_after, net_w, gold_value)
+            reductions.append({
+                "component": name,
+                "charge_type": ctype,
+                "reduce_amount": _round2(cut),           # ₹ off the pre-tax line
+                "from_value": _round2(cvalue) if cvalue is not None else None,
+                "to_value": to_value,
+            })
+        # If charge cuts alone cannot cover the drop (requested is below the
+        # all-charges-zero floor) the balance is an explicit discount — the sale
+        # is still >= break-even so it is safe, just not fully expressible as
+        # charge trims.
+        residual_discount = _round2(remaining * factor) if remaining > eps else 0.0
+        return {
+            "status": "ADJUSTABLE",
+            "is_loss": False,
+            "requested_price": _round2(requested_price),
+            "minimum_safe_price": break_even_final,
+            "achievable_price": _round2(requested_price),
+            "reductions": reductions,
+            "residual_discount": residual_discount,
+            "message": "Reduce the charges below to reach the requested price.",
+        }
+
+    @staticmethod
     def calculate(
         item: InventoryItem,
         rate_24k: float,
@@ -250,10 +404,18 @@ class BillingCalculationEngine:
         making_charge_value: Optional[float] = None,
         wastage_value: Optional[float] = None,
         gold_profit_percent: Optional[float] = None,
+        making_charge_type: Optional[str] = None,
+        wastage_type: Optional[str] = None,
     ) -> PriceBreakdown:
-        """The three *_value/percent overrides let the Admin adjust the bill
-        in the Selling screen before confirming it, without mutating the
-        InventoryItem. Omitted (None) means "use the item's own value"."""
+        """The *_value/percent overrides let the Admin adjust the bill in the
+        Selling screen before confirming it, without mutating the
+        InventoryItem. Omitted (None) means "use the item's own value".
+
+        A value override MUST travel with its own charge type: when a
+        making/wastage value is overridden, its type is taken from the paired
+        *_type override (falling back to the item's type only when the caller
+        omitted the type). This prevents a ₹500 FIXED override from being
+        applied as 500% against an item whose stored type is PERCENTAGE."""
         karat = PURITY_KARATS.get(item.purity)
         if karat is None:
             raise ValidationException(f"Unsupported purity '{item.purity}'")
@@ -266,12 +428,14 @@ class BillingCalculationEngine:
         eff_gold_profit_percent = (
             item.gold_profit_percent if gold_profit_percent is None else gold_profit_percent
         )
+        eff_making_type = making_charge_type if making_charge_type is not None else item.making_charge_type
+        eff_wastage_type = wastage_type if wastage_type is not None else item.wastage_type
 
         making_charge_amount = _charge_amount(
-            item.making_charge_type, eff_making_value, item.net_gold_weight_grams, gold_value_amount
+            eff_making_type, eff_making_value, item.net_gold_weight_grams, gold_value_amount
         )
         wastage_amount = _charge_amount(
-            item.wastage_type, eff_wastage_value, item.net_gold_weight_grams, gold_value_amount
+            eff_wastage_type, eff_wastage_value, item.net_gold_weight_grams, gold_value_amount
         )
         # Store margin on the GOLD VALUE portion only — never applied to
         # making/wastage/stone/other or the whole invoice.
@@ -313,10 +477,10 @@ class BillingCalculationEngine:
             gold_rate_source=rate_source,
             gold_rate_effective_date=rate_effective_date,
             gold_value_amount=_round2(gold_value_amount),
-            making_charge_type=item.making_charge_type,
+            making_charge_type=eff_making_type,
             making_charge_value=eff_making_value,
             making_charge_amount=_round2(making_charge_amount),
-            wastage_type=item.wastage_type,
+            wastage_type=eff_wastage_type,
             wastage_value=eff_wastage_value,
             wastage_amount=_round2(wastage_amount),
             gold_profit_percent=eff_gold_profit_percent,
@@ -551,11 +715,13 @@ class InventoryService:
             making_charge_value=item.making_charge_value,
             wastage_type=item.wastage_type,
             wastage_value=item.wastage_value,
-            gold_profit_percent=item.gold_profit_percent,
+            gold_profit_percent=item.gold_profit_percent if privileged else None,
             stone_charge_amount=item.stone_charge_amount,
             other_charges_amount=item.other_charges_amount,
             tax_rate_percent=item.tax_rate_percent,
             pricing_mode=item.pricing_mode,
+            add_to_catalogue=item.add_to_catalogue,
+            catalogue_product_id=item.catalogue_product_id,
             created_by=item.created_by,
             created_at=item.created_at,
             updated_at=item.updated_at,
@@ -574,11 +740,13 @@ class InventoryService:
     ) -> InventoryItemListResponse:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
-        items, total = await InventoryRepository.list_by_tenant(
+        items, total, total_gold_weight_grams = await InventoryRepository.list_by_tenant(
             db, current_user.tenant_id, page, limit, search, stock_status, category, vendor_id
         )
         return InventoryItemListResponse(
-            items=[InventoryService._build_response(i, current_user) for i in items], total=total
+            items=[InventoryService._build_response(i, current_user) for i in items],
+            total=total,
+            total_gold_weight_grams=total_gold_weight_grams,
         )
 
     @staticmethod
@@ -609,6 +777,12 @@ class InventoryService:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
 
+        # Data-boundary enforcement: an item can never be created without a
+        # product image (schema requires it; guard again in case of a
+        # non-schema caller). Existing imageless items are untouched.
+        if not (req.image_storage_path or "").strip():
+            raise ValidationException("A product image is required to create an inventory item.")
+
         existing = await InventoryRepository.get_by_product_code(
             db, req.product_code, current_user.tenant_id
         )
@@ -618,6 +792,42 @@ class InventoryService:
         vendor_id, vendor_name = await InventoryService._resolve_vendor_snapshot(
             db, current_user, req.vendor_id, req.vendor_name
         )
+
+        # Resolve inherited pricing fields server-side (Vendor -> Category ->
+        # Store, field-by-field) so the item is snapshotted with the ACTUAL
+        # applicable values, never a form-default 0. A value supplied on the
+        # request (including an explicit 0) is kept; only None inherits.
+        resolved = await BillingDefaultsService.resolve_defaults(
+            db, current_user, vendor_id, req.category
+        )
+        if req.making_charge_value is not None:
+            making_type, making_value = req.making_charge_type, req.making_charge_value
+        else:
+            making_type, making_value = resolved.making_charge_type, resolved.making_charge_value
+        if req.wastage_value is not None:
+            wastage_type, wastage_value = req.wastage_type, req.wastage_value
+        else:
+            wastage_type, wastage_value = resolved.wastage_type, resolved.wastage_value
+        gold_profit = (
+            req.gold_profit_percent if req.gold_profit_percent is not None
+            else resolved.gold_profit_percent
+        )
+        # Nothing configured at any level — refuse rather than store a
+        # misleading 0. The columns are NOT NULL, so an unresolved field has no
+        # honest value to persist.
+        missing = [
+            name for name, val in (
+                ("making charge", making_value), ("making charge type", making_type),
+                ("wastage", wastage_value), ("wastage type", wastage_type),
+                ("gold profit", gold_profit),
+            ) if val is None
+        ]
+        if missing:
+            raise ValidationException(
+                "No value supplied and no Vendor/Category/Store default configured for: "
+                + ", ".join(missing)
+                + ". Configure a default or provide the value."
+            )
 
         item_id = f"iv_{uuid.uuid4().hex[:12]}"
         item = InventoryItem(
@@ -637,12 +847,13 @@ class InventoryService:
             purchase_invoice_ref=req.purchase_invoice_ref,
             purchase_rate_per_gram=req.purchase_rate_per_gram,
             purchase_cost=req.purchase_cost,
+            image_storage_path=req.image_storage_path,
             stock_status="IN_STOCK",
-            making_charge_type=req.making_charge_type,
-            making_charge_value=req.making_charge_value,
-            wastage_type=req.wastage_type,
-            wastage_value=req.wastage_value,
-            gold_profit_percent=req.gold_profit_percent,
+            making_charge_type=making_type,
+            making_charge_value=making_value,
+            wastage_type=wastage_type,
+            wastage_value=wastage_value,
+            gold_profit_percent=gold_profit,
             stone_charge_amount=req.stone_charge_amount,
             other_charges_amount=req.other_charges_amount,
             tax_rate_percent=req.tax_rate_percent,
@@ -845,6 +1056,27 @@ class InventoryService:
         )
 
     @staticmethod
+    async def upload_staging_image(
+        current_user: User, file_bytes: bytes, file_name: str, content_type: str
+    ) -> str:
+        """Upload a product image BEFORE the item exists (mandatory-image
+        create flow). Same storage provider and same type allow-list as the
+        per-item upload — not a second upload system — returning the storage
+        path the caller then passes to create_item. Nothing is persisted to the
+        database here."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        if content_type not in ("image/jpeg", "image/png", "image/webp"):
+            raise ValidationException(f"Unsupported image type '{content_type}'. Allowed: JPEG, PNG, WebP.")
+        provider = get_storage_provider()
+        return await provider.upload(
+            tenant_id=current_user.tenant_id,
+            file_name=file_name,
+            content_type=content_type,
+            file_bytes=file_bytes,
+        )
+
+    @staticmethod
     async def upload_image(
         db: AsyncSession, current_user: User, item_id: str, file_bytes: bytes, file_name: str, content_type: str
     ) -> InventoryItemResponse:
@@ -897,6 +1129,8 @@ class SaleService:
             customer_phone=sale.customer_phone,
             product_code=sale.product_code,
             product_name=sale.product_name,
+            category=sale.inventory_item.category if sale.inventory_item else None,
+            subcategory=sale.inventory_item.subcategory if sale.inventory_item else None,
             vendor_name=sale.vendor_name,
             huid=sale.huid,
             purity=sale.purity,
@@ -914,8 +1148,8 @@ class SaleService:
             wastage_type=sale.wastage_type,
             wastage_value=sale.wastage_value,
             wastage_amount=sale.wastage_amount,
-            gold_profit_percent=sale.gold_profit_percent,
-            gold_profit_amount=sale.gold_profit_amount,
+            gold_profit_percent=sale.gold_profit_percent if privileged else None,
+            gold_profit_amount=sale.gold_profit_amount if privileged else None,
             stone_charge_amount=sale.stone_charge_amount,
             other_charges_amount=sale.other_charges_amount,
             subtotal_before_tax=sale.subtotal_before_tax,
@@ -933,6 +1167,11 @@ class SaleService:
             pricing_mode=sale.pricing_mode,
             purchase_cost_snapshot=sale.purchase_cost_snapshot if privileged else None,
             estimated_gross_margin=sale.estimated_gross_margin if privileged else None,
+            # Privileged-only. The direction label plus a variable customer_price
+            # is a profit/cost oracle for Staff, so it is withheld entirely
+            # (Staff Financial Visibility baseline). Staff safe-price guidance
+            # is a separate, later, purpose-built response.
+            profit_or_loss_label=_pl_label(sale.estimated_gross_margin) if privileged else None,
             sale_timestamp=sale.sale_timestamp,
             created_by=sale.created_by,
             created_at=sale.created_at,
@@ -969,29 +1208,76 @@ class SaleService:
         making_charge_value: Optional[float] = None,
         wastage_value: Optional[float] = None,
         gold_profit_percent: Optional[float] = None,
+        making_charge_type: Optional[str] = None,
+        wastage_type: Optional[str] = None,
     ) -> SaleQuoteResponse:
         item, rate = await SaleService._get_sellable_item_and_rate(db, current_user, product_code)
         breakdown = BillingCalculationEngine.calculate(
             item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
             discount_amount, gst_applied, customer_price,
             making_charge_value, wastage_value, gold_profit_percent,
+            making_charge_type, wastage_type,
         )
         privileged = _is_privileged(current_user)
-        # Both profit views are commercially sensitive (they expose cost and
-        # metal margin), so they are gated exactly like the existing
-        # profit_or_loss — null for Staff.
-        views = (
-            BillingCalculationEngine.profit_views(breakdown, item.purchase_cost)
-            if privileged else {}
+        # Compute both views once. The direction label is derived here and shown
+        # to everyone (Staff see the WORD); the numeric views stay commercially
+        # sensitive and are gated to privileged callers only.
+        all_views = BillingCalculationEngine.profit_views(breakdown, item.purchase_cost)
+        hp = all_views.get("historical_profit_or_loss")
+        cp = all_views.get("current_gold_value_profit_or_loss")
+        label = _pl_label(hp if hp is not None else cp)
+        views = all_views if privileged else {}
+        # Mask internal store margin from the breakdown for Staff. Direct fields
+        # only — the granular component/subtotal breakdown can still be
+        # arithmetically reconciled; a fully Staff-safe quote projection is a
+        # later, purpose-built response.
+        breakdown_out = (
+            breakdown if privileged
+            else breakdown.model_copy(update={"gold_profit_percent": None, "gold_profit_amount": None})
         )
+        # Safe-price / discount guidance (Historical Cost P/L >= 0 boundary).
+        # Judged against the natural asking price = the same charges with NO
+        # discount and NO customer_price override.
+        full = BillingCalculationEngine.calculate(
+            item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
+            0, gst_applied, None,
+            making_charge_value, wastage_value, gold_profit_percent,
+            making_charge_type, wastage_type,
+        )
+        raw_guidance = BillingCalculationEngine.safe_price_guidance(full, item.purchase_cost, customer_price)
+        safe_price = SaleService._project_safe_price(raw_guidance, privileged)
         return SaleQuoteResponse(
             inventory_item=InventoryService._build_response(item, current_user),
-            breakdown=breakdown,
+            breakdown=breakdown_out,
             profit_or_loss=views.get("historical_profit_or_loss"),
             historical_profit_or_loss=views.get("historical_profit_or_loss"),
             historical_profit_margin_percent=views.get("historical_profit_margin_percent"),
             current_gold_value_profit_or_loss=views.get("current_gold_value_profit_or_loss"),
             current_gold_value_margin_percent=views.get("current_gold_value_margin_percent"),
+            profit_or_loss_label=label if privileged else None,
+            safe_price=safe_price,
+        )
+
+    @staticmethod
+    def _project_safe_price(raw: Optional[dict], privileged: bool) -> Optional["SafePriceGuidance"]:
+        """Build the SafePriceGuidance response, masking for Staff: drop the
+        rupee break-even/min-safe figure and any GOLD_PROFIT reduction line
+        (internal margin), keeping only the SAFE/LOSS decision and the
+        customer-facing Making/Wastage trims."""
+        if raw is None:
+            return None
+        reductions = raw.get("reductions", [])
+        if not privileged:
+            reductions = [r for r in reductions if r.get("component") != "GOLD_PROFIT"]
+        return SafePriceGuidance(
+            status=raw["status"],
+            is_loss=raw["is_loss"],
+            requested_price=raw.get("requested_price"),
+            minimum_safe_price=raw.get("minimum_safe_price") if privileged else None,
+            achievable_price=raw.get("achievable_price"),
+            residual_discount=raw.get("residual_discount") if privileged else None,
+            reductions=[SafePriceReduction(**r) for r in reductions],
+            message=raw.get("message", ""),
         )
 
     @staticmethod
@@ -1022,6 +1308,7 @@ class SaleService:
             item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
             req.discount_amount, req.gst_applied, req.customer_price,
             req.making_charge_value, req.wastage_value, req.gold_profit_percent,
+            req.making_charge_type, req.wastage_type,
         )
 
         sold = await InventoryRepository.mark_sold_if_in_stock(db, item.id, current_user.tenant_id)
@@ -1162,12 +1449,15 @@ class SaleService:
         date_to: Optional[date],
         payment_status: Optional[str] = None,
         sale_status: Optional[str] = None,
+        customer_id: Optional[str] = None,
+        product_code: Optional[str] = None,
+        category: Optional[str] = None,
     ) -> SaleListResponse:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
-        sales, total = await SaleRepository.list_by_tenant(
+        sales, total, total_gold_weight_grams, total_outstanding = await SaleRepository.list_by_tenant(
             db, current_user.tenant_id, page, limit, search, date_from, date_to,
-            payment_status, sale_status,
+            payment_status, sale_status, customer_id, product_code, category,
         )
         rows = [SaleService._build_response(s, current_user) for s in sales]
 
@@ -1181,7 +1471,10 @@ class SaleService:
         for row, sale in zip(rows, sales):
             row.customer_code = codes.get(sale.customer_id) if sale.customer_id else None
 
-        return SaleListResponse(sales=rows, total=total)
+        return SaleListResponse(
+            sales=rows, total=total, total_gold_weight_grams=total_gold_weight_grams,
+            total_outstanding=round(total_outstanding, 2),
+        )
 
     @staticmethod
     def _resolve_period_range(
@@ -1317,6 +1610,9 @@ class SaleService:
             "cash_collected": coll["cash_collected"],
             "scheme_redemption": coll["scheme_redemption"],
             "refunds_paid": coll["refunds"],
+            # Per-method split of cash_collected only (scheme settlements and
+            # refunds are excluded upstream), so the parts sum to cash_collected.
+            "collected_by_method": coll.get("collected_by_method", {}),
             "total_paid": rec["total_paid"],
             "total_outstanding": rec["total_outstanding"],
             "paid_count": rec["paid_count"],
@@ -2057,3 +2353,402 @@ class SaleReturnService:
 
         await db.commit()
         return await SaleReturnService.get_for_sale(db, current_user, sale_id)
+
+
+
+class BillDraftService:
+    """Server-side unfinished bills. A draft is never a Sale and lives in its
+    own table, so it can never touch inventory, scheme balances or any financial
+    total until it is finalized. Finalization reuses SaleService.create_sale and
+    the existing scheme-redemption engine verbatim — no financial logic is
+    duplicated here.
+
+    Ownership: Admin/SuperAdmin see and act on every draft in their tenant;
+    Staff only on drafts they created. Enforced by passing owner_id into every
+    repository read (None for privileged, current_user.id for Staff)."""
+
+    @staticmethod
+    def _owner_scope(current_user: User) -> Optional[str]:
+        return None if _is_privileged(current_user) else current_user.id
+
+    @staticmethod
+    def _to_response(draft: BillDraft) -> BillDraftResponse:
+        return BillDraftResponse.model_validate(draft)
+
+    @staticmethod
+    async def create_draft(
+        db: AsyncSession, current_user: User, req: BillDraftCreateRequest
+    ) -> BillDraftResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        draft = BillDraft(
+            id=f"bd_{uuid.uuid4().hex[:12]}",
+            tenant_id=current_user.tenant_id,
+            created_by=current_user.id,
+            status=BILL_DRAFT_OPEN,
+            product_code=req.product_code,
+            customer_id=req.customer_id,
+            customer_name=req.customer_name,
+            customer_phone=req.customer_phone,
+            customer_query=req.customer_query,
+            customer_price=req.customer_price,
+            gst_applied=req.gst_applied,
+            making_charge_value=req.making_charge_value,
+            wastage_value=req.wastage_value,
+            gold_profit_percent=req.gold_profit_percent,
+            discount_amount=req.discount_amount,
+            payment_method=req.payment_method,
+            payment_status=req.payment_status,
+            initial_payment=req.initial_payment,
+            scheme_amounts=req.scheme_amounts or None,
+            note=req.note,
+        )
+        await BillDraftRepository.create(db, draft)
+        await db.commit()
+        refreshed = await BillDraftRepository.get_by_id(db, draft.id, current_user.tenant_id)
+        return BillDraftService._to_response(refreshed)
+
+    @staticmethod
+    async def list_drafts(
+        db: AsyncSession,
+        current_user: User,
+        status: Optional[str] = None,
+        product_code: Optional[str] = None,
+        customer_id: Optional[str] = None,
+    ) -> List[BillDraftListItem]:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        rows = await BillDraftRepository.list_drafts(
+            db, current_user.tenant_id, BillDraftService._owner_scope(current_user),
+            status, product_code, customer_id,
+        )
+        return [BillDraftListItem.model_validate(r) for r in rows]
+
+    @staticmethod
+    async def get_draft(
+        db: AsyncSession, current_user: User, draft_id: str
+    ) -> BillDraftResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        draft = await BillDraftRepository.get_by_id(
+            db, draft_id, current_user.tenant_id, BillDraftService._owner_scope(current_user)
+        )
+        if not draft:
+            raise ResourceNotFoundException(f"Bill draft '{draft_id}' not found")
+        return BillDraftService._to_response(draft)
+
+    @staticmethod
+    async def update_draft(
+        db: AsyncSession, current_user: User, draft_id: str, req: BillDraftUpdateRequest
+    ) -> BillDraftResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        draft = await BillDraftRepository.get_by_id_for_update(
+            db, draft_id, current_user.tenant_id, BillDraftService._owner_scope(current_user)
+        )
+        if not draft:
+            raise ResourceNotFoundException(f"Bill draft '{draft_id}' not found")
+        if draft.status != BILL_DRAFT_OPEN:
+            raise ConflictException(f"Bill draft is '{draft.status}' and can no longer be edited")
+
+        for field in (
+            "product_code", "customer_id", "customer_name", "customer_phone", "customer_query",
+            "customer_price", "gst_applied", "making_charge_value", "wastage_value",
+            "gold_profit_percent", "discount_amount", "payment_method", "payment_status",
+            "initial_payment", "note",
+        ):
+            val = getattr(req, field, None)
+            if val is not None:
+                setattr(draft, field, val)
+        if req.scheme_amounts is not None:
+            draft.scheme_amounts = req.scheme_amounts or None
+
+        await db.commit()
+        refreshed = await BillDraftRepository.get_by_id(db, draft_id, current_user.tenant_id)
+        return BillDraftService._to_response(refreshed)
+
+    @staticmethod
+    async def discard_draft(db: AsyncSession, current_user: User, draft_id: str) -> None:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        draft = await BillDraftRepository.get_by_id_for_update(
+            db, draft_id, current_user.tenant_id, BillDraftService._owner_scope(current_user)
+        )
+        if not draft:
+            raise ResourceNotFoundException(f"Bill draft '{draft_id}' not found")
+        if draft.status == BILL_DRAFT_FINALIZED:
+            raise ConflictException("A finalized draft cannot be discarded")
+        draft.status = BILL_DRAFT_DISCARDED
+        await db.commit()
+
+    @staticmethod
+    async def finalize_draft(
+        db: AsyncSession, current_user: User, draft_id: str, req: BillDraftFinalizeRequest
+    ) -> SaleResponse:
+        """Convert an OPEN draft into exactly one finalized Sale.
+
+        Reuses SaleService.create_sale verbatim (recompute-from-live pricing +
+        atomic inventory SOLD + snapshot). Stored draft pricing is treated as
+        INPUT only; every money figure is recomputed from the live item and gold
+        rate.
+
+        Scheme selection: the scheme-redemption OTP is issued PER SALE
+        (OtpService.create_redemption_challenge needs an existing sale_id), and a
+        draft has no sale until this call runs — so scheme credit cannot be
+        applied inside finalize. When the draft carries a scheme selection the
+        sale is created PENDING (its outstanding preserved) and the caller then
+        settles it through the existing per-sale request-otp + redeem-schemes
+        flow, exactly as the live sell screen does. draft.scheme_amounts is
+        carried on the response's caller so the frontend can drive that step.
+
+        Idempotency / double-finalize: the draft is row-locked and checked OPEN
+        before anything runs; a second finalize sees a non-OPEN status and is
+        rejected. If the item was sold elsewhere between save and finalize,
+        create_sale raises (item not IN_STOCK) and the draft is left OPEN with no
+        partial Sale."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        draft = await BillDraftRepository.get_by_id_for_update(
+            db, draft_id, current_user.tenant_id, BillDraftService._owner_scope(current_user)
+        )
+        if not draft:
+            raise ResourceNotFoundException(f"Bill draft '{draft_id}' not found")
+        if draft.status != BILL_DRAFT_OPEN:
+            raise ConflictException(f"Bill draft is '{draft.status}' and cannot be finalized again")
+
+        has_scheme = bool({k: v for k, v in (draft.scheme_amounts or {}).items() if float(v) > 0})
+
+        # Build the sale request from the draft's INPUTS. When scheme credit will
+        # settle part of the bill, the sale is created PENDING so its outstanding
+        # is preserved for the subsequent per-sale scheme redemption step.
+        sale_req = SaleCreateRequest(
+            product_code=draft.product_code,
+            customer_id=draft.customer_id,
+            customer_name=draft.customer_name,
+            customer_phone=draft.customer_phone,
+            discount_amount=draft.discount_amount or 0,
+            customer_price=draft.customer_price,
+            making_charge_value=draft.making_charge_value,
+            wastage_value=draft.wastage_value,
+            gold_profit_percent=draft.gold_profit_percent,
+            gst_applied=draft.gst_applied,
+            payment_method=draft.payment_method,
+            payment_status=("PENDING" if has_scheme else draft.payment_status),
+            initial_payment_amount=(
+                draft.initial_payment if (not has_scheme and draft.payment_status == "PARTIAL") else None
+            ),
+        )
+        sale = await SaleService.create_sale(db, current_user, sale_req)
+
+        # Flip the draft to FINALIZED. Re-lock in this transaction; a racing
+        # finalize is impossible because create_sale already marked the item SOLD
+        # (a second attempt would have failed above).
+        locked = await BillDraftRepository.get_by_id_for_update(
+            db, draft_id, current_user.tenant_id
+        )
+        locked.status = BILL_DRAFT_FINALIZED
+        locked.finalized_sale_id = sale.id
+        await AuditRepository.create_log(
+            db, tenant_id=current_user.tenant_id, actor_user_id=current_user.id,
+            actor_name=current_user.name, actor_role=current_user.role.name,
+            action="BILL_DRAFT_FINALIZE", target_entity="bill_drafts", target_id=draft_id,
+            before_state={"status": BILL_DRAFT_OPEN},
+            after_state={"status": BILL_DRAFT_FINALIZED, "finalized_sale_id": sale.id},
+        )
+        await db.commit()
+
+        return await SaleService.get_sale(db, current_user, sale.id)
+
+
+class QuotationService:
+    """Phase 4 — generate a QUOTATION ('sample bill'): the full computed bill a
+    customer is handed before buying. It reuses the SAME BillingCalculationEngine
+    a real sale uses, so the printed figures match a future finalize, but it
+    NEVER marks the item SOLD and NEVER spends a scheme balance (scheme amounts
+    are a read-only preview). It lives in its own table, so no financial query
+    ever reads it."""
+
+    @staticmethod
+    def _quotation_number() -> str:
+        return f"QTN-{date.today():%y%m%d}-{uuid.uuid4().hex[:6].upper()}"
+
+    @staticmethod
+    async def _scheme_preview(db, current_user, customer_id, scheme_amounts, invoice_total):
+        """Read-only preview of what the customer's scheme balances WOULD cover.
+        Caps mirror the real redemption path exactly (per enrollment <= available
+        balance derived from the ledgers; combined <= the invoice). Writes nothing."""
+        items: list = []
+        applied_total = 0.0
+        remaining = invoice_total
+        for enr_id, requested in (scheme_amounts or {}).items():
+            requested = _round2(requested)
+            if requested <= 0:
+                continue
+            enr = await EnrollmentRepository.get_enrollment_by_id(db, enr_id, current_user.tenant_id)
+            if not enr:
+                raise ResourceNotFoundException(f"Enrollment '{enr_id}' not found")
+            if enr.customer_id != customer_id:
+                raise ValidationException(
+                    f"Enrollment {enr.enrollment_number} does not belong to this customer"
+                )
+            if enr.status not in REDEEMABLE_STATUSES:
+                raise ValidationException(
+                    f"Enrollment {enr.enrollment_number} is {enr.status.lower()} and its balance "
+                    f"cannot be applied."
+                )
+            paid = await SchemeRedemptionRepository.sum_successful_contributions(
+                db, enr.id, current_user.tenant_id
+            )
+            spent = await SchemeRedemptionRepository.sum_for_enrollment(
+                db, enr.id, current_user.tenant_id
+            )
+            available = _round2(max(0.0, paid - spent))
+            applied = _round2(min(requested, available, remaining))
+            remaining = _round2(max(0.0, remaining - applied))
+            applied_total = _round2(applied_total + applied)
+            items.append(QuotationSchemePreviewItem(
+                enrollment_id=enr.id,
+                enrollment_number=enr.enrollment_number,
+                requested_amount=requested,
+                available_balance=available,
+                applied_amount=applied,
+            ))
+        return items, applied_total
+
+    @staticmethod
+    def _to_response(q: Quotation, current_user: User, breakdown, preview) -> QuotationResponse:
+        privileged = _is_privileged(current_user)
+        # Mask internal store margin in the printed breakdown and withhold the
+        # P/L label from Staff (Staff Financial Visibility baseline) — same
+        # treatment as SaleService.get_quote / SaleService._build_response.
+        breakdown_out = (
+            breakdown if privileged
+            else breakdown.model_copy(update={"gold_profit_percent": None, "gold_profit_amount": None})
+        )
+        return QuotationResponse(
+            id=q.id,
+            tenant_id=q.tenant_id,
+            quotation_number=q.quotation_number,
+            inventory_item_id=q.inventory_item_id,
+            product_code=q.product_code,
+            product_name=q.product_name,
+            customer_id=q.customer_id,
+            customer_name=q.customer_name,
+            customer_phone=q.customer_phone,
+            breakdown=breakdown_out,
+            gst_applied=q.gst_applied,
+            final_amount=_round2(q.final_amount),
+            scheme_amount_total=_round2(q.scheme_amount_total or 0),
+            outstanding_amount=_round2(q.outstanding_amount),
+            scheme_preview=preview,
+            estimated_gross_margin=q.estimated_gross_margin if privileged else None,
+            profit_or_loss_label=q.profit_or_loss_label if privileged else None,
+            note=q.note,
+            created_by=q.created_by,
+            created_at=q.created_at,
+        )
+
+    @staticmethod
+    def _rebuild_view(q: Quotation, current_user: User) -> QuotationResponse:
+        """Reconstruct a response from a stored quotation (list/get reprint)."""
+        breakdown = PriceBreakdown(**q.breakdown_json)
+        preview = [
+            QuotationSchemePreviewItem(**i)
+            for i in ((q.scheme_breakdown_json or {}).get("items", []))
+        ]
+        return QuotationService._to_response(q, current_user, breakdown, preview)
+
+    @staticmethod
+    async def generate(db: AsyncSession, current_user: User, req: QuotationCreateRequest) -> QuotationResponse:
+        await SaleService._validate_customer_id(db, current_user, req.customer_id)
+        item, rate = await SaleService._get_sellable_item_and_rate(db, current_user, req.product_code)
+        breakdown = BillingCalculationEngine.calculate(
+            item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
+            req.discount_amount, req.gst_applied, req.customer_price,
+            req.making_charge_value, req.wastage_value, req.gold_profit_percent,
+            req.making_charge_type, req.wastage_type,
+        )
+        invoice_total = breakdown.final_amount
+
+        preview, scheme_total = await QuotationService._scheme_preview(
+            db, current_user, req.customer_id, req.scheme_amounts, invoice_total
+        )
+        outstanding = _round2(max(0.0, invoice_total - scheme_total))
+
+        # Same profit definition and gating as a real sale.
+        margin = BillingCalculationEngine.realized_profit_or_loss(
+            invoice_total, breakdown.tax_rate_percent, breakdown.gst_applied, item.purchase_cost
+        )
+        label = _pl_label(margin)
+
+        q_id = f"qtn_{uuid.uuid4().hex[:12]}"
+        quotation = Quotation(
+            id=q_id,
+            tenant_id=current_user.tenant_id,
+            quotation_number=QuotationService._quotation_number(),
+            inventory_item_id=item.id,  # reference only — NEVER marked SOLD
+            product_code=item.product_code,
+            product_name=item.product_name,
+            customer_id=req.customer_id,
+            customer_name=req.customer_name,
+            customer_phone=req.customer_phone,
+            gst_applied=breakdown.gst_applied,
+            final_amount=invoice_total,
+            scheme_amount_total=scheme_total,
+            outstanding_amount=outstanding,
+            breakdown_json=breakdown.model_dump(mode="json"),
+            scheme_breakdown_json={"items": [p.model_dump(mode="json") for p in preview]} if preview else None,
+            estimated_gross_margin=margin,
+            profit_or_loss_label=label,
+            note=req.note,
+            created_by=current_user.id,
+        )
+        await QuotationRepository.create(db, quotation)
+
+        await AuditRepository.create_log(
+            db,
+            tenant_id=current_user.tenant_id,
+            actor_user_id=current_user.id,
+            actor_name=current_user.name,
+            actor_role=current_user.role.name,
+            action="QUOTATION_CREATE",
+            target_entity="quotations",
+            target_id=q_id,
+            before_state=None,
+            after_state={
+                "quotation_number": quotation.quotation_number,
+                "product_code": item.product_code,
+                "final_amount": invoice_total,
+                "scheme_amount_total": scheme_total,
+                "outstanding_amount": outstanding,
+            },
+        )
+
+        try:
+            await db.commit()
+        except IntegrityError:
+            await db.rollback()
+            raise ConflictException("Could not generate a unique quotation number. Please try again.")
+
+        quotation = await QuotationRepository.get_by_id(db, q_id, current_user.tenant_id)
+        return QuotationService._to_response(quotation, current_user, breakdown, preview)
+
+    @staticmethod
+    async def get_quotation(db: AsyncSession, current_user: User, quotation_id: str) -> QuotationResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        q = await QuotationRepository.get_by_id(db, quotation_id, current_user.tenant_id)
+        if not q:
+            raise ResourceNotFoundException(f"Quotation '{quotation_id}' not found")
+        return QuotationService._rebuild_view(q, current_user)
+
+    @staticmethod
+    async def list_quotations(db: AsyncSession, current_user: User) -> QuotationListResponse:
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        rows = await QuotationRepository.list_by_tenant(db, current_user.tenant_id)
+        return QuotationListResponse(
+            quotations=[QuotationService._rebuild_view(q, current_user) for q in rows],
+            total=len(rows),
+        )

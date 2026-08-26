@@ -4,12 +4,14 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.models.auth import User
 from app.models.notification import Notification
-from app.repositories.notification_repository import NotificationRepository
+from app.repositories.notification_repository import NotificationRepository, DeviceTokenRepository
 from app.exceptions.base import ForbiddenException, ResourceNotFoundException
 from app.schemas.notification import (
     NotificationResponse,
     NotificationUnreadCountResponse,
     NotificationType,
+    DeviceRegisterRequest,
+    DeviceTokenResponse,
 )
 
 
@@ -86,3 +88,32 @@ class NotificationService:
         )
         await NotificationRepository.create(db, notification)
         return notification
+
+    # ─── Phase 7 — push device registration ───
+
+    @staticmethod
+    async def register_device(
+        db: AsyncSession, current_user: User, req: DeviceRegisterRequest
+    ) -> DeviceTokenResponse:
+        """Register (or re-register) the caller's push device token. Idempotent
+        per (tenant, token). Tenant-scoped — a token is always bound to the
+        caller's own tenant and user."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        row = await DeviceTokenRepository.upsert(
+            db, current_user.tenant_id, current_user.id, req.token, req.platform, req.provider
+        )
+        await db.commit()
+        row = await DeviceTokenRepository.get_by_token(db, current_user.tenant_id, req.token)
+        return DeviceTokenResponse.model_validate(row)
+
+    @staticmethod
+    async def unregister_device(db: AsyncSession, current_user: User, token: str) -> None:
+        """Deactivate one of the caller's device tokens (logout / rotation).
+        A token that isn't the caller's own is treated as not found."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        ok = await DeviceTokenRepository.deactivate(db, current_user.tenant_id, current_user.id, token)
+        if not ok:
+            raise ResourceNotFoundException("Device token not found")
+        await db.commit()

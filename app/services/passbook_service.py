@@ -21,6 +21,12 @@ async def _build_passbook_response(
         db, enrollment.id, enrollment.tenant_id
     )
 
+    # Show the enrollment's RESOLVED terms (selected-tier snapshot when present,
+    # else the scheme base) so the passbook reflects what this customer actually
+    # pays and matures to — not a later-edited scheme default.
+    from app.services.enrollment_service import resolve_enrollment_terms, maturity_amount
+    eff_monthly, eff_duration = resolve_enrollment_terms(enrollment, enrollment.scheme)
+
     return PassbookResponse(
         enrollment=PassbookEnrollmentInfo(
             id=enrollment.id,
@@ -28,12 +34,14 @@ async def _build_passbook_response(
             joined_date=enrollment.joined_date,
             status=enrollment.status,
             maturity_date=enrollment.maturity_date,
+            scheme_tier_id=enrollment.scheme_tier_id,
         ),
         scheme=PassbookSchemeInfo(
             id=enrollment.scheme.id,
             name=enrollment.scheme.name,
-            monthly_amount=enrollment.scheme.monthly_amount,
-            duration_months=enrollment.scheme.duration_months,
+            monthly_amount=eff_monthly,
+            duration_months=eff_duration,
+            maturity_amount=maturity_amount(eff_monthly, eff_duration),
             bonus_description=enrollment.scheme.bonus_description,
         ),
         entries=[PassbookEntryResponse.model_validate(e) for e in entries],

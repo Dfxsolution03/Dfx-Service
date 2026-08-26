@@ -13,16 +13,25 @@ REMINDER_CHANNEL_IN_APP = "IN_APP"
 
 
 class CollectionReminder(Base, TimestampMixin):
-    """One reminder per (enrollment, due_date). The unique constraint is the
-    dedup + concurrency backstop: two scheduler runs (repeated or parallel) that
-    both try to remind the same overdue period — one insert wins, the other hits
-    the constraint and is skipped, so a customer is never spammed twice for the
-    same due date. When a successful contribution advances the enrollment's
-    next_due_date (Phase 3), the old due_date is no longer overdue, so no new
-    reminder is ever raised — payment stops reminders with no extra hook."""
+    """One reminder per (enrollment, due_date, week_index).
+
+    Phase 9 — weekly recurrence. week_index is the 7-day bucket the reminder
+    belongs to, derived from how many days the installment is overdue:
+    (overdue_days - 1) // 7 → 0 for days 1-7, 1 for days 8-14, and so on. The
+    unique constraint dedups WITHIN a weekly bucket (two scheduler runs in the
+    same week can't double-notify) while ALLOWING one reminder per new 7-day
+    bucket, so an unpaid due is re-reminded every 7 days.
+
+    When a successful contribution advances the enrollment's next_due_date
+    (Phase 3), the old due_date stops being overdue, so no further bucket is ever
+    reached — payment stops reminders with no extra hook. Historical rows created
+    before Phase 9 carry week_index=0 (server default) and stay valid."""
     __tablename__ = "collection_reminders"
     __table_args__ = (
-        UniqueConstraint("enrollment_id", "due_date", name="uq_collection_reminder_period"),
+        UniqueConstraint(
+            "enrollment_id", "due_date", "week_index",
+            name="uq_collection_reminder_period_week",
+        ),
     )
 
     id: Mapped[str] = mapped_column(String(50), primary_key=True)
@@ -38,4 +47,8 @@ class CollectionReminder(Base, TimestampMixin):
     # The enrollment's next_due_date this reminder was raised for.
     due_date: Mapped[date] = mapped_column(Date, nullable=False)
     overdue_days: Mapped[int] = mapped_column(Integer, nullable=False)
+    # Phase 9 — the 7-day overdue bucket this reminder belongs to
+    # ((overdue_days - 1) // 7). Part of the unique key so each new week yields
+    # exactly one reminder. Defaults to 0 for pre-Phase-9 rows.
+    week_index: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     channel: Mapped[str] = mapped_column(String(20), nullable=False, default=REMINDER_CHANNEL_IN_APP)

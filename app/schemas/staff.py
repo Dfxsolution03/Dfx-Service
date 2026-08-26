@@ -68,3 +68,24 @@ class StaffResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ─── Phase 8 — Scheme/Business permission grouping (presentation catalog) ───
+
+class StaffModuleInfo(BaseModel):
+    key: str
+    label: str
+
+
+class StaffPermissionGroup(BaseModel):
+    group: str
+    label: str
+    modules: List[StaffModuleInfo]
+
+
+class StaffPermissionCatalogResponse(BaseModel):
+    """The grouped catalog the Admin UI renders as two dropdowns. `groups`
+    carries the presentation layout; `all_modules` is the flat set of valid
+    keys accepted by the staff assignment APIs (authoritative for validation)."""
+    groups: List[StaffPermissionGroup]
+    all_modules: List[str]

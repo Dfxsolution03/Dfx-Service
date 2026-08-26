@@ -19,6 +19,19 @@ class GoldRateRepository:
         return result.scalar_one_or_none()
 
     @staticmethod
+    async def get_latest_rate(
+        db: AsyncSession, tenant_id: str
+    ) -> Optional[GoldRate]:
+        stmt = (
+            select(GoldRate)
+            .where(GoldRate.tenant_id == tenant_id)
+            .order_by(GoldRate.effective_date.desc())
+            .limit(1)
+        )
+        result = await db.execute(stmt)
+        return result.scalar_one_or_none()
+
+    @staticmethod
     async def create_rate(db: AsyncSession, rate: GoldRate) -> GoldRate:
         db.add(rate)
         return rate

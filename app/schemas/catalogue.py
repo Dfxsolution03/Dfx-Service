@@ -1,6 +1,6 @@
-from datetime import datetime
+from datetime import datetime, date
 from typing import Optional, List, Literal, Dict, Any
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 ImageVariantType = Literal[
     "ORIGINAL",
@@ -57,22 +57,34 @@ class ProductCreateRequest(BaseModel):
     name: str = Field(..., min_length=2, max_length=150)
     description: Optional[str] = Field(None, max_length=2000)
     category: Optional[str] = Field(None, max_length=100)
+    sub_category: Optional[str] = Field(None, max_length=100)
     sku: Optional[str] = Field(None, max_length=100)
     purity: Optional[str] = Field(None, max_length=20)
     price: Optional[float] = Field(None, ge=0)
     weight_grams: Optional[float] = Field(None, ge=0)
     tags: List[str] = Field(default_factory=list)
+    making_charge_discount_percent: Optional[float] = Field(None, ge=0, le=100)
+    making_charge_discount_label: Optional[str] = Field(None, max_length=200)
+    # Per-tag colour overrides, e.g. {"BESTSELLER": "#C9A227"}. Persisted as a
+    # JSON string in Product.tag_colors — see CatalogueService._format_tag_colors.
+    tag_colors: Optional[Dict[str, str]] = None
 
 
 class ProductUpdateRequest(BaseModel):
     name: Optional[str] = Field(None, min_length=2, max_length=150)
     description: Optional[str] = Field(None, max_length=2000)
     category: Optional[str] = Field(None, max_length=100)
+    sub_category: Optional[str] = Field(None, max_length=100)
     sku: Optional[str] = Field(None, max_length=100)
     purity: Optional[str] = Field(None, max_length=20)
     price: Optional[float] = Field(None, ge=0)
     weight_grams: Optional[float] = Field(None, ge=0)
     tags: Optional[List[str]] = None
+    making_charge_discount_percent: Optional[float] = Field(None, ge=0, le=100)
+    making_charge_discount_label: Optional[str] = Field(None, max_length=200)
+    # Per-tag colour overrides, e.g. {"BESTSELLER": "#C9A227"}. Persisted as a
+    # JSON string in Product.tag_colors — see CatalogueService._format_tag_colors.
+    tag_colors: Optional[Dict[str, str]] = None
     is_active: Optional[bool] = None
 
 
@@ -100,12 +112,22 @@ class ProductResponse(BaseModel):
     name: str
     description: Optional[str] = None
     category: Optional[str] = None
+    sub_category: Optional[str] = None
     sku: Optional[str] = None
     purity: Optional[str] = None
     price: Optional[float] = None
     weight_grams: Optional[float] = None
     tags: List[str] = Field(default_factory=list)
+    making_charge_discount_percent: Optional[float] = None
+    making_charge_discount_label: Optional[str] = None
+    tag_colors: Optional[Dict[str, str]] = None
     is_active: bool
+    # Phase 3 — inventory link + pricing snapshot (additive; NULL for standalone
+    # manual products created before Phase 3 or without an inventory source).
+    inventory_item_id: Optional[str] = None
+    pricing_source: Optional[str] = None
+    computed_selling_cost: Optional[float] = None
+    price_effective_date: Optional[date] = None
     created_by: str
     created_at: datetime
     updated_at: datetime
@@ -115,6 +137,58 @@ class ProductResponse(BaseModel):
 
     class Config:
         from_attributes = True
+
+
+# ─── Phase 3 — Inventory → Catalogue publishing ───
+
+PricingSource = Literal["SELLING_COST", "CATALOGUE_COST"]
+
+
+class InventoryPublishRequest(BaseModel):
+    """Publish (or re-publish) one inventory item to the catalogue.
+
+    SELLING_COST  -> the server calculates the price via BillingCalculationEngine;
+                     a client-supplied catalogue_price is REJECTED.
+    CATALOGUE_COST-> the admin supplies catalogue_price (any value > 0; no
+                     invented lower/upper bound).
+    """
+    pricing_source: PricingSource
+    catalogue_price: Optional[float] = Field(None, ge=0)
+    sub_category: Optional[str] = Field(None, max_length=100)
+    # Only used for SELLING_COST calculation; mirrors the billing engine default.
+    gst_applied: bool = True
+
+    @model_validator(mode="after")
+    def _validate_pricing(self) -> "InventoryPublishRequest":
+        if self.pricing_source == "CATALOGUE_COST":
+            if self.catalogue_price is None or self.catalogue_price <= 0:
+                raise ValueError("catalogue_price is required and must be > 0 for CATALOGUE_COST")
+        else:  # SELLING_COST — server computes the price; client must not set it
+            if self.catalogue_price is not None:
+                raise ValueError(
+                    "catalogue_price must not be supplied for SELLING_COST; the server calculates it"
+                )
+        return self
+
+
+class InventoryBulkPublishItem(InventoryPublishRequest):
+    inventory_item_id: str = Field(..., min_length=1)
+
+
+class InventoryBulkPublishRequest(BaseModel):
+    items: List[InventoryBulkPublishItem] = Field(..., min_length=1)
+
+
+class InventoryPublishFailure(BaseModel):
+    inventory_item_id: str
+    error: str
+
+
+class InventoryBulkPublishResponse(BaseModel):
+    published: List[ProductResponse] = Field(default_factory=list)
+    failed: List[InventoryPublishFailure] = Field(default_factory=list)
+    published_count: int = 0
+    failed_count: int = 0
 
 
 class ImageReorderRequest(BaseModel):

@@ -4,7 +4,7 @@ from typing import List
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.security import hash_password
-from app.core.constants import ROLE_STAFF
+from app.core.constants import ROLE_STAFF, ALL_STAFF_MODULES, STAFF_MODULE_GROUPS
 from app.models.auth import User
 from app.repositories.customer_repository import CustomerRepository
 from app.repositories.audit_repository import AuditRepository
@@ -14,6 +14,9 @@ from app.schemas.staff import (
     StaffStatusUpdateRequest,
     StaffPermissionsUpdateRequest,
     StaffResponse,
+    StaffModuleInfo,
+    StaffPermissionGroup,
+    StaffPermissionCatalogResponse,
 )
 
 
@@ -53,6 +56,22 @@ class StaffService:
     app/models/auth.py) — parsed/serialized only here at the service
     boundary, same convention as CatalogueDesign.canvas_json.
     """
+
+    @staticmethod
+    def get_permission_catalog() -> StaffPermissionCatalogResponse:
+        """The Scheme/Business grouped catalog for the Admin UI's two dropdowns.
+        Built purely from STAFF_MODULE_GROUPS over the existing module keys —
+        `all_modules` remains the authoritative validation set used by the
+        assignment APIs (StaffCreateRequest / StaffPermissionsUpdateRequest)."""
+        groups = [
+            StaffPermissionGroup(
+                group=g["group"],
+                label=g["label"],
+                modules=[StaffModuleInfo(key=m["key"], label=m["label"]) for m in g["modules"]],
+            )
+            for g in STAFF_MODULE_GROUPS
+        ]
+        return StaffPermissionCatalogResponse(groups=groups, all_modules=list(ALL_STAFF_MODULES))
 
     @staticmethod
     async def list_staff(db: AsyncSession, current_user: User) -> List[StaffResponse]:

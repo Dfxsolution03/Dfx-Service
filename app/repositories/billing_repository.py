@@ -14,6 +14,9 @@ from app.models.billing import (
     SalePayment,
     SaleReturn,
     PAYMENT_SOURCE_REFUND,
+    BillDraft,
+    BILL_DRAFT_OPEN,
+    Quotation,
 )
 
 
@@ -107,7 +110,7 @@ class InventoryRepository:
         stock_status: Optional[str] = None,
         category: Optional[str] = None,
         vendor_id: Optional[str] = None,
-    ) -> Tuple[List[InventoryItem], int]:
+    ) -> Tuple[List[InventoryItem], int, float]:
         conditions = [InventoryItem.tenant_id == tenant_id]
         if search:
             like = f"%{search}%"
@@ -122,19 +125,22 @@ class InventoryRepository:
             conditions.append(InventoryItem.vendor_id == vendor_id)
 
         count_stmt = select(func.count(InventoryItem.id))
+        sum_stmt = select(func.coalesce(func.sum(InventoryItem.net_gold_weight_grams), 0.0))
         list_stmt = select(InventoryItem)
         for cond in conditions:
             count_stmt = count_stmt.where(cond)
+            sum_stmt = sum_stmt.where(cond)
             list_stmt = list_stmt.where(cond)
 
         total = int((await db.execute(count_stmt)).scalar_one())
+        total_gold_weight_grams = float((await db.execute(sum_stmt)).scalar_one())
         list_stmt = (
             list_stmt.order_by(InventoryItem.created_at.desc())
             .offset((page - 1) * limit)
             .limit(limit)
         )
         rows = (await db.execute(list_stmt)).scalars().all()
-        return list(rows), total
+        return list(rows), total, total_gold_weight_grams
 
     @staticmethod
     async def create(db: AsyncSession, item: InventoryItem) -> InventoryItem:
@@ -214,12 +220,32 @@ class SaleRepository:
         date_to: Optional[date] = None,
         payment_status: Optional[str] = None,
         sale_status: Optional[str] = None,
-    ) -> Tuple[List[Sale], int]:
+        customer_id: Optional[str] = None,
+        product_code: Optional[str] = None,
+        category: Optional[str] = None,
+    ) -> Tuple[List[Sale], int, float]:
         conditions = [Sale.tenant_id == tenant_id]
         if payment_status:
             conditions.append(Sale.payment_status == payment_status)
         if sale_status:
             conditions.append(Sale.sale_status == sale_status)
+        # Phase 5 — sales-history filters: exact customer, exact product code, and
+        # product category. Sale has no category column, so category resolves
+        # through the linked inventory item (tenant-scoped subquery — no join
+        # fan-out, so the COUNT stays correct).
+        if customer_id:
+            conditions.append(Sale.customer_id == customer_id)
+        if product_code:
+            conditions.append(Sale.product_code == product_code)
+        if category:
+            conditions.append(
+                Sale.inventory_item_id.in_(
+                    select(InventoryItem.id).where(
+                        InventoryItem.tenant_id == tenant_id,
+                        func.lower(InventoryItem.category) == category.lower(),
+                    )
+                )
+            )
         if search:
             like = f"%{search}%"
             conditions.append(
@@ -235,19 +261,27 @@ class SaleRepository:
             conditions.append(Sale.sale_timestamp <= datetime.combine(date_to, datetime.max.time()))
 
         count_stmt = select(func.count(Sale.id))
+        sum_stmt = select(func.coalesce(func.sum(Sale.net_gold_weight_grams), 0.0))
+        # Outstanding is always final_amount - amount_paid; aggregate it across
+        # the whole filtered set (not just the page) for the dashboard KPI.
+        outstanding_stmt = select(func.coalesce(func.sum(Sale.final_amount - Sale.amount_paid), 0.0))
         list_stmt = select(Sale)
         for cond in conditions:
             count_stmt = count_stmt.where(cond)
+            sum_stmt = sum_stmt.where(cond)
+            outstanding_stmt = outstanding_stmt.where(cond)
             list_stmt = list_stmt.where(cond)
 
         total = int((await db.execute(count_stmt)).scalar_one())
+        total_gold_weight_grams = float((await db.execute(sum_stmt)).scalar_one())
+        total_outstanding = float((await db.execute(outstanding_stmt)).scalar_one())
         list_stmt = (
             list_stmt.order_by(Sale.sale_timestamp.desc())
             .offset((page - 1) * limit)
             .limit(limit)
         )
         rows = (await db.execute(list_stmt)).scalars().all()
-        return list(rows), total
+        return list(rows), total, total_gold_weight_grams, total_outstanding
 
     @staticmethod
     async def list_by_customer(
@@ -362,10 +396,33 @@ class SaleRepository:
             SalePayment.payment_date <= end_d,
         )
         cash, scheme, refunds = (await db.execute(stmt)).one()
+
+        # Per-method split of the SAME cash_collected figure — one extra grouped
+        # query, same WHERE clause and the same "neither refund nor scheme"
+        # filter, so the parts always sum to cash_collected and a scheme
+        # settlement can never be double-counted as CASH/UPI/CARD money in.
+        method_stmt = (
+            select(SalePayment.payment_method, func.coalesce(func.sum(SalePayment.amount), 0.0))
+            .where(
+                SalePayment.tenant_id == tenant_id,
+                SalePayment.payment_date >= start_d,
+                SalePayment.payment_date <= end_d,
+                ~is_refund,
+                ~is_scheme,
+            )
+            .group_by(SalePayment.payment_method)
+        )
+        by_method = {
+            str(method): float(total)
+            for method, total in (await db.execute(method_stmt)).all()
+            if method is not None
+        }
+
         return {
             "cash_collected": float(cash),
             "scheme_redemption": float(scheme),
             "refunds": float(-refunds),  # stored negative; report positive
+            "collected_by_method": by_method,
         }
 
     @staticmethod
@@ -592,4 +649,87 @@ class SaleReturnRepository:
         stmt = select(SaleReturn).where(
             SaleReturn.sale_id.in_(sale_ids), SaleReturn.tenant_id == tenant_id
         )
+        return list((await db.execute(stmt)).scalars().all())
+
+
+class BillDraftRepository:
+    """Data access for unfinished bills. Every read is tenant-scoped; an
+    optional owner_id further restricts to a single creator (Staff visibility).
+    Kept intentionally thin — all business rules live in BillDraftService."""
+
+    @staticmethod
+    async def create(db: AsyncSession, draft: BillDraft) -> BillDraft:
+        db.add(draft)
+        await db.flush()
+        return draft
+
+    @staticmethod
+    async def get_by_id(
+        db: AsyncSession, draft_id: str, tenant_id: str, owner_id: Optional[str] = None
+    ) -> Optional[BillDraft]:
+        stmt = select(BillDraft).where(
+            BillDraft.id == draft_id, BillDraft.tenant_id == tenant_id
+        )
+        if owner_id is not None:
+            stmt = stmt.where(BillDraft.created_by == owner_id)
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def get_by_id_for_update(
+        db: AsyncSession, draft_id: str, tenant_id: str, owner_id: Optional[str] = None
+    ) -> Optional[BillDraft]:
+        stmt = (
+            select(BillDraft)
+            .where(BillDraft.id == draft_id, BillDraft.tenant_id == tenant_id)
+            .with_for_update()
+        )
+        if owner_id is not None:
+            stmt = stmt.where(BillDraft.created_by == owner_id)
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def list_drafts(
+        db: AsyncSession,
+        tenant_id: str,
+        owner_id: Optional[str] = None,
+        status: Optional[str] = None,
+        product_code: Optional[str] = None,
+        customer_id: Optional[str] = None,
+    ) -> List[BillDraft]:
+        stmt = select(BillDraft).where(BillDraft.tenant_id == tenant_id)
+        if owner_id is not None:
+            stmt = stmt.where(BillDraft.created_by == owner_id)
+        # Default view is OPEN drafts only; an explicit status can widen it.
+        stmt = stmt.where(BillDraft.status == (status or BILL_DRAFT_OPEN))
+        if product_code is not None:
+            stmt = stmt.where(BillDraft.product_code == product_code)
+        if customer_id is not None:
+            stmt = stmt.where(BillDraft.customer_id == customer_id)
+        stmt = stmt.order_by(BillDraft.updated_at.desc())
+        return list((await db.execute(stmt)).scalars().all())
+
+
+class QuotationRepository:
+    """Phase 4 — persistence for quotations. Every read is tenant-scoped."""
+
+    @staticmethod
+    async def create(db: AsyncSession, row: Quotation) -> Quotation:
+        db.add(row)
+        return row
+
+    @staticmethod
+    async def get_by_id(db: AsyncSession, quotation_id: str, tenant_id: str) -> Optional[Quotation]:
+        stmt = select(Quotation).where(
+            Quotation.id == quotation_id, Quotation.tenant_id == tenant_id
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def list_by_tenant(
+        db: AsyncSession, tenant_id: str, customer_id: Optional[str] = None
+    ) -> List[Quotation]:
+        stmt = select(Quotation).where(Quotation.tenant_id == tenant_id)
+        if customer_id is not None:
+            stmt = stmt.where(Quotation.customer_id == customer_id)
+        stmt = stmt.order_by(Quotation.created_at.desc())
         return list((await db.execute(stmt)).scalars().all())

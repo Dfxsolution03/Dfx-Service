@@ -12,6 +12,26 @@ router = APIRouter()
 
 
 @router.get(
+    "/admin/staff/permission-catalog",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Staff Permission Catalog — Scheme/Business groups (Admin)",
+    description="Returns the staff permission modules grouped into Scheme and Business for the two "
+                "assignment dropdowns, plus the flat list of valid module keys. Grouping is over the "
+                "existing permission keys — assignment still validates against these same keys.",
+)
+async def get_permission_catalog(
+    current_user: User = Depends(require_admin_only),
+):
+    catalog = StaffService.get_permission_catalog()
+    return StandardSuccessResponse(
+        success=True,
+        message="Permission catalog retrieved successfully",
+        data=catalog.model_dump(mode="json"),
+    )
+
+
+@router.get(
     "/admin/staff",
     response_model=StandardSuccessResponse,
     status_code=status.HTTP_200_OK,
