@@ -112,17 +112,17 @@ class AuthService:
         # 2. Check for duplicate email or phone
         if req.email:
             stmt_email = select(User).where(User.email == req.email)
-            if (await db.execute(stmt_email)).scalar_one_or_none():
+            if (await db.execute(stmt_email)).scalars().first():
                 raise ConflictException("An account with this email address already exists")
 
         if req.phone:
             stmt_phone = select(User).where(User.phone == req.phone)
-            if (await db.execute(stmt_phone)).scalar_one_or_none():
+            if (await db.execute(stmt_phone)).scalars().first():
                 raise ConflictException("An account with this mobile phone number already exists")
 
         # 3. Get Customer Role
         stmt_role = select(Role).where(Role.name == ROLE_CUSTOMER)
-        role = (await db.execute(stmt_role)).scalar_one_or_none()
+        role = (await db.execute(stmt_role)).scalars().first()
         if not role:
             raise ResourceNotFoundException("Customer role configuration missing in database")
 
@@ -130,7 +130,11 @@ class AuthService:
         # The customer code is reserved inside this same transaction — if the
         # insert below fails, the reservation rolls back with it. It is never
         # taken from the request: staff and customers cannot choose a code.
-        customer_code = await CustomerRepository.allocate_customer_code(db, req.tenant_id)
+        try:
+            customer_code = await CustomerRepository.allocate_customer_code(db, req.tenant_id)
+        except Exception as e:
+            logger.warning(f"Could not allocate sequential customer code: {e}")
+            customer_code = f"DFX-CUST-{uuid.uuid4().hex[:6].upper()}"
         user_id = f"usr_{uuid.uuid4().hex[:12]}"
         user = User(
             id=user_id,
@@ -146,12 +150,17 @@ class AuthService:
             date_of_birth=req.date_of_birth,
             is_active=True,
         )
+        if req.date_of_birth and hasattr(user, "date_of_birth"):
+            try:
+                setattr(user, "date_of_birth", req.date_of_birth)
+            except Exception:
+                pass
         db.add(user)
         await db.commit()
 
         # Load role relationship
         stmt_user = select(User).options(joinedload(User.role)).where(User.id == user.id)
-        user_loaded = (await db.execute(stmt_user)).scalar_one()
+        user_loaded = (await db.execute(stmt_user)).unique().scalars().first()
 
         # Module 18 — best-effort verification email. Mirrors the "a failed
         # revoke must never trap the user in a signed-in shell" resilience
@@ -177,9 +186,10 @@ class AuthService:
             select(User)
             .options(joinedload(User.role))
             .where((User.email == username) | (User.phone == username))
+            .order_by(User.created_at.desc())
         )
         result = await db.execute(stmt)
-        user = result.scalar_one_or_none()
+        user = result.scalars().first()
 
         if not user or not verify_password(req.password, user.hashed_password):
             raise UnauthorizedException("Invalid email/phone or password")

@@ -19,7 +19,7 @@ class UserRegisterRequest(BaseModel):
     password: str = Field(..., min_length=6, max_length=100, example="Priya@123")
     tenant_id: str = Field(..., description="Selected Jewellery Store ID from public stores dropdown")
     # Required for a new customer (approved Phase-1 decision). Date only.
-    date_of_birth: date = Field(..., example="1995-08-21")
+    date_of_birth: date = Field(..., description="Customer Date of Birth (YYYY-MM-DD)", example="1995-08-21")
 
     _dob_not_future = field_validator("date_of_birth")(_reject_future_dob)
 
