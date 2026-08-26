@@ -405,12 +405,15 @@ async def get_sale_quote(
     making_charge_value: Optional[float] = Query(None, ge=0),
     wastage_value: Optional[float] = Query(None, ge=0),
     gold_profit_percent: Optional[float] = Query(None, ge=0, le=100),
+    making_charge_type: Optional[str] = Query(None, description="FIXED | PER_GRAM | PERCENTAGE — required when overriding making_charge_value"),
+    wastage_type: Optional[str] = Query(None, description="FIXED | PER_GRAM | PERCENTAGE — required when overriding wastage_value"),
     current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
     db: AsyncSession = Depends(get_async_db),
 ):
     quote = await SaleService.get_quote(
         db, current_user, product_code, discount_amount, gst_applied, customer_price,
         making_charge_value, wastage_value, gold_profit_percent,
+        making_charge_type, wastage_type,
     )
     return StandardSuccessResponse(
         success=True, message="Quote calculated successfully", data=quote.model_dump(mode="json")

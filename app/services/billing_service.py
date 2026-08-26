@@ -279,10 +279,18 @@ class BillingCalculationEngine:
         making_charge_value: Optional[float] = None,
         wastage_value: Optional[float] = None,
         gold_profit_percent: Optional[float] = None,
+        making_charge_type: Optional[str] = None,
+        wastage_type: Optional[str] = None,
     ) -> PriceBreakdown:
-        """The three *_value/percent overrides let the Admin adjust the bill
-        in the Selling screen before confirming it, without mutating the
-        InventoryItem. Omitted (None) means "use the item's own value"."""
+        """The *_value/percent overrides let the Admin adjust the bill in the
+        Selling screen before confirming it, without mutating the
+        InventoryItem. Omitted (None) means "use the item's own value".
+
+        A value override MUST travel with its own charge type: when a
+        making/wastage value is overridden, its type is taken from the paired
+        *_type override (falling back to the item's type only when the caller
+        omitted the type). This prevents a ₹500 FIXED override from being
+        applied as 500% against an item whose stored type is PERCENTAGE."""
         karat = PURITY_KARATS.get(item.purity)
         if karat is None:
             raise ValidationException(f"Unsupported purity '{item.purity}'")
@@ -295,12 +303,14 @@ class BillingCalculationEngine:
         eff_gold_profit_percent = (
             item.gold_profit_percent if gold_profit_percent is None else gold_profit_percent
         )
+        eff_making_type = making_charge_type if making_charge_type is not None else item.making_charge_type
+        eff_wastage_type = wastage_type if wastage_type is not None else item.wastage_type
 
         making_charge_amount = _charge_amount(
-            item.making_charge_type, eff_making_value, item.net_gold_weight_grams, gold_value_amount
+            eff_making_type, eff_making_value, item.net_gold_weight_grams, gold_value_amount
         )
         wastage_amount = _charge_amount(
-            item.wastage_type, eff_wastage_value, item.net_gold_weight_grams, gold_value_amount
+            eff_wastage_type, eff_wastage_value, item.net_gold_weight_grams, gold_value_amount
         )
         # Store margin on the GOLD VALUE portion only — never applied to
         # making/wastage/stone/other or the whole invoice.
@@ -342,10 +352,10 @@ class BillingCalculationEngine:
             gold_rate_source=rate_source,
             gold_rate_effective_date=rate_effective_date,
             gold_value_amount=_round2(gold_value_amount),
-            making_charge_type=item.making_charge_type,
+            making_charge_type=eff_making_type,
             making_charge_value=eff_making_value,
             making_charge_amount=_round2(making_charge_amount),
-            wastage_type=item.wastage_type,
+            wastage_type=eff_wastage_type,
             wastage_value=eff_wastage_value,
             wastage_amount=_round2(wastage_amount),
             gold_profit_percent=eff_gold_profit_percent,
@@ -1045,12 +1055,15 @@ class SaleService:
         making_charge_value: Optional[float] = None,
         wastage_value: Optional[float] = None,
         gold_profit_percent: Optional[float] = None,
+        making_charge_type: Optional[str] = None,
+        wastage_type: Optional[str] = None,
     ) -> SaleQuoteResponse:
         item, rate = await SaleService._get_sellable_item_and_rate(db, current_user, product_code)
         breakdown = BillingCalculationEngine.calculate(
             item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
             discount_amount, gst_applied, customer_price,
             making_charge_value, wastage_value, gold_profit_percent,
+            making_charge_type, wastage_type,
         )
         privileged = _is_privileged(current_user)
         # Compute both views once. The direction label is derived here and shown
@@ -1108,6 +1121,7 @@ class SaleService:
             item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
             req.discount_amount, req.gst_applied, req.customer_price,
             req.making_charge_value, req.wastage_value, req.gold_profit_percent,
+            req.making_charge_type, req.wastage_type,
         )
 
         sold = await InventoryRepository.mark_sold_if_in_stock(db, item.id, current_user.tenant_id)
@@ -2466,6 +2480,7 @@ class QuotationService:
             item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
             req.discount_amount, req.gst_applied, req.customer_price,
             req.making_charge_value, req.wastage_value, req.gold_profit_percent,
+            req.making_charge_type, req.wastage_type,
         )
         invoice_total = breakdown.final_amount
 

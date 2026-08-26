@@ -382,8 +382,12 @@ class SaleCreateRequest(BaseModel):
     customer_price: Optional[float] = Field(None, ge=0)
     # Per-bill overrides — let the Admin adjust the bill in the Selling
     # screen before confirming. Omitted means "use the item's own value";
-    # the InventoryItem row itself is never mutated by a sale.
+    # the InventoryItem row itself is never mutated by a sale. A value
+    # override MUST carry its own type so a FIXED amount is never applied as a
+    # PERCENTAGE (or vice-versa).
+    making_charge_type: Optional[ChargeType] = None
     making_charge_value: Optional[float] = Field(None, ge=0)
+    wastage_type: Optional[ChargeType] = None
     wastage_value: Optional[float] = Field(None, ge=0)
     gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
     gst_applied: bool = True
@@ -524,7 +528,11 @@ class QuotationCreateRequest(BaseModel):
     customer_phone: Optional[str] = Field(None, max_length=20)
     discount_amount: float = Field(0, ge=0)
     customer_price: Optional[float] = Field(None, ge=0)
+    # A value override MUST carry its own type (FIXED / PERCENTAGE) so it is
+    # never reinterpreted against the item's stored type.
+    making_charge_type: Optional[ChargeType] = None
     making_charge_value: Optional[float] = Field(None, ge=0)
+    wastage_type: Optional[ChargeType] = None
     wastage_value: Optional[float] = Field(None, ge=0)
     gold_profit_percent: Optional[float] = Field(None, ge=0, le=100)
     gst_applied: bool = True
