@@ -283,6 +283,29 @@ async def export_reports_summary(
 
 
 @router.get(
+    "/reports/export/scheme-collections",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_200_OK,
+    summary="Export Scheme Collections (Admin)",
+    description="Collections page 'Generate Report' — per-scheme collection totals for the range plus an Overall Collection total, as CSV, Excel, or Markdown. Reuses /reports/scheme-summary figures.",
+)
+async def export_scheme_collections(
+    format: ExportFormat = Query("excel"),
+    period: Optional[ReportPeriod] = Query(None),
+    date_from: Optional[date] = Query(None),
+    date_to: Optional[date] = Query(None),
+    current_user: User = Depends(require_admin_or_staff_module("reports", "analytics")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    file = await ReportService.export_scheme_collections(db, current_user, period, date_from, date_to, format)
+    return StandardSuccessResponse(
+        success=True,
+        message="Export generated successfully",
+        data={"export": file.model_dump(mode="json")},
+    )
+
+
+@router.get(
     "/reports/export/analytics-summary",
     response_model=StandardSuccessResponse,
     status_code=status.HTTP_200_OK,

@@ -683,6 +683,37 @@ class ReportService:
         return ExportService.generate(rows, columns, fmt, stem)
 
     @staticmethod
+    async def export_scheme_collections(
+        db: AsyncSession,
+        current_user: User,
+        period: Optional[str],
+        date_from: Optional[date],
+        date_to: Optional[date],
+        fmt: ExportFormat,
+    ) -> ExportFileResponse:
+        """Collections page 'Generate Report' — the per-scheme collection
+        totals for the selected range, plus an Overall Collection total row.
+        Reuses get_scheme_summary (same figures shown on-screen); no collection
+        math is reimplemented here."""
+        data = await ReportService.get_scheme_summary(db, current_user, period, date_from, date_to)
+        columns = [
+            ExportColumn("scheme_name", "Scheme"),
+            ExportColumn("active_enrollments", "Active Enrollments"),
+            ExportColumn("total_collected", "Total Collected (INR)"),
+        ]
+        rows = [
+            {"scheme_name": s.scheme_name, "active_enrollments": s.active_enrollments, "total_collected": s.total_collected}
+            for s in data.schemes
+        ]
+        rows.append({
+            "scheme_name": "OVERALL COLLECTION",
+            "active_enrollments": sum(s.active_enrollments for s in data.schemes),
+            "total_collected": round(sum(s.total_collected for s in data.schemes), 2),
+        })
+        stem = f"DFX_Solution_Collections_{data.range.date_from.isoformat()}_to_{data.range.date_to.isoformat()}"
+        return ExportService.generate(rows, columns, fmt, stem)
+
+    @staticmethod
     async def export_analytics_summary(
         db: AsyncSession,
         current_user: User,
