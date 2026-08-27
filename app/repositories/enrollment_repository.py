@@ -1,5 +1,5 @@
 from typing import List, Optional
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
 
@@ -104,6 +104,28 @@ class EnrollmentRepository:
         stmt = (
             select(SchemeEnrollment)
             .where(SchemeEnrollment.id == enrollment_id, SchemeEnrollment.tenant_id == tenant_id)
+            .with_for_update()
+        )
+        return (await db.execute(stmt)).scalar_one_or_none()
+
+    @staticmethod
+    async def get_enrollment_by_id_or_number_for_update(
+        db: AsyncSession, identifier: str, tenant_id: str
+    ):
+        """Row-locked, tenant-scoped fetch matching either the internal id
+        (enr_...) OR the human-visible enrollment_number (ENR-...). Admins enter
+        the visible enrollment number shown in the Enrollments tab; this resolves
+        it without a separate lookup. enrollment_number is unique per tenant
+        (uq_enrollments_tenant_number), so at most one row matches."""
+        stmt = (
+            select(SchemeEnrollment)
+            .where(
+                SchemeEnrollment.tenant_id == tenant_id,
+                or_(
+                    SchemeEnrollment.id == identifier,
+                    SchemeEnrollment.enrollment_number == identifier,
+                ),
+            )
             .with_for_update()
         )
         return (await db.execute(stmt)).scalar_one_or_none()

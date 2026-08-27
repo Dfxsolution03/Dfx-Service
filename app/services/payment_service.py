@@ -124,11 +124,13 @@ class PaymentService:
 
         # Row-lock the enrollment so a concurrent contribution to the same
         # enrollment serialises here and reads a fresh months_paid.
-        enrollment = await EnrollmentRepository.get_enrollment_by_id_for_update(
+        # The Admin enters the visible enrollment number (ENR-...); older callers
+        # may pass the internal id (enr_...). Resolve either, tenant-scoped.
+        enrollment = await EnrollmentRepository.get_enrollment_by_id_or_number_for_update(
             db, req.enrollment_id, tenant_id
         )
         if not enrollment:
-            raise ResourceNotFoundException(f"Enrollment ID '{req.enrollment_id}' not found")
+            raise ResourceNotFoundException(f"Enrollment '{req.enrollment_id}' not found")
         # Only an ACTIVE enrollment accepts new contributions. A closed, redeemed,
         # cancelled or matured scheme must not grow: its balance is already fixed
         # and may only be spent through redemption.
