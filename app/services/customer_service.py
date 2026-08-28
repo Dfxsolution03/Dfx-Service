@@ -75,6 +75,7 @@ from app.schemas.customer import (
     CUSTOMER_TYPE_SCHEME,
     CUSTOMER_TYPE_HYBRID,
     CUSTOMER_TYPE_NEW,
+    derive_kyc_state,
     TenantProfileResponse,
     TenantProfileUpdateRequest,
     BranchCreateRequest,
@@ -893,6 +894,10 @@ class CustomerService:
         ids = [c.id for c in customers]
         with_enr = await CustomerRepository.customer_ids_with_enrollment(db, ids, current_user.tenant_id)
         with_sale = await CustomerRepository.customer_ids_with_sale(db, ids, current_user.tenant_id)
+        # Real KYC submission state, derived from kyc_records (absence = never
+        # submitted), NOT the raw users.kyc_status default. Same batched,
+        # tenant-scoped pattern as the classification helpers above.
+        kyc_statuses = await CustomerRepository.latest_kyc_status_for_customers(db, ids, current_user.tenant_id)
         items = []
         for c in customers:
             item = AdminCustomerListItem.model_validate(c)
@@ -905,6 +910,7 @@ class CustomerService:
                 item.customer_type = CUSTOMER_TYPE_WALK_IN
             else:
                 item.customer_type = CUSTOMER_TYPE_NEW
+            item.kyc_state = derive_kyc_state(kyc_statuses.get(c.id))
             items.append(item)
         return items, pagination
 
@@ -1135,6 +1141,7 @@ class CustomerService:
             ),
             kyc=CustomerOverviewKyc(
                 status=customer.kyc_status,
+                state=derive_kyc_state(kyc_record.status if kyc_record else None),
                 doc_type=kyc_record.doc_type if kyc_record else None,
                 record_status=kyc_record.status if kyc_record else None,
                 verified_at=kyc_record.verified_at if kyc_record else None,

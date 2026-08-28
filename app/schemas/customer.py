@@ -252,6 +252,9 @@ class AdminCustomerListItem(BaseModel):
     is_active: bool
     # Derived at read time (WALK-IN | SCHEME CUSTOMER | HYBRID | NEW), never stored.
     customer_type: Optional[str] = None
+    # Derived at read time from real kyc_records (Not Submitted | Pending Review |
+    # Verified | Rejected), never the raw users.kyc_status. Never stored.
+    kyc_state: Optional[str] = None
 
     class Config:
         from_attributes = True
@@ -361,6 +364,26 @@ CUSTOMER_TYPE_SCHEME = "SCHEME CUSTOMER"
 CUSTOMER_TYPE_HYBRID = "HYBRID"
 CUSTOMER_TYPE_NEW = "NEW"
 
+# Admin-facing KYC submission lifecycle, derived at read time from the customer's
+# real kyc_records — NOT from users.kyc_status, which defaults to "Pending" on
+# every account creation and so cannot distinguish "never submitted" from
+# "submitted, awaiting review". No kyc_records row means Not Submitted.
+KYC_STATE_NOT_SUBMITTED = "Not Submitted"
+KYC_STATE_PENDING_REVIEW = "Pending Review"
+KYC_STATE_VERIFIED = "Verified"
+KYC_STATE_REJECTED = "Rejected"
+
+
+def derive_kyc_state(record_status: Optional[str]) -> str:
+    """Map the latest kyc_records.status (or None) to the admin display state."""
+    if record_status == "Pending":
+        return KYC_STATE_PENDING_REVIEW
+    if record_status == "Verified":
+        return KYC_STATE_VERIFIED
+    if record_status == "Rejected":
+        return KYC_STATE_REJECTED
+    return KYC_STATE_NOT_SUBMITTED
+
 
 class CustomerOverviewProfile(BaseModel):
     id: str
@@ -382,6 +405,9 @@ class CustomerOverviewProfile(BaseModel):
 
 class CustomerOverviewKyc(BaseModel):
     status: str
+    # Derived admin display state from the latest kyc_records (Not Submitted |
+    # Pending Review | Verified | Rejected) — same rule as the customer list.
+    state: Optional[str] = None
     doc_type: Optional[str] = None
     record_status: Optional[str] = None
     verified_at: Optional[datetime] = None

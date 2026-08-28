@@ -313,6 +313,31 @@ class CustomerRepository:
         return {r for (r,) in (await db.execute(stmt)).all()}
 
     @staticmethod
+    async def latest_kyc_status_for_customers(
+        db: AsyncSession, customer_ids: List[str], tenant_id: str
+    ) -> dict:
+        """{user_id: latest kyc_records.status} for customers who have submitted
+        KYC, tenant-scoped. Customers with no submission are simply absent from
+        the dict (the caller treats absence as "Not Submitted"). Batched — one
+        query resolves a whole list page, same pattern as the sale/enrollment
+        classification helpers. "Latest" is by created_at, matching the single
+        record get_kyc_record already returns for the customer view."""
+        ids = list({c for c in customer_ids if c})
+        if not ids:
+            return {}
+        stmt = (
+            select(KYCRecord.user_id, KYCRecord.status, KYCRecord.created_at)
+            .where(KYCRecord.tenant_id == tenant_id, KYCRecord.user_id.in_(ids))
+            .order_by(KYCRecord.user_id, KYCRecord.created_at.desc())
+        )
+        latest: dict = {}
+        for user_id, status, _created in (await db.execute(stmt)).all():
+            # Rows arrive newest-first per user; keep the first seen per user.
+            if user_id not in latest:
+                latest[user_id] = status
+        return latest
+
+    @staticmethod
     async def codes_for_customer_ids(
         db: AsyncSession, customer_ids: List[str], tenant_id: str
     ) -> dict:
