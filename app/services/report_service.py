@@ -826,6 +826,7 @@ from datetime import date as _date  # noqa: E402
 from sqlalchemy import select as _select, func as _func  # noqa: E402
 from app.models.auth import User as _User, Role as _Role  # noqa: E402
 from app.models.billing import InventoryItem as _Item  # noqa: E402
+from app.models.customer import KYCRecord as _KYCRecord  # noqa: E402
 from app.core.constants import ROLE_CUSTOMER as _ROLE_CUSTOMER, STOCK_STATUS_RETURNED_PENDING_INSPECTION as _PENDING_INSP, STOCK_STATUS_IN_STOCK as _IN_STOCK  # noqa: E402
 from app.repositories.collection_repository import CollectionRepository as _CollRepo  # noqa: E402
 from app.services.collection_service import REMINDER_WINDOW_DAYS as _WINDOW  # noqa: E402
@@ -840,10 +841,14 @@ class DashboardCardsService:
 
         overdue = len(await _CollRepo.list_overdue_active(db, _date.today(), _WINDOW, t))
 
+        # Count only REAL reviewable submissions (kyc_records in 'Pending'), not
+        # every customer whose users.kyc_status is 'Pending'. The latter includes
+        # customers who never submitted KYC (awaiting submission), which the admin
+        # KYC Review cannot act on — so counting them here overstated the number
+        # and mismatched the KYC Review list this alert links to.
         pending_kyc = int((await db.execute(
-            _select(_func.count(_User.id))
-            .join(_Role, _User.role_id == _Role.id)
-            .where(_User.tenant_id == t, _Role.name == _ROLE_CUSTOMER, _User.kyc_status == "Pending")
+            _select(_func.count(_KYCRecord.id))
+            .where(_KYCRecord.tenant_id == t, _KYCRecord.status == "Pending")
         )).scalar_one())
 
         pending_inspection = int((await db.execute(
