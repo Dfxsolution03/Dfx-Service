@@ -60,6 +60,7 @@ from app.schemas.customer import (
     AdminCustomerCreateRequest,
     AdminCustomerCreateResponse,
     AdminCustomerUpdateRequest,
+    AdminCustomerEnrollRequest,
     CustomerOverviewResponse,
     CustomerOverviewProfile,
     CustomerOverviewKyc,
@@ -73,6 +74,7 @@ from app.schemas.customer import (
     CUSTOMER_TYPE_WALK_IN,
     CUSTOMER_TYPE_SCHEME,
     CUSTOMER_TYPE_HYBRID,
+    CUSTOMER_TYPE_NEW,
     TenantProfileResponse,
     TenantProfileUpdateRequest,
     BranchCreateRequest,
@@ -753,6 +755,71 @@ class CustomerService:
         )
 
     @staticmethod
+    async def enroll_existing_customer(
+        db: AsyncSession, current_user: User, customer_id: str, req: AdminCustomerEnrollRequest
+    ) -> AdminCustomerCreateResponse:
+        """Enrol an EXISTING own-tenant customer into a scheme. Creates ONLY a
+        SchemeEnrollment against the customer's existing Customer ID — never a
+        second customer — so a WALK-IN who joins a scheme becomes HYBRID, and a
+        NEW customer becomes SCHEME CUSTOMER, all under one identity."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+
+        customer = await CustomerRepository.get_customer_by_id_for_tenant(
+            db, current_user.tenant_id, customer_id
+        )
+        if not customer:
+            raise ResourceNotFoundException(f"Customer ID '{customer_id}' not found")
+
+        scheme = await SchemeRepository.get_scheme_by_id(db, req.scheme_id, current_user.tenant_id)
+        if not scheme:
+            raise ResourceNotFoundException(f"Scheme ID '{req.scheme_id}' not found")
+        if not scheme.is_active:
+            raise ValidationException("This scheme is not currently active and cannot accept new enrollments")
+
+        existing = await EnrollmentRepository.get_active_enrollment_for_scheme(
+            db, current_user.tenant_id, customer.id, scheme.id
+        )
+        if existing:
+            raise ConflictException("This customer already has an active enrollment in this scheme")
+
+        today = datetime.now(timezone.utc).date()
+        enrollment = SchemeEnrollment(
+            id=f"enr_{uuid.uuid4().hex[:12]}",
+            tenant_id=current_user.tenant_id,
+            customer_id=customer.id,
+            scheme_id=scheme.id,
+            enrollment_number=_generate_enrollment_number(),
+            joined_date=today,
+            status=STATUS_ACTIVE,
+            maturity_date=_add_months(today, scheme.duration_months),
+            months_paid=0,
+            next_due_date=today,
+        )
+        db.add(enrollment)
+        await db.flush()
+
+        await AuditRepository.create_log(
+            db, tenant_id=current_user.tenant_id, actor_user_id=current_user.id,
+            actor_name=current_user.name, actor_role=current_user.role.name,
+            action="CUSTOMER_ENROLL", target_entity="scheme_enrollments", target_id=enrollment.id,
+            before_state=None,
+            after_state={"customer_id": customer.id, "enrollment_number": enrollment.enrollment_number},
+        )
+        await db.commit()
+
+        return AdminCustomerCreateResponse(
+            id=customer.id,
+            customer_code=customer.customer_code,
+            name=customer.name,
+            email=customer.email,
+            phone=customer.phone,
+            is_active=customer.is_active,
+            enrollment_id=enrollment.id,
+            enrollment_number=enrollment.enrollment_number,
+        )
+
+    @staticmethod
     async def update_customer_admin(
         db: AsyncSession, current_user: User, customer_id: str, req: AdminCustomerUpdateRequest
     ) -> AdminCustomerDetailResponse:
@@ -801,15 +868,18 @@ class CustomerService:
 
     @staticmethod
     async def get_customers_for_admin(
-        db: AsyncSession, current_user: User, page: int, limit: int, search: Optional[str]
+        db: AsyncSession, current_user: User, page: int, limit: int, search: Optional[str],
+        customer_type: Optional[str] = None,
     ) -> Tuple[List[AdminCustomerListItem], AdminCustomerPaginationInfo]:
         """Admin: paginated, searchable list of the tenant's own customers.
-        Never accepts a tenant_id from the caller — always current_user's."""
+        Never accepts a tenant_id from the caller — always current_user's.
+        customer_type filters by derived classification so pagination reflects
+        the filtered dataset, not the whole customer base."""
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
 
         customers, total = await CustomerRepository.get_customers_by_tenant(
-            db, current_user.tenant_id, page, limit, search
+            db, current_user.tenant_id, page, limit, search, customer_type
         )
         total_pages = math.ceil(total / limit) if limit else 0
         pagination = AdminCustomerPaginationInfo(
@@ -817,18 +887,24 @@ class CustomerService:
         )
 
         # Derive the display type for this page in two batched queries (same rule
-        # as Customer 360): enrollment only = SCHEME, sale only or neither =
-        # WALK-IN, both = HYBRID. Never stored.
+        # as Customer 360): both = HYBRID, enrollment only = SCHEME, purchase only
+        # = WALK-IN, neither = NEW. A customer is never WALK-IN merely for being
+        # created — only a real product purchase makes them WALK-IN. Never stored.
         ids = [c.id for c in customers]
         with_enr = await CustomerRepository.customer_ids_with_enrollment(db, ids, current_user.tenant_id)
         with_sale = await CustomerRepository.customer_ids_with_sale(db, ids, current_user.tenant_id)
         items = []
         for c in customers:
             item = AdminCustomerListItem.model_validate(c)
-            if c.id in with_enr:
-                item.customer_type = CUSTOMER_TYPE_HYBRID if c.id in with_sale else CUSTOMER_TYPE_SCHEME
-            else:
+            has_enr, has_sale = c.id in with_enr, c.id in with_sale
+            if has_enr and has_sale:
+                item.customer_type = CUSTOMER_TYPE_HYBRID
+            elif has_enr:
+                item.customer_type = CUSTOMER_TYPE_SCHEME
+            elif has_sale:
                 item.customer_type = CUSTOMER_TYPE_WALK_IN
+            else:
+                item.customer_type = CUSTOMER_TYPE_NEW
             items.append(item)
         return items, pagination
 
@@ -1019,13 +1095,16 @@ class CustomerService:
             )
 
         # Derived display type — never stored, so one customer record serves a
-        # walk-in who later joins a scheme.
-        if not enrollment_rows:
-            customer_type = CUSTOMER_TYPE_WALK_IN
-        elif purchases:
+        # walk-in who later joins a scheme. WALK-IN requires a real purchase; a
+        # customer with neither purchase nor enrollment is NEW, not WALK-IN.
+        if enrollment_rows and purchases:
             customer_type = CUSTOMER_TYPE_HYBRID
-        else:
+        elif enrollment_rows:
             customer_type = CUSTOMER_TYPE_SCHEME
+        elif purchases:
+            customer_type = CUSTOMER_TYPE_WALK_IN
+        else:
+            customer_type = CUSTOMER_TYPE_NEW
 
         totals = CustomerOverviewTotals(
             enrollment_count=len(enrollment_rows),

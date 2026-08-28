@@ -248,8 +248,9 @@ class AdminCustomerListItem(BaseModel):
     phone: Optional[str]
     kyc_status: str
     member_since: Optional[str]
+    date_of_birth: Optional[date] = None
     is_active: bool
-    # Derived at read time (WALK-IN | SCHEME CUSTOMER | HYBRID), never stored.
+    # Derived at read time (WALK-IN | SCHEME CUSTOMER | HYBRID | NEW), never stored.
     customer_type: Optional[str] = None
 
     class Config:
@@ -342,11 +343,23 @@ class AdminCustomerCreateResponse(BaseModel):
     enrollment_number: Optional[str] = None
 
 
+class AdminCustomerEnrollRequest(BaseModel):
+    """Enrol an EXISTING customer into a scheme — no new customer is created, so
+    a WALK-IN who joins a scheme becomes HYBRID under the same Customer ID."""
+    scheme_id: str = Field(..., description="Scheme to enrol the existing customer into")
+
+
 # ─── Phase 1 — Customer 360 (read-only composition) ───
 
+# A customer is WALK-IN only once they have a real product purchase, SCHEME once
+# they enrol (and have no purchase), HYBRID with both, and NEW when they have no
+# business relationship yet (created/enquired but neither bought nor enrolled).
+# All derived at read time from the customer's own sales/enrollments, never
+# stored — one customer record changes type as their activity changes.
 CUSTOMER_TYPE_WALK_IN = "WALK-IN"
 CUSTOMER_TYPE_SCHEME = "SCHEME CUSTOMER"
 CUSTOMER_TYPE_HYBRID = "HYBRID"
+CUSTOMER_TYPE_NEW = "NEW"
 
 
 class CustomerOverviewProfile(BaseModel):

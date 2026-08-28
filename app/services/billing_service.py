@@ -1,3 +1,4 @@
+import secrets
 import uuid
 from datetime import date, datetime, timedelta, timezone
 from typing import Optional, List
@@ -9,6 +10,7 @@ from app.core.constants import (
     PURITY_KARATS,
     ROLE_ADMIN,
     ROLE_SUPERADMIN,
+    ROLE_CUSTOMER,
     SALE_STATUS_COMPLETED,
     SALE_STATUS_RETURNED,
     SALE_STATUS_CANCELLED,
@@ -23,7 +25,8 @@ from app.core.constants import (
     INSPECTION_RESALABLE,
     INSPECTION_DAMAGED,
 )
-from app.models.auth import User
+from app.models.auth import User, Role
+from app.core.security import hash_password
 from app.models.billing import (
     Vendor,
     CategoryPricingDefault,
@@ -1301,6 +1304,65 @@ class SaleService:
             raise ResourceNotFoundException(f"Customer '{customer_id}' not found in your tenant")
 
     @staticmethod
+    async def _resolve_or_create_customer(
+        db: AsyncSession,
+        current_user: User,
+        customer_id: Optional[str],
+        customer_name: Optional[str],
+        customer_phone: Optional[str],
+    ) -> Optional[str]:
+        """Return the authoritative customer_id a sale must be linked to, so a
+        purchase always attaches to ONE real Customer record and the buyer shows
+        up in the Customer Directory (classified WALK-IN, or HYBRID if they also
+        hold a scheme).
+
+        - An explicit customer_id (existing customer picked in New Sale) is used
+          as-is; it was already tenant-validated by the caller.
+        - Otherwise, when a mobile number is given, an existing own-tenant
+          customer with that number is REUSED — the same person keeps one
+          Customer ID across repeat purchases and later scheme enrollment; no
+          duplicate is ever created.
+        - Only when no existing customer matches is a new minimal walk-in
+          Customer created (passwordless, like a Google account: a random,
+          discarded secret keeps the NOT NULL column honest). This is the single
+          place New Sale mints a customer identity."""
+        if customer_id:
+            return customer_id
+        if customer_phone:
+            existing = (await db.execute(
+                select(User.id).where(
+                    User.phone == customer_phone,
+                    User.tenant_id == current_user.tenant_id,
+                )
+            )).scalar_one_or_none()
+            if existing:
+                return existing
+        # No customer_id and no matching phone: this is a brand-new buyer. Only
+        # create a record when we at least have a name to identify them by.
+        if not customer_name:
+            return None
+
+        role = (await db.execute(select(Role).where(Role.name == ROLE_CUSTOMER))).scalar_one_or_none()
+        if not role:
+            raise ResourceNotFoundException("Customer role configuration missing in database")
+        customer_code = await CustomerRepository.allocate_customer_code(db, current_user.tenant_id)
+        user = User(
+            id=f"usr_{uuid.uuid4().hex[:12]}",
+            tenant_id=current_user.tenant_id,
+            role_id=role.id,
+            phone=customer_phone,
+            hashed_password=hash_password(secrets.token_urlsafe(32)),
+            name=customer_name,
+            kyc_status="Pending",
+            customer_code=customer_code,
+            member_since=datetime.now(timezone.utc).strftime("%B %Y"),
+            is_active=True,
+        )
+        db.add(user)
+        await db.flush()  # assign user.id before the Sale row references it
+        return user.id
+
+    @staticmethod
     async def create_sale(db: AsyncSession, current_user: User, req: SaleCreateRequest) -> SaleResponse:
         await SaleService._validate_customer_id(db, current_user, req.customer_id)
         item, rate = await SaleService._get_sellable_item_and_rate(db, current_user, req.product_code)
@@ -1340,13 +1402,22 @@ class SaleService:
             breakdown.final_amount, breakdown.tax_rate_percent, breakdown.gst_applied, purchase_cost_snapshot
         )
 
+        # Attach this purchase to ONE authoritative Customer. A walk-in typed
+        # straight into New Sale (name + mobile, no picked customer) is created
+        # or matched here, so the buyer appears in the Customer Directory and is
+        # classified WALK-IN. Runs only after the item is confirmed SOLD, so a
+        # failed sale never mints a stray customer.
+        resolved_customer_id = await SaleService._resolve_or_create_customer(
+            db, current_user, req.customer_id, req.customer_name, req.customer_phone
+        )
+
         sale_id = f"sl_{uuid.uuid4().hex[:12]}"
         sale = Sale(
             id=sale_id,
             tenant_id=current_user.tenant_id,
             invoice_number=SaleService._generate_invoice_number(),
             inventory_item_id=item.id,
-            customer_id=req.customer_id,
+            customer_id=resolved_customer_id,
             customer_name=req.customer_name,
             customer_phone=req.customer_phone,
             product_code=item.product_code,

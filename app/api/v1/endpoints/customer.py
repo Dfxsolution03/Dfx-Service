@@ -20,6 +20,7 @@ from app.schemas.customer import (
     BranchStatusUpdateRequest,
     AdminCustomerCreateRequest,
     AdminCustomerUpdateRequest,
+    AdminCustomerEnrollRequest,
 )
 from app.services.customer_service import CustomerService
 
@@ -374,6 +375,31 @@ async def create_customer_admin(
     )
 
 
+@router.post(
+    "/admin/customers/{customer_id}/enroll",
+    response_model=StandardSuccessResponse,
+    status_code=status.HTTP_201_CREATED,
+    summary="Enrol Existing Customer In A Scheme (Admin)",
+    description=(
+        "Enrol an existing own-tenant customer into a scheme without creating a "
+        "second customer. Keeps one Customer ID: a WALK-IN who joins a scheme "
+        "becomes HYBRID; a NEW customer becomes SCHEME CUSTOMER."
+    ),
+)
+async def enroll_existing_customer(
+    customer_id: str,
+    req: AdminCustomerEnrollRequest,
+    current_user: User = Depends(require_admin_or_staff_module("customers")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    result = await CustomerService.enroll_existing_customer(db, current_user, customer_id, req)
+    return StandardSuccessResponse(
+        success=True,
+        message="Customer enrolled successfully",
+        data={"customer": result.model_dump()},
+    )
+
+
 @router.put(
     "/admin/customers/{customer_id}",
     response_model=StandardSuccessResponse,
@@ -406,10 +432,16 @@ async def list_customers_admin(
     page: int = Query(1, ge=1),
     limit: int = Query(20, ge=1, le=100),
     search: Optional[str] = Query(None),
+    customer_type: Optional[str] = Query(
+        None,
+        description="Filter by derived classification: WALK-IN, SCHEME CUSTOMER, HYBRID, or NEW.",
+    ),
     current_user: User = Depends(require_admin_or_staff_module("customers")),
     db: AsyncSession = Depends(get_async_db),
 ):
-    customers, pagination = await CustomerService.get_customers_for_admin(db, current_user, page, limit, search)
+    customers, pagination = await CustomerService.get_customers_for_admin(
+        db, current_user, page, limit, search, customer_type
+    )
     return StandardSuccessResponse(
         success=True,
         message="Customers retrieved successfully",

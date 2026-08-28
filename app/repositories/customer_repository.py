@@ -1,5 +1,5 @@
 from typing import List, Optional, Tuple
-from sqlalchemy import select, update, delete, func, or_
+from sqlalchemy import select, update, delete, func, or_, and_
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import joinedload
@@ -223,10 +223,20 @@ class CustomerRepository:
 
     @staticmethod
     async def get_customers_by_tenant(
-        db: AsyncSession, tenant_id: str, page: int, limit: int, search: Optional[str]
+        db: AsyncSession, tenant_id: str, page: int, limit: int, search: Optional[str],
+        customer_type: Optional[str] = None,
     ) -> Tuple[List[User], int]:
         """Admin: paginated, searchable list of Customer-role users for the
-        tenant — the one "list all customers" query this codebase never had."""
+        tenant — the one "list all customers" query this codebase never had.
+
+        customer_type filters by DERIVED classification (WALK-IN / SCHEME
+        CUSTOMER / HYBRID / NEW) using correlated EXISTS on real purchase and
+        enrollment activity, so both the returned page AND the total count
+        reflect the filtered set — pagination is always over the current filter,
+        never the whole customer base."""
+        from app.models.billing import Sale
+        from app.models.enrollment import SchemeEnrollment
+
         conditions = [User.tenant_id == tenant_id, Role.name == ROLE_CUSTOMER]
         if search:
             like = f"%{search}%"
@@ -241,6 +251,26 @@ class CustomerRepository:
                     User.customer_code.ilike(like),
                 )
             )
+
+        if customer_type:
+            has_sale = (
+                select(Sale.id)
+                .where(Sale.customer_id == User.id, Sale.tenant_id == tenant_id)
+                .exists()
+            )
+            has_enr = (
+                select(SchemeEnrollment.id)
+                .where(SchemeEnrollment.customer_id == User.id, SchemeEnrollment.tenant_id == tenant_id)
+                .exists()
+            )
+            if customer_type == "WALK-IN":
+                conditions.append(and_(has_sale, ~has_enr))
+            elif customer_type == "SCHEME CUSTOMER":
+                conditions.append(and_(has_enr, ~has_sale))
+            elif customer_type == "HYBRID":
+                conditions.append(and_(has_sale, has_enr))
+            elif customer_type == "NEW":
+                conditions.append(and_(~has_sale, ~has_enr))
 
         count_stmt = select(func.count(User.id)).join(Role, User.role_id == Role.id)
         list_stmt = select(User).join(Role, User.role_id == Role.id).options(joinedload(User.role))
