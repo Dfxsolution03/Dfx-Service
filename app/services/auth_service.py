@@ -232,14 +232,11 @@ class AuthService:
                     "Select your jewellery store to finish signing in with Google.",
                     field="tenant_id",
                 )
-            # DOB is required to CREATE a new customer (approved Phase-1 rule),
-            # but never for an existing Google user logging in — hence enforced
-            # here on the registration branch only, not on GoogleLoginRequest.
-            if req.date_of_birth is None:
-                raise ValidationException(
-                    "Date of birth is required to finish creating your account.",
-                    field="date_of_birth",
-                )
+            # DOB is optional for Google-created accounts: Google authentication
+            # must complete without it. If the client did supply a DOB it is
+            # preserved and persisted below; otherwise the column stays null and
+            # the customer can set it later via the Profile/Edit Profile flow.
+            # Normal form signup keeps DOB required (SignupRequest / register_customer).
             user = await AuthService._register_google_customer(
                 db, identity, req.tenant_id, req.date_of_birth
             )
