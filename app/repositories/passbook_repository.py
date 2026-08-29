@@ -77,10 +77,28 @@ class PassbookRepository:
         }
 
     @staticmethod
+    async def next_entry_number(
+        db: AsyncSession, enrollment_id: str, tenant_id: str
+    ) -> int:
+        """Next per-enrollment passbook entry_number = MAX(entry_number) + 1.
+
+        Safe under concurrent contributions because the only caller
+        (PaymentService.create_manual_payment) already holds the enrollment row
+        lock, so two contributions to the same enrollment serialise before they
+        reach here. The UNIQUE(enrollment_id, entry_number) constraint is the
+        backstop if that assumption is ever violated."""
+        stmt = select(func.coalesce(func.max(PassbookEntry.entry_number), 0)).where(
+            PassbookEntry.enrollment_id == enrollment_id,
+            PassbookEntry.tenant_id == tenant_id,
+        )
+        current_max = int((await db.execute(stmt)).scalar_one())
+        return current_max + 1
+
+    @staticmethod
     async def create_entry(db: AsyncSession, entry: PassbookEntry) -> PassbookEntry:
-        """
-        Infrastructure for the future Payments module — not called by any
-        route in this module (entries are never created automatically here).
-        """
+        """Persist one passbook entry. Flushed so a duplicate
+        (enrollment_id, entry_number) fails inside the caller's transaction and
+        rolls the whole contribution back rather than surfacing at commit."""
         db.add(entry)
+        await db.flush()
         return entry
