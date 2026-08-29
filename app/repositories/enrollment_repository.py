@@ -207,6 +207,27 @@ class SchemeRedemptionRepository:
         return float((await db.execute(stmt)).scalar_one())
 
     @staticmethod
+    async def sum_successful_contributions_by_enrollment(
+        db: AsyncSession, tenant_id: str
+    ) -> dict[str, float]:
+        """Batched sibling of sum_successful_contributions: SUM of SUCCESSFUL
+        contributions per enrollment for the whole tenant, in one GROUP BY query.
+        Lets the admin enrollments list carry an authoritative total_paid without
+        an N+1 of per-enrollment balance calls. Same SUCCESS-only, no-bonus rule."""
+        stmt = (
+            select(
+                Payment.enrollment_id,
+                func.coalesce(func.sum(Payment.amount), 0.0),
+            )
+            .where(
+                Payment.tenant_id == tenant_id,
+                Payment.payment_status == PAYMENT_STATUS_SUCCESS,
+            )
+            .group_by(Payment.enrollment_id)
+        )
+        return {row[0]: float(row[1]) for row in (await db.execute(stmt)).all()}
+
+    @staticmethod
     async def count_successful_contributions(
         db: AsyncSession, enrollment_id: str, tenant_id: str
     ) -> int:

@@ -77,7 +77,9 @@ def maturity_amount(monthly: float, duration: int) -> float:
     return round((monthly or 0) * (duration or 0), 2)
 
 
-def _to_admin_response(enrollment: SchemeEnrollment) -> EnrollmentResponse:
+def _to_admin_response(
+    enrollment: SchemeEnrollment, total_paid: float = 0.0
+) -> EnrollmentResponse:
     monthly, duration = resolve_enrollment_terms(enrollment, enrollment.scheme)
     return EnrollmentResponse(
         id=enrollment.id,
@@ -97,6 +99,7 @@ def _to_admin_response(enrollment: SchemeEnrollment) -> EnrollmentResponse:
         monthly_amount=monthly,
         duration_months=duration,
         maturity_amount=maturity_amount(monthly, duration),
+        total_paid=_round2(total_paid),
         created_at=enrollment.created_at,
         updated_at=enrollment.updated_at,
     )
@@ -137,7 +140,14 @@ class EnrollmentService:
             )
         else:
             enrollments = await EnrollmentRepository.get_enrollments_by_tenant(db, current_user.tenant_id)
-        return [_to_admin_response(e) for e in enrollments]
+        # One batched GROUP BY over the tenant's SUCCESS payments — authoritative
+        # total_paid per enrollment without an N+1 of per-enrollment balance calls.
+        paid_by_enrollment = await SchemeRedemptionRepository.sum_successful_contributions_by_enrollment(
+            db, current_user.tenant_id
+        )
+        return [
+            _to_admin_response(e, paid_by_enrollment.get(e.id, 0.0)) for e in enrollments
+        ]
 
     @staticmethod
     async def get_enrollment_by_id(
@@ -149,7 +159,10 @@ class EnrollmentService:
         enrollment = await EnrollmentRepository.get_enrollment_by_id(db, enrollment_id, current_user.tenant_id)
         if not enrollment:
             raise ResourceNotFoundException(f"Enrollment ID '{enrollment_id}' not found")
-        return _to_admin_response(enrollment)
+        total_paid = await SchemeRedemptionRepository.sum_successful_contributions(
+            db, enrollment.id, current_user.tenant_id
+        )
+        return _to_admin_response(enrollment, total_paid)
 
     @staticmethod
     async def update_remarks(

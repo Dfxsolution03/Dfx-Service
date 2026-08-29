@@ -32,6 +32,10 @@ class EnrollmentResponse(BaseModel):
     monthly_amount: float = 0.0
     duration_months: int = 0
     maturity_amount: float = 0.0
+    # Authoritative SUM of this enrollment's SUCCESSFUL contributions (ledger
+    # truth, never monthly x months_paid). Lets Collections show the real paid
+    # total that agrees with Payments/Passbook. 0.0 when unresolved by the caller.
+    total_paid: float = 0.0
     created_at: datetime
     updated_at: datetime
 
