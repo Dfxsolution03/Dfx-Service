@@ -222,10 +222,14 @@ async def list_inventory_items(
     stock_status: Optional[str] = Query(None, description="IN_STOCK | SOLD | INACTIVE"),
     category: Optional[str] = Query(None),
     vendor_id: Optional[str] = Query(None),
+    subcategory: Optional[str] = Query(None),
+    purity: Optional[str] = Query(None),
     current_user: User = Depends(require_admin_or_staff_module("billing_inventory")),
     db: AsyncSession = Depends(get_async_db),
 ):
-    result = await InventoryService.list_items(db, current_user, page, limit, search, stock_status, category, vendor_id)
+    result = await InventoryService.list_items(
+        db, current_user, page, limit, search, stock_status, category, vendor_id, subcategory, purity
+    )
     return StandardSuccessResponse(
         success=True,
         message="Inventory items retrieved successfully",

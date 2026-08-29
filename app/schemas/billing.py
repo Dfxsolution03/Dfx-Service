@@ -14,7 +14,14 @@ SalePaymentStatus = Literal["PAID", "PENDING", "PARTIAL", "REFUNDED", "PARTIALLY
 SaleStatus = Literal["COMPLETED", "RETURNED", "CANCELLED"]
 ReturnType = Literal["RETURN", "CANCELLATION"]
 InspectionOutcome = Literal["RESALABLE", "DAMAGED"]
+# Read/back-compat vocabulary: existing rows may still carry the retired
+# HYBRID label, so responses must still accept it. New writes never set it.
 PricingMode = Literal["AUTO", "HYBRID", "MANUAL"]
+# Write vocabulary — HYBRID is retired as a pricing mode. A sale is either
+# AUTO (engine-priced) or MANUAL (admin customer_price override, still bound by
+# the same safe-price/break-even rules). NOTE: unrelated to the customer
+# classification HYBRID (WALK-IN + SCHEME), which is a different concept.
+PricingModeInput = Literal["AUTO", "MANUAL"]
 DefaultSource = Literal["VENDOR", "CATEGORY", "STORE", "NONE"]
 
 
@@ -142,12 +149,16 @@ class InventoryItemCreateRequest(BaseModel):
     purchase_date: Optional[date] = None
     purchase_invoice_ref: Optional[str] = Field(None, max_length=100)
     purchase_rate_per_gram: Optional[float] = Field(None, ge=0)
-    purchase_cost: Optional[float] = Field(None, ge=0)
+    # Required for NEW inventory — vendor acquisition cost is the basis for
+    # vendor-cost profit and break-even/safe-price guidance, so an item can
+    # never enter stock without it. Existing null-cost rows are untouched and
+    # are instead blocked at sale time (see BillingService.create_sale).
+    purchase_cost: float = Field(..., gt=0)
 
-    # None = not supplied → inherit from the Vendor -> Category -> Store
-    # hierarchy at create time (see BillingService.create_item). An explicit 0
-    # is a configured value and is kept as-is. type is paired with its value:
-    # when the value is inherited, the resolved type comes with it.
+    # None = not supplied → inherit from Store defaults at create time (see
+    # BillingService.create_item). Category/Vendor default tiers are retired.
+    # An explicit 0 is a configured value and is kept as-is. type is paired
+    # with its value: when the value is inherited, the resolved type comes with it.
     making_charge_type: Optional[ChargeType] = None
     making_charge_value: Optional[float] = Field(None, ge=0)
     wastage_type: Optional[ChargeType] = None
@@ -160,7 +171,7 @@ class InventoryItemCreateRequest(BaseModel):
     # Required, no default — a GST/tax rate must be a conscious choice per
     # item, never silently assumed (see app/models/billing.py).
     tax_rate_percent: float = Field(..., ge=0, le=100)
-    pricing_mode: Optional[PricingMode] = None
+    pricing_mode: Optional[PricingModeInput] = None
     # Required — a product image is mandatory to create an item. The client
     # uploads the file first (POST /billing/inventory/image, same storage
     # provider as the per-item upload) and passes the returned storage path
@@ -200,7 +211,7 @@ class InventoryItemUpdateRequest(BaseModel):
     stone_charge_amount: Optional[float] = Field(None, ge=0)
     other_charges_amount: Optional[float] = Field(None, ge=0)
     tax_rate_percent: Optional[float] = Field(None, ge=0, le=100)
-    pricing_mode: Optional[PricingMode] = None
+    pricing_mode: Optional[PricingModeInput] = None
 
     stock_status: Optional[Literal["IN_STOCK", "INACTIVE"]] = None
 
@@ -274,7 +285,9 @@ class BulkPurchaseLineItem(BaseModel):
     gross_weight_grams: float = Field(..., gt=0)
     net_gold_weight_grams: float = Field(..., gt=0)
     purchase_rate_per_gram: Optional[float] = Field(None, ge=0)
-    purchase_cost: Optional[float] = Field(None, ge=0)
+    # Required per line — same rule as single-item create: no stock without a
+    # vendor acquisition cost.
+    purchase_cost: float = Field(..., gt=0)
     making_charge_type: ChargeType = "PERCENTAGE"
     making_charge_value: float = Field(0, ge=0)
     wastage_type: ChargeType = "PERCENTAGE"
@@ -283,7 +296,7 @@ class BulkPurchaseLineItem(BaseModel):
     stone_charge_amount: float = Field(0, ge=0)
     other_charges_amount: float = Field(0, ge=0)
     tax_rate_percent: float = Field(..., ge=0, le=100)
-    pricing_mode: Optional[PricingMode] = None
+    pricing_mode: Optional[PricingModeInput] = None
 
     @model_validator(mode="after")
     def _net_not_more_than_gross(self) -> "BulkPurchaseLineItem":
@@ -426,8 +439,8 @@ class SaleCreateRequest(BaseModel):
     gst_applied: bool = True
     # Informational only — if omitted, inferred as MANUAL when customer_price
     # is given, AUTO otherwise (see SaleService.create_sale). Never changes
-    # how the amount is actually computed.
-    pricing_mode: Optional[PricingMode] = None
+    # how the amount is actually computed. HYBRID retired.
+    pricing_mode: Optional[PricingModeInput] = None
     payment_method: PaymentMethod = "CASH"
     # The Admin's INTENT for this bill, not the stored status. The stored
     # Sale.payment_status is always derived from the ledger the backend writes

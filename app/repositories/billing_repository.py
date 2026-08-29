@@ -115,6 +115,8 @@ class InventoryRepository:
         stock_status: Optional[str] = None,
         category: Optional[str] = None,
         vendor_id: Optional[str] = None,
+        subcategory: Optional[str] = None,
+        purity: Optional[str] = None,
     ) -> Tuple[List[InventoryItem], int, float]:
         conditions = [InventoryItem.tenant_id == tenant_id]
         if search:
@@ -128,6 +130,10 @@ class InventoryRepository:
             conditions.append(InventoryItem.category == category)
         if vendor_id:
             conditions.append(InventoryItem.vendor_id == vendor_id)
+        if subcategory:
+            conditions.append(InventoryItem.subcategory == subcategory)
+        if purity:
+            conditions.append(InventoryItem.purity == purity)
 
         count_stmt = select(func.count(InventoryItem.id))
         sum_stmt = select(func.coalesce(func.sum(InventoryItem.net_gold_weight_grams), 0.0))

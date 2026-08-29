@@ -306,7 +306,19 @@ class BillingCalculationEngine:
         not a profit rule. No line is ever cut below 0.
         """
         if purchase_cost is None:
-            return None
+            # No fake fallback: without a vendor cost there is no honest
+            # break-even to judge against. Return an explicit blocking state so
+            # the UI shows a clear "Purchase Cost Required" message and the sale
+            # cannot be safely finalized (create_sale rejects it too).
+            return {
+                "status": "PURCHASE_COST_REQUIRED",
+                "is_loss": False,
+                "requested_price": _round2(requested_price) if requested_price is not None else None,
+                "minimum_safe_price": None,
+                "achievable_price": None,
+                "reductions": [],
+                "message": "Purchase Cost must be entered on this item before it can be sold.",
+            }
         factor = (1 + full.tax_rate_percent / 100) if full.gst_applied else 1.0
         break_even_final = _round2(purchase_cost * factor)
         p_full = full.final_amount  # natural asking price (no discount)
@@ -637,16 +649,13 @@ class BillingDefaultsService:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
 
-        vendor = (
-            await VendorRepository.get_by_id(db, vendor_id, current_user.tenant_id) if vendor_id else None
-        )
-        cat_default = (
-            await CategoryDefaultRepository.get_by_category(db, current_user.tenant_id, category)
-            if category else None
-        )
+        # STORE defaults are the ONLY active pricing-default source. The Vendor
+        # and Category tiers are retired: their tables/data are kept for
+        # compatibility, but pricing resolution never falls through to them.
+        # vendor_id/category are accepted (callers still pass them) but ignored.
         store_default = await TenantBillingDefaultsRepository.get_by_tenant(db, current_user.tenant_id)
 
-        tiers = [("VENDOR", vendor), ("CATEGORY", cat_default), ("STORE", store_default)]
+        tiers = [("STORE", store_default)]
 
         def resolve_pair(type_attr: str, value_attr: str):
             for source, tier in tiers:
@@ -740,11 +749,14 @@ class InventoryService:
         stock_status: Optional[str],
         category: Optional[str],
         vendor_id: Optional[str] = None,
+        subcategory: Optional[str] = None,
+        purity: Optional[str] = None,
     ) -> InventoryItemListResponse:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
         items, total, total_gold_weight_grams = await InventoryRepository.list_by_tenant(
-            db, current_user.tenant_id, page, limit, search, stock_status, category, vendor_id
+            db, current_user.tenant_id, page, limit, search, stock_status, category, vendor_id,
+            subcategory, purity,
         )
         return InventoryItemListResponse(
             items=[InventoryService._build_response(i, current_user) for i in items],
@@ -1366,6 +1378,16 @@ class SaleService:
     async def create_sale(db: AsyncSession, current_user: User, req: SaleCreateRequest) -> SaleResponse:
         await SaleService._validate_customer_id(db, current_user, req.customer_id)
         item, rate = await SaleService._get_sellable_item_and_rate(db, current_user, req.product_code)
+        # Vendor cost is compulsory to sell: without it there is no break-even
+        # to protect against a loss. New items always carry one; a legacy
+        # null-cost item is blocked here (never backfilled or guessed) until an
+        # Admin edits it and enters the real Purchase Cost. Checked before any
+        # state change so a rejected sale mutates nothing.
+        if item.purchase_cost is None:
+            raise ValidationException(
+                "Purchase Cost must be entered on this item before it can be sold. "
+                "Edit the inventory item and set its vendor Purchase Cost."
+            )
         breakdown = BillingCalculationEngine.calculate(
             item, rate.rate_24k, rate.source or "MANUAL", rate.effective_date,
             req.discount_amount, req.gst_applied, req.customer_price,
