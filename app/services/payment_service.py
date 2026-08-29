@@ -34,6 +34,33 @@ def _round3(v: float) -> float:
     return round(v, 3)
 
 
+def _derive_months(amount: float, eff_monthly: float) -> int:
+    """Whole-month installments a contribution covers, DERIVED from the amount and
+    the enrollment's own monthly amount — never taken from the client.
+
+    Amount-first business rule: a scheme contribution must equal
+    monthly_amount x N whole months. A non-multiple (e.g. 1500 on a 1000/month
+    enrollment) is REJECTED, never silently under-credited as 1 month — that
+    mismatch was the root cause of months_paid disagreeing with the ledger. The
+    per-month capacity check in _apply_successful_contribution then bounds N to
+    the remaining duration, which — because amount == monthly x N — is exactly
+    the base-maturity (monthly x duration) rupee cap, so contributions can never
+    exceed the enrollment's base maturity."""
+    if not eff_monthly or eff_monthly <= 0:
+        raise ValidationException(
+            "This enrollment has no monthly amount configured; a scheme "
+            "contribution cannot be recorded against it."
+        )
+    months = int(round(amount / eff_monthly))
+    if months < 1 or abs(amount - eff_monthly * months) > 0.005:
+        raise ValidationException(
+            f"Contribution must be a whole-month multiple of the {eff_monthly:g} "
+            f"monthly amount (e.g. {eff_monthly:g}, {eff_monthly * 2:g}, "
+            f"{eff_monthly * 3:g}); got {amount:g}."
+        )
+    return months
+
+
 def _to_admin_response(payment: Payment) -> PaymentResponse:
     return PaymentResponse(
         id=payment.id,
@@ -201,7 +228,6 @@ class PaymentService:
             raise ForbiddenException("Tenant context required")
         tenant_id = current_user.tenant_id
 
-        months = req.months_covered or 1
         status = req.payment_status or STATUS_SUCCESS
 
         # Idempotency: a caller-supplied key doubles as the payment_reference,
@@ -245,16 +271,12 @@ class PaymentService:
         eff_monthly, eff_duration = resolve_enrollment_terms(enrollment, scheme)
         duration = eff_duration
 
-        # Advance contributions must pay the exact monthly amount × months so
-        # coverage and rupees stay reconciled. A plain 1-month contribution keeps
-        # its historical freedom (partial monthly amounts still allowed).
-        if months > 1:
-            expected = _round2(eff_monthly * months)
-            if _round2(req.amount) != expected:
-                raise ValidationException(
-                    f"A {months}-month advance must be exactly {expected} "
-                    f"({eff_monthly} × {months}); got {req.amount}"
-                )
+        # Amount-first rule: the installments this payment covers are DERIVED from
+        # the amount and the enrollment's monthly amount, never taken from the
+        # client. A non-multiple is rejected here (backend is authoritative);
+        # req.months_covered is ignored. Capacity/base-maturity is enforced by
+        # _apply_successful_contribution using this derived count.
+        months = _derive_months(req.amount, eff_monthly)
 
         # Coverage only advances for a SUCCESSFUL contribution. A failed/pending
         # payment creates no coverage and no passbook entry.
@@ -389,15 +411,11 @@ class PaymentService:
                         f"Scheme ID '{enrollment.scheme_id}' not found"
                     )
                 eff_monthly, eff_duration = resolve_enrollment_terms(enrollment, scheme)
-                months = payment.months_covered or 1
-                # Advance contributions must still pay monthly x months exactly.
-                if months > 1:
-                    expected = _round2(eff_monthly * months)
-                    if _round2(payment.amount) != expected:
-                        raise ValidationException(
-                            f"A {months}-month advance must be exactly {expected} "
-                            f"({eff_monthly} × {months}); got {payment.amount}"
-                        )
+                # Same amount-first rule as create: installments derived from the
+                # (possibly just-updated) amount, non-multiple rejected. Persist
+                # the corrected months_covered on the payment.
+                months = _derive_months(payment.amount, eff_monthly)
+                payment.months_covered = months
                 passbook_entry_id = await PaymentService._apply_successful_contribution(
                     db, current_user, enrollment, eff_duration, months, payment
                 )
