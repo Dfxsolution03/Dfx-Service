@@ -1,6 +1,6 @@
 import uuid
 from datetime import date, datetime, timezone
-from typing import List
+from typing import List, Optional
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -125,11 +125,18 @@ class EnrollmentService:
     # ─── Admin (read-only) ───
 
     @staticmethod
-    async def get_enrollments(db: AsyncSession, current_user: User) -> List[EnrollmentResponse]:
+    async def get_enrollments(
+        db: AsyncSession, current_user: User, customer_id: Optional[str] = None
+    ) -> List[EnrollmentResponse]:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
 
-        enrollments = await EnrollmentRepository.get_enrollments_by_tenant(db, current_user.tenant_id)
+        if customer_id:
+            enrollments = await EnrollmentRepository.get_enrollments_by_customer(
+                db, current_user.tenant_id, customer_id
+            )
+        else:
+            enrollments = await EnrollmentRepository.get_enrollments_by_tenant(db, current_user.tenant_id)
         return [_to_admin_response(e) for e in enrollments]
 
     @staticmethod
@@ -362,6 +369,8 @@ class SchemeBalanceService:
             monthly_amount=eff_monthly,
             duration_months=eff_duration,
             maturity_amount=maturity_amount(eff_monthly, eff_duration),
+            months_paid=enrollment.months_paid,
+            next_due_date=enrollment.next_due_date,
             successful_payment_count=payment_count,
             total_paid=total_paid,
             total_redeemed=total_redeemed,

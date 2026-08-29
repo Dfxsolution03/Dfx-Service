@@ -102,6 +102,10 @@ class EnrollmentBalanceResponse(BaseModel):
     monthly_amount: float
     duration_months: int
     maturity_amount: float = 0.0
+    # Coverage state, so a caller (e.g. the manual-payment picker) can show
+    # months paid / remaining and the next due date without a second call.
+    months_paid: int = 0
+    next_due_date: Optional[date] = None
     successful_payment_count: int
     total_paid: float
     total_redeemed: float

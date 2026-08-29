@@ -1,4 +1,6 @@
-from fastapi import APIRouter, Depends, status
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query, status
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.database import get_async_db
@@ -22,13 +24,15 @@ router = APIRouter()
     response_model=StandardSuccessResponse,
     status_code=status.HTTP_200_OK,
     summary="List Enrollments (Admin)",
-    description="Returns all scheme enrollments for the admin's tenant. Read-only.",
+    description="Returns scheme enrollments for the admin's tenant, newest first. "
+    "Optional customer_id filters to one customer's enrollments. Read-only.",
 )
 async def list_enrollments(
+    customer_id: Optional[str] = Query(None, description="Filter to a single customer's enrollments"),
     current_user: User = Depends(require_admin_or_staff_module("enrollments")),
     db: AsyncSession = Depends(get_async_db),
 ):
-    enrollments = await EnrollmentService.get_enrollments(db, current_user)
+    enrollments = await EnrollmentService.get_enrollments(db, current_user, customer_id)
     return StandardSuccessResponse(
         success=True,
         message="Enrollments retrieved successfully",
