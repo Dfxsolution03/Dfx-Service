@@ -14,7 +14,7 @@ from reportlab.lib.units import mm
 from reportlab.pdfgen import canvas
 from openpyxl import Workbook
 
-from app.models.billing import Sale
+from app.models.billing import Sale, Quotation
 from app.models.auth import Tenant
 
 
@@ -89,6 +89,100 @@ def build_invoice_pdf(sale: Sale, tenant: Optional[Tenant]) -> bytes:
     y -= 15 * mm
     c.setFont("Helvetica-Oblique", 8)
     c.drawString(20 * mm, y, "This is a system-generated invoice.")
+
+    c.showPage()
+    c.save()
+    return buf.getvalue()
+
+
+def build_quotation_pdf(quotation: Quotation, tenant: Optional[Tenant]) -> bytes:
+    """Customer-facing quotation PDF. Same reportlab path as build_invoice_pdf —
+    NO second PDF architecture. Reads the frozen breakdown_json snapshot the
+    engine computed at generation time (never recomputed here) plus the scheme
+    PREVIEW; writes nothing.
+
+    Customer-facing privacy: Gold Profit is folded into the Gold Value line (so
+    the visible rows still reconcile to Subtotal — subtotal_before_tax already
+    includes gold profit), and purchase cost / vendor cost / internal margin /
+    profit-loss are NEVER drawn. Clearly marked a quotation, not a tax invoice.
+    """
+    b = quotation.breakdown_json or {}
+    scheme_items = (quotation.scheme_breakdown_json or {}).get("items", [])
+
+    def g(key, default=0.0):
+        v = b.get(key)
+        return v if v is not None else default
+
+    rows = [
+        ("Gold Value", g("gold_value_amount") + g("gold_profit_amount")),
+        (f"Making Charge ({b.get('making_charge_type', '')})", g("making_charge_amount")),
+        (f"Wastage ({b.get('wastage_type', '')})", g("wastage_amount")),
+        *([("Stone Charge", g("stone_charge_amount"))] if g("stone_charge_amount") > 0 else []),
+        *([("Other Charges", g("other_charges_amount"))] if g("other_charges_amount") > 0 else []),
+        ("Subtotal", g("subtotal_before_tax")),
+        (f"GST ({g('tax_rate_percent')}%)" if b.get("gst_applied") else "GST (not applied)", g("tax_amount")),
+        *([("Discount", -g("discount_amount"))] if g("discount_amount") > 0 else []),
+        ("Grand Total", quotation.final_amount),
+    ]
+
+    buf = io.BytesIO()
+    c = canvas.Canvas(buf, pagesize=A4)
+    width, height = A4
+    y = height - 25 * mm
+
+    c.setFont("Helvetica-Bold", 16)
+    c.drawString(20 * mm, y, (tenant.name if tenant else "Quotation"))
+    c.setFont("Helvetica", 9)
+    y -= 6 * mm
+    if tenant and tenant.gst_number:
+        c.drawString(20 * mm, y, f"GSTIN: {tenant.gst_number}")
+        y -= 5 * mm
+    if tenant and tenant.contact_phone:
+        c.drawString(20 * mm, y, f"Phone: {tenant.contact_phone}")
+        y -= 5 * mm
+
+    y -= 4 * mm
+    c.setFont("Helvetica-Bold", 12)
+    c.drawString(20 * mm, y, f"Quotation: {quotation.quotation_number}")
+    c.drawRightString(width - 20 * mm, y, quotation.created_at.strftime("%d-%b-%Y %H:%M"))
+    y -= 6 * mm
+    c.setFont("Helvetica", 10)
+    c.drawString(20 * mm, y, f"Customer: {quotation.customer_name or 'Walk-in'}")
+    if quotation.customer_phone:
+        c.drawRightString(width - 20 * mm, y, quotation.customer_phone)
+    y -= 8 * mm
+
+    c.setFont("Helvetica-Bold", 10)
+    c.drawString(20 * mm, y, f"{quotation.product_code} — {quotation.product_name}")
+    y -= 5 * mm
+    c.setFont("Helvetica", 9)
+    net = g("net_gold_weight_grams")
+    c.drawString(20 * mm, y, f"Purity {b.get('purity', '')} · Net Gold {net}g")
+    y -= 10 * mm
+
+    c.line(20 * mm, y, width - 20 * mm, y)
+    y -= 8 * mm
+    c.setFont("Helvetica", 10)
+    for label, value in rows:
+        c.drawString(20 * mm, y, label)
+        c.drawRightString(width - 20 * mm, y, f"Rs.{value:,.2f}")
+        y -= 6 * mm
+
+    # Scheme preview (read-only — no balance is spent by a quotation).
+    if (quotation.scheme_amount_total or 0) > 0:
+        for it in scheme_items:
+            c.drawString(20 * mm, y, f"Scheme {it.get('enrollment_number', '')}")
+            c.drawRightString(width - 20 * mm, y, f"- Rs.{float(it.get('applied_amount', 0)):,.2f}")
+            y -= 6 * mm
+        c.setFont("Helvetica-Bold", 10)
+        c.drawString(20 * mm, y, "Payable After Scheme")
+        c.drawRightString(width - 20 * mm, y, f"Rs.{quotation.outstanding_amount:,.2f}")
+        y -= 6 * mm
+        c.setFont("Helvetica", 10)
+
+    y -= 9 * mm
+    c.setFont("Helvetica-Oblique", 8)
+    c.drawString(20 * mm, y, "This is a quotation, not a tax invoice. Prices are subject to the prevailing gold rate at the time of sale.")
 
     c.showPage()
     c.save()

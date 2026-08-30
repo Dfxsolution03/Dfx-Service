@@ -510,6 +510,26 @@ async def get_quotation(
     )
 
 
+@router.get(
+    "/billing/quotation/{quotation_id}/pdf",
+    status_code=status.HTTP_200_OK,
+    summary="Download Quotation PDF (Admin/Staff)",
+)
+async def download_quotation_pdf(
+    quotation_id: str,
+    current_user: User = Depends(require_admin_or_staff_module("billing_new_sale")),
+    db: AsyncSession = Depends(get_async_db),
+):
+    quotation = await QuotationService.get_quotation_orm(db, current_user, quotation_id)
+    tenant = (await db.execute(select(Tenant).where(Tenant.id == current_user.tenant_id))).scalar_one_or_none()
+    pdf_bytes = billing_export_service.build_quotation_pdf(quotation, tenant)
+    return Response(
+        content=pdf_bytes,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{quotation.quotation_number}.pdf"'},
+    )
+
+
 @router.post(
     "/billing/sell",
     response_model=StandardSuccessResponse,
@@ -627,12 +647,18 @@ async def list_sales(
     category: Optional[str] = Query(
         None, description="Product category filter (resolved via the linked inventory item)."
     ),
+    purity: Optional[str] = Query(
+        None, description="Purity filter, exact match on the frozen sale snapshot (e.g. 22K)."
+    ),
+    subcategory: Optional[str] = Query(
+        None, description="Product sub-category filter (resolved via the linked inventory item)."
+    ),
     current_user: User = Depends(require_admin_or_staff_module("billing_sales_history")),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await SaleService.list_sales(
         db, current_user, page, limit, search, date_from, date_to, payment_status, sale_status,
-        customer_id, product_code, category,
+        customer_id, product_code, category, purity, subcategory,
     )
     return StandardSuccessResponse(
         success=True,

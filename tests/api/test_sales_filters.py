@@ -13,15 +13,17 @@ import uuid
 import pytest
 
 
-async def _sell(db, admin, *, category, customer_id=None, customer_name=None):
+async def _sell(db, admin, *, category, customer_id=None, customer_name=None,
+                purity=None, subcategory=None):
     from app.services.billing_service import InventoryService, SaleService
     from app.schemas.billing import InventoryItemCreateRequest, SaleCreateRequest
     from app.core.constants import PURITY_KARATS
-    purity = next(iter(PURITY_KARATS))
+    if purity is None:
+        purity = next(iter(PURITY_KARATS))
     code = f"PC-{uuid.uuid4().hex[:8]}"
     await InventoryService.create_item(db, admin, InventoryItemCreateRequest(
-        product_code=code, product_name="Item", category=category, purity=purity,
-        gross_weight_grams=10.0, net_gold_weight_grams=9.0, tax_rate_percent=3.0,
+        product_code=code, product_name="Item", category=category, subcategory=subcategory,
+        purity=purity, gross_weight_grams=10.0, net_gold_weight_grams=9.0, tax_rate_percent=3.0,
     ))
     sale = await SaleService.create_sale(db, admin, SaleCreateRequest(
         product_code=code, customer_id=customer_id, customer_name=customer_name or "Walk In",
@@ -78,3 +80,35 @@ class TestSalesHistoryFilters:
         )
         assert res.total == 1
         assert res.sales[0].product_code == code
+
+    async def test_purity_filter(self, db_session, admin_user):
+        from app.services.billing_service import SaleService
+        from app.core.constants import PURITY_KARATS
+        purities = list(PURITY_KARATS)
+        p0, p1 = purities[0], purities[1]
+        await _set_rate(db_session, admin_user)
+        await _sell(db_session, admin_user, category="Rings", purity=p0)
+        await _sell(db_session, admin_user, category="Rings", purity=p1)
+        res = await SaleService.list_sales(
+            db_session, admin_user, 1, 50, None, None, None, purity=p0
+        )
+        assert res.total >= 1
+        assert all(s.purity == p0 for s in res.sales)
+        all_res = await SaleService.list_sales(db_session, admin_user, 1, 50, None, None, None)
+        # Purity filter must shrink the set and the filtered gold-weight KPI must
+        # never exceed the global one (it is the same query, just narrowed).
+        assert res.total < all_res.total
+        assert res.total_gold_weight_grams <= all_res.total_gold_weight_grams
+
+    async def test_subcategory_filter_via_inventory(self, db_session, admin_user):
+        from app.services.billing_service import SaleService
+        await _set_rate(db_session, admin_user)
+        await _sell(db_session, admin_user, category="Bangles", subcategory="Kada")
+        await _sell(db_session, admin_user, category="Bangles", subcategory="Plain")
+        res = await SaleService.list_sales(
+            db_session, admin_user, 1, 50, None, None, None, subcategory="Kada"
+        )
+        assert res.total >= 1
+        assert all(s.subcategory == "Kada" for s in res.sales)
+        all_res = await SaleService.list_sales(db_session, admin_user, 1, 50, None, None, None)
+        assert res.total < all_res.total

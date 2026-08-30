@@ -1545,12 +1545,15 @@ class SaleService:
         customer_id: Optional[str] = None,
         product_code: Optional[str] = None,
         category: Optional[str] = None,
+        purity: Optional[str] = None,
+        subcategory: Optional[str] = None,
     ) -> SaleListResponse:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
         sales, total, total_gold_weight_grams, total_outstanding = await SaleRepository.list_by_tenant(
             db, current_user.tenant_id, page, limit, search, date_from, date_to,
             payment_status, sale_status, customer_id, product_code, category,
+            purity, subcategory,
         )
         rows = [SaleService._build_response(s, current_user) for s in sales]
 
@@ -2835,6 +2838,18 @@ class QuotationService:
         if not q:
             raise ResourceNotFoundException(f"Quotation '{quotation_id}' not found")
         return QuotationService._rebuild_view(q, current_user)
+
+    @staticmethod
+    async def get_quotation_orm(db: AsyncSession, current_user: User, quotation_id: str) -> Quotation:
+        """Tenant-scoped ORM fetch for the PDF export — same authorization and
+        tenant isolation as get_quotation, returning the frozen row itself so the
+        exporter reads the stored breakdown snapshot without a recompute."""
+        if not current_user.tenant_id:
+            raise ForbiddenException("Tenant context required")
+        q = await QuotationRepository.get_by_id(db, quotation_id, current_user.tenant_id)
+        if not q:
+            raise ResourceNotFoundException(f"Quotation '{quotation_id}' not found")
+        return q
 
     @staticmethod
     async def list_quotations(db: AsyncSession, current_user: User) -> QuotationListResponse:

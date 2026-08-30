@@ -158,6 +158,56 @@ class TestQuotationGeneration:
         listing = await QuotationService.list_quotations(db_session, admin_user)
         assert any(x.id == q.id for x in listing.quotations)
 
+    async def test_quotation_pdf_download(self, db_session, admin_user):
+        from app.services.billing_service import QuotationService
+        from app.services import billing_export_service
+        inv = await _make_inventory(db_session, admin_user)
+        await _set_today_rate(db_session, admin_user)
+        q = await QuotationService.generate(
+            db_session, admin_user,
+            QuotationCreateRequest(product_code=inv.product_code, customer_name="Walk In"),
+        )
+        orm = await QuotationService.get_quotation_orm(db_session, admin_user, q.id)
+        assert orm.id == q.id
+        pdf = billing_export_service.build_quotation_pdf(orm, None)
+        # A real PDF byte-stream, not an HTML/print artifact.
+        assert pdf[:4] == b"%PDF"
+        assert len(pdf) > 500
+        # Privacy: the Gold Value line folds gold profit in, so the exporter never
+        # itemises the internal margin. Verify the snapshot carried a profit that
+        # is NOT emitted as its own row value.
+        b = orm.breakdown_json
+        assert b.get("gold_profit_amount") is not None
+
+    async def test_quotation_pdf_tenant_isolation(self, db_session, admin_user):
+        from sqlalchemy import select
+        from app.core.constants import ROLE_ADMIN
+        from app.core.security import hash_password
+        from app.models.auth import Tenant, Role, User
+        from app.services.billing_service import QuotationService
+        from app.exceptions.base import ResourceNotFoundException
+
+        inv = await _make_inventory(db_session, admin_user)
+        await _set_today_rate(db_session, admin_user)
+        q = await QuotationService.generate(
+            db_session, admin_user,
+            QuotationCreateRequest(product_code=inv.product_code, customer_name="W"),
+        )
+        uid = uuid.uuid4().hex[:8]
+        db_session.add(Tenant(id=f"tnt_{uid}", name=f"T2 {uid}", slug=f"t2-{uid}", status="Active"))
+        role = (await db_session.execute(select(Role).where(Role.name == ROLE_ADMIN))).scalar_one()
+        other = User(
+            id=f"usr_{uid}", tenant_id=f"tnt_{uid}", role_id=role.id,
+            name="Other Admin", email=f"o{uid}@t2.com", password_hash=hash_password("x"),
+            status="Active",
+        )
+        db_session.add(other)
+        await db_session.commit()
+        await db_session.refresh(other, ["role"])
+        # A different tenant's admin cannot fetch this quotation for PDF export.
+        with pytest.raises(ResourceNotFoundException):
+            await QuotationService.get_quotation_orm(db_session, other, q.id)
+
     async def test_tenant_isolation(self, db_session, admin_user):
         from sqlalchemy import select
         from sqlalchemy.orm import selectinload

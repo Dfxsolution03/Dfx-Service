@@ -240,12 +240,17 @@ class SaleRepository:
         customer_id: Optional[str] = None,
         product_code: Optional[str] = None,
         category: Optional[str] = None,
+        purity: Optional[str] = None,
+        subcategory: Optional[str] = None,
     ) -> Tuple[List[Sale], int, float]:
         conditions = [Sale.tenant_id == tenant_id]
         if payment_status:
             conditions.append(Sale.payment_status == payment_status)
         if sale_status:
             conditions.append(Sale.sale_status == sale_status)
+        # Purity is frozen on the Sale snapshot itself (exact match, e.g. "22K").
+        if purity:
+            conditions.append(Sale.purity == purity)
         # Phase 5 — sales-history filters: exact customer, exact product code, and
         # product category. Sale has no category column, so category resolves
         # through the linked inventory item (tenant-scoped subquery — no join
@@ -260,6 +265,18 @@ class SaleRepository:
                     select(InventoryItem.id).where(
                         InventoryItem.tenant_id == tenant_id,
                         func.lower(InventoryItem.category) == category.lower(),
+                    )
+                )
+            )
+        # Subcategory resolves through the linked inventory item too (no column on
+        # Sale) — same tenant-scoped subquery shape as category, so the COUNT and
+        # the gold-weight/outstanding aggregates all stay correct.
+        if subcategory:
+            conditions.append(
+                Sale.inventory_item_id.in_(
+                    select(InventoryItem.id).where(
+                        InventoryItem.tenant_id == tenant_id,
+                        func.lower(InventoryItem.subcategory) == subcategory.lower(),
                     )
                 )
             )
