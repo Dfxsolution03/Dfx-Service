@@ -1547,11 +1547,23 @@ class SaleService:
         category: Optional[str] = None,
         purity: Optional[str] = None,
         subcategory: Optional[str] = None,
+        period: Optional[str] = None,
     ) -> SaleListResponse:
         if not current_user.tenant_id:
             raise ForbiddenException("Tenant context required")
+        # A named `period` (This Month, etc.) is resolved to a real date window
+        # through the SAME business logic Business History uses — never a second
+        # date computation. An explicit date_from/date_to range wins over period
+        # (matches _resolve_period_range precedence); the resolved window then
+        # flows through the normal date filter, so count/list/gold-weight all
+        # share it and pagination never changes the aggregate.
+        eff_from, eff_to = date_from, date_to
+        if period and not date_from and not date_to:
+            eff_from, eff_to, _ = SaleService._resolve_period_range(
+                datetime.now(IST).date(), period, None, None
+            )
         sales, total, total_gold_weight_grams, total_outstanding = await SaleRepository.list_by_tenant(
-            db, current_user.tenant_id, page, limit, search, date_from, date_to,
+            db, current_user.tenant_id, page, limit, search, eff_from, eff_to,
             payment_status, sale_status, customer_id, product_code, category,
             purity, subcategory,
         )

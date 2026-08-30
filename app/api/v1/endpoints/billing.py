@@ -653,12 +653,16 @@ async def list_sales(
     subcategory: Optional[str] = Query(
         None, description="Product sub-category filter (resolved via the linked inventory item)."
     ),
+    period: Optional[str] = Query(
+        None,
+        description="Named period (e.g. this_month) resolved server-side to a date window; an explicit date_from/date_to range takes precedence.",
+    ),
     current_user: User = Depends(require_admin_or_staff_module("billing_sales_history")),
     db: AsyncSession = Depends(get_async_db),
 ):
     result = await SaleService.list_sales(
         db, current_user, page, limit, search, date_from, date_to, payment_status, sale_status,
-        customer_id, product_code, category, purity, subcategory,
+        customer_id, product_code, category, purity, subcategory, period,
     )
     return StandardSuccessResponse(
         success=True,
